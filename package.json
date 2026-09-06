@@ -1,0 +1,56 @@
+{
+  "name": "@colrealpro/react-luau-doctor",
+  "publishConfig": {
+    "access": "public"
+  },
+  "version": "0.17.1",
+  "description": "Static analysis for React-Luau hooks, effects, rendering, and performance.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "react-luau-doctor": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "vendor",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "docs"
+  ],
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "check": "bunx tsc -p tsconfig.json --noEmit",
+    "test": "bun run build && bun test",
+    "doctor:example": "bun run src/cli.ts examples",
+    "prepack": "bun run build && bun run check",
+    "ci": "bun run build && bun run check && bun test && bun run scripts/verify-package.ts",
+    "verify:package": "bun run build && bun run scripts/verify-package.ts"
+  },
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "packageManager": "bun@1.4.0",
+  "dependencies": {
+    "web-tree-sitter": "0.26.11"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "typescript": "5.8.3"
+  },
+  "keywords": [
+    "roblox",
+    "react-luau",
+    "luau",
+    "linter",
+    "static-analysis"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/colrealpro/react-luau-doctor.git"
+  },
+  "homepage": "https://github.com/colrealpro/react-luau-doctor#readme",
+  "bugs": {
+    "url": "https://github.com/colrealpro/react-luau-doctor/issues"
+  }
+}

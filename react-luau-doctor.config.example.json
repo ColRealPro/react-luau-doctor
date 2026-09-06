@@ -1,0 +1,13 @@
+{
+  "include": ["src/**/*.lua", "src/**/*.luau"],
+  "ignore": ["src/Generated/**"],
+  "scope": "full",
+  "blocking": "error",
+  "verbose": false,
+  "warnings": true,
+  "respectInlineDisables": true,
+  "rules": {
+    "react-luau/exhaustive-deps": "warning",
+    "react-luau/unstable-context-value": "off"
+  }
+}
