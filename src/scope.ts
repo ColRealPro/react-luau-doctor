@@ -28,6 +28,7 @@ export interface ScopedScanOptions {
   deadlineAt?: number;
   onProgress?: (progress: ScanProgress) => void;
   cache?: boolean;
+  parallel?: boolean;
   analysisSession?: ScanAnalysisSession;
 }
 
@@ -85,6 +86,7 @@ function sharedScanOptions(options: ScopedScanOptions, projectRoot: string, phas
     onProgress: options.onProgress,
     progressPhase: phase,
     cache: options.cache,
+    parallel: options.parallel,
     analysisSession: options.analysisSession,
   };
 }

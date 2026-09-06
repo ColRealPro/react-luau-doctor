@@ -1,8 +1,5 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { createRuleContext } from "./ast/context";
-import { buildReactModel } from "./ast/react-model";
 import {
   cacheHasSameFileSet,
   cachedEffectModules,
@@ -19,31 +16,23 @@ import {
   saveProjectCache,
   stableCacheKey,
 } from "./cache";
-import { effectiveSeverity, loadConfig } from "./config";
+import { loadConfig } from "./config";
 import { discoverLuauFiles } from "./files";
-import { createInlineSuppressionChecker } from "./inline-disables";
-import { parseLuau } from "./parser";
+import { analyzeReactFile, type ReactFileAnalysisInput, type ReactFileAnalysisResult } from "./file-analysis";
+import { AnalysisWorkerPool, analysisWorkerCount } from "./parallel";
 import { buildProjectModel, type ProjectModelModuleCacheEntry } from "./project-model";
 import { buildProjectSourceEffects, type CachedSourceEffectModule, type ProjectEffectParseCacheEntry } from "./project-effects";
 import { rules } from "./rules";
 import type {
   Diagnostic,
-  DiagnosticInput,
   DoctorConfig,
   ScanFileInput,
   ScanOptions,
   ScanReport,
   Severity,
-  SourceFile,
 } from "./types";
 
 const REACT_SOURCE_MARKER = /\bReact(?:Roblox)?\b/i;
-
-export const SEVERITY_RANK: Record<Severity, number> = {
-  suggestion: 0,
-  warning: 1,
-  error: 2,
-};
 
 export interface ScanAnalysisSession {
   projectModelModules: Map<string, ProjectModelModuleCacheEntry>;
@@ -55,42 +44,6 @@ export function createScanAnalysisSession(): ScanAnalysisSession {
 }
 
 type ScanRuntimeOptions = ScanOptions & { analysisSession?: ScanAnalysisSession };
-
-function diagnosticId(file: string, rule: string, startIndex: number, message: string): string {
-  return crypto.createHash("sha256").update(`${file}\0${rule}\0${startIndex}\0${message}`).digest("hex").slice(0, 16);
-}
-
-function nodeLocation(node: DiagnosticInput["node"]): Diagnostic["location"] {
-  return {
-    line: node.startPosition.row + 1,
-    column: node.startPosition.column + 1,
-    endLine: node.endPosition.row + 1,
-    endColumn: node.endPosition.column + 1,
-  };
-}
-
-function toDiagnostic(
-  file: SourceFile,
-  ruleId: string,
-  category: Diagnostic["category"],
-  severity: Severity,
-  input: DiagnosticInput,
-): Diagnostic {
-  const node = input.node;
-  const highlights = input.highlights?.map(nodeLocation);
-  return {
-    id: diagnosticId(file.relativePath, ruleId, node.startIndex, input.message),
-    rule: ruleId,
-    category,
-    severity: input.severity ?? severity,
-    message: input.message,
-    help: input.help,
-    file: file.relativePath,
-    location: nodeLocation(node),
-    highlights: highlights && highlights.length > 0 ? highlights : undefined,
-    fixPreview: input.fixPreview,
-  };
-}
 
 export function scoreDiagnostics(diagnostics: Diagnostic[], scannedFiles: number): number {
   const weightedFindings = diagnostics.reduce((total, diagnostic) => {
@@ -233,7 +186,6 @@ export async function scanPath(target = ".", options: ScanRuntimeOptions = {}): 
   );
 
   const deadlineAt = options.deadlineAt ?? (options.maxDurationMs !== undefined ? startedAt + options.maxDurationMs : undefined);
-  const categorySet = options.categories && options.categories.length > 0 ? new Set(options.categories) : null;
   const respectInlineDisables = options.respectInlineDisables ?? config.respectInlineDisables ?? true;
   const minSeverity = options.minSeverity ?? "suggestion";
   const reportCacheKey = stableCacheKey({
@@ -344,71 +296,95 @@ export async function scanPath(target = ".", options: ScanRuntimeOptions = {}): 
   }
 
   let processedCandidates = 0;
-  progress("scan", incrementalReuse ? "Scanning affected React files" : "Scanning React files", 0, scanCandidates.length);
+  const scanLabel = incrementalReuse ? "Scanning affected React files" : "Scanning React files";
+  progress("scan", scanLabel, 0, scanCandidates.length);
 
-  for (let candidateIndex = 0; candidateIndex < scanCandidates.length; candidateIndex += 1) {
-    const candidate = scanCandidates[candidateIndex];
+  const applyResult = (result: ReactFileAnalysisResult): void => {
+    recordReactFile(cacheSession, result.relativePath, result.isReactFile);
+    if (result.scanned) scannedFiles += 1;
+    diagnostics.push(...result.diagnostics);
+  };
+
+  const prepareCandidate = (candidate: ScanFileInput): { input: ReactFileAnalysisInput; tree?: ProjectEffectParseCacheEntry["tree"] } | null => {
     const relativePath = normalizeRelative(candidate.relativePath ?? path.relative(root, candidate.absolutePath));
+    if (candidate.source === undefined && !fs.existsSync(candidate.absolutePath)) return null;
+    const forceScan = candidate.forceScan ?? targetStat.isFile();
+    const cached = projectParseCache.get(relativePath);
+    if (!forceScan && !cached && !changedFiles.includes(relativePath) && knownReactFile(cacheSession, relativePath) === false) return null;
 
-    if (deadlineAt !== undefined && performance.now() >= deadlineAt) {
-      for (const remaining of scanCandidates.slice(candidateIndex)) {
-        skippedFiles.push(normalizeRelative(remaining.relativePath ?? path.relative(root, remaining.absolutePath)));
-      }
-      progress("scan", incrementalReuse ? "Scanning affected React files" : "Scanning React files", processedCandidates, scanCandidates.length, relativePath, true);
-      break;
+    const source = candidate.source ?? cached?.source ?? cacheSession.sources.get(relativePath) ?? fs.readFileSync(candidate.absolutePath, "utf8");
+    if (!forceScan && !REACT_SOURCE_MARKER.test(source)) {
+      recordReactFile(cacheSession, relativePath, false);
+      return null;
     }
 
-    try {
-      if (candidate.source === undefined && !fs.existsSync(candidate.absolutePath)) continue;
-      const forceScan = candidate.forceScan ?? targetStat.isFile();
-      const cached = projectParseCache.get(relativePath);
-      if (!forceScan && !cached && !changedFiles.includes(relativePath) && knownReactFile(cacheSession, relativePath) === false) continue;
-
-      const source = candidate.source ?? cached?.source ?? cacheSession.sources.get(relativePath) ?? fs.readFileSync(candidate.absolutePath, "utf8");
-
-      if (!forceScan && !REACT_SOURCE_MARKER.test(source)) {
-        recordReactFile(cacheSession, relativePath, false);
-        continue;
-      }
-      
-      const tree = cached && cached.source === source ? cached.tree : await parseLuau(source);
-      const model = buildReactModel(tree.rootNode);
-      recordReactFile(cacheSession, relativePath, model.isReactFile);
-      if (!forceScan && !model.isReactFile) continue;
-
-      scannedFiles += 1;
-      const file: SourceFile = {
+    return {
+      input: {
         absolutePath: candidate.absolutePath,
         relativePath,
         source,
-        tree,
-        root: tree.rootNode,
-        model,
+        forceScan,
         project,
-      };
-      const context = createRuleContext(file);
-      const isSuppressed = respectInlineDisables ? createInlineSuppressionChecker(source) : () => false;
+        config,
+        categories: options.categories,
+        minSeverity,
+        respectInlineDisables,
+      },
+      tree: cached && cached.source === source ? cached.tree : undefined,
+    };
+  };
 
-      for (const rule of rules) {
-        if (categorySet && !categorySet.has(rule.category)) continue;
-        const severity = effectiveSeverity(rule.severity, rule.id, config);
-        if (!severity) continue;
-        const findings = rule.run(context);
-        for (const finding of findings) {
-          const configuredSeverity = config.rules?.[rule.id];
-          const diagnostic = toDiagnostic(file, rule.id, rule.category, severity, {
-            ...finding,
-            severity: configuredSeverity && configuredSeverity !== "off" ? severity : finding.severity,
-          });
-          if (SEVERITY_RANK[diagnostic.severity] < SEVERITY_RANK[minSeverity]) continue;
-          if (isSuppressed(diagnostic.rule, diagnostic.location.line)) continue;
-          diagnostics.push(diagnostic);
-        }
-        if (rule.id === "react-luau/parse-error" && findings.length > 0) break;
+  const parallelEnabled = options.parallel !== false && deadlineAt === undefined;
+  if (parallelEnabled) {
+    const prepared = scanCandidates.map(prepareCandidate).filter((value) => value !== null);
+    const workerCount = analysisWorkerCount(prepared.length);
+
+    if (workerCount > 1) {
+      let completed = scanCandidates.length - prepared.length;
+      progress("scan", scanLabel, completed, scanCandidates.length);
+      const pool = new AnalysisWorkerPool(workerCount);
+      try {
+        const results = await pool.scanReactFiles(
+          prepared.map((entry) => entry.input),
+          (count, file) => {
+            completed += count;
+            progress("scan", scanLabel, Math.min(completed, scanCandidates.length), scanCandidates.length, file);
+          },
+        );
+        for (const result of results) applyResult(result);
+      } finally {
+        await pool.close();
       }
-    } finally {
-      processedCandidates = candidateIndex + 1;
-      progress("scan", incrementalReuse ? "Scanning affected React files" : "Scanning React files", processedCandidates, scanCandidates.length, relativePath);
+      processedCandidates = scanCandidates.length;
+      progress("scan", scanLabel, processedCandidates, scanCandidates.length);
+    } else {
+      for (const entry of prepared) {
+        applyResult(await analyzeReactFile(entry.input, entry.tree));
+        processedCandidates += 1;
+        progress("scan", scanLabel, processedCandidates, prepared.length, entry.input.relativePath);
+      }
+    }
+  } else {
+    for (let candidateIndex = 0; candidateIndex < scanCandidates.length; candidateIndex += 1) {
+      const candidate = scanCandidates[candidateIndex];
+      const relativePath = normalizeRelative(candidate.relativePath ?? path.relative(root, candidate.absolutePath));
+
+      if (deadlineAt !== undefined && performance.now() >= deadlineAt) {
+        for (const remaining of scanCandidates.slice(candidateIndex)) {
+          skippedFiles.push(normalizeRelative(remaining.relativePath ?? path.relative(root, remaining.absolutePath)));
+        }
+        progress("scan", scanLabel, processedCandidates, scanCandidates.length, relativePath, true);
+        break;
+      }
+
+      try {
+        const prepared = prepareCandidate(candidate);
+        if (!prepared) continue;
+        applyResult(await analyzeReactFile(prepared.input, prepared.tree));
+      } finally {
+        processedCandidates = candidateIndex + 1;
+        progress("scan", scanLabel, processedCandidates, scanCandidates.length, relativePath);
+      }
     }
   }
 

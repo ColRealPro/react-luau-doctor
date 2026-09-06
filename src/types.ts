@@ -209,6 +209,7 @@ export interface ScanOptions {
   onProgress?: (progress: ScanProgress) => void;
   progressPhase?: string;
   cache?: boolean;
+  parallel?: boolean;
 }
 
 export interface ScanReport {

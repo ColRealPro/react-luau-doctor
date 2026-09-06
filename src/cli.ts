@@ -55,6 +55,7 @@ interface CliOptions {
   warnings?: boolean;
   noColor: boolean;
   noCache: boolean;
+  noParallel: boolean;
   annotations: boolean;
   minSeverity?: Severity;
   help: boolean;
@@ -105,6 +106,7 @@ Scan options:
   --annotations                          Emit GitHub Actions workflow annotations
   --no-color                             Disable automatic ANSI colors
   --no-cache                             Disable the persistent OS-level analysis cache
+  --no-parallel                          Disable parallel file analysis
 
 React-Luau Doctor options:
   --min-severity <level>                 suggestion, warning, or error
@@ -580,6 +582,7 @@ function parseArgs(argv: string[]): CliOptions {
     annotations: false,
     noColor: false,
     noCache: false,
+    noParallel: false,
     help: false,
     version: false,
   };
@@ -603,6 +606,7 @@ function parseArgs(argv: string[]): CliOptions {
     else if (arg === "--no-warnings") options.warnings = false;
     else if (arg === "--no-color") options.noColor = true;
     else if (arg === "--no-cache") options.noCache = true;
+    else if (arg === "--no-parallel") options.noParallel = true;
     else if (arg === "--annotations") options.annotations = true;
     else if (arg === "--help" || arg === "-h") options.help = true;
     else if (arg === "--version" || arg === "-v") options.version = true;
@@ -1264,6 +1268,7 @@ async function runScan(
         deadlineAt,
         onProgress: projectProgress,
         cache: !options.noCache,
+        parallel: !options.noParallel,
       });
       report.scope = "full";
     } else {
@@ -1281,6 +1286,7 @@ async function runScan(
         deadlineAt,
         onProgress: projectProgress,
         cache: !options.noCache,
+        parallel: !options.noParallel,
       });
     }
     reports.push({ projectRoot, report });
@@ -1296,7 +1302,7 @@ async function runScan(
       `[debug] scope=${report.scope ?? scope} base=${report.base ?? resolvedScope.base ?? "auto"}`,
       `[debug] projects=${projectTargets.map(({ projectRoot }) => path.relative(displayRoot, projectRoot) || ".").join(",")}`,
       `[debug] candidates=${report.candidateFiles ?? 0} scanned=${report.scannedFiles} partial=${Boolean(report.partial)}`,
-      `[debug] parallel=false`,
+      `[debug] parallel=${!options.noParallel}`,
     ];
     process.stderr.write(`${debugLines.join("\n")}\n`);
   }

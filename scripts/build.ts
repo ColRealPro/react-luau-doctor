@@ -6,7 +6,7 @@ const outdir = path.join(root, "dist");
 fs.rmSync(outdir, { recursive: true, force: true });
 
 const result = await Bun.build({
-  entrypoints: [path.join(root, "src", "cli.ts")],
+  entrypoints: [path.join(root, "src", "cli.ts"), path.join(root, "src", "scan-worker.ts")],
   outdir,
   target: "bun",
   format: "esm",
