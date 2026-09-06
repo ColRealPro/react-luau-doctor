@@ -222,6 +222,11 @@ export async function scanPath(target = ".", options: ScanRuntimeOptions = {}): 
   const projectParseCache = new Map<string, ProjectEffectParseCacheEntry>();
   const fileHashes = Object.fromEntries(Object.entries(cacheSession.files).map(([file, state]) => [file, state.hash]));
   const materializedCandidates = materializeProjectCandidates(cacheSession, modelCandidates);
+  const parallelEnabled = options.parallel !== false && deadlineAt === undefined;
+  const workerCount = parallelEnabled ? analysisWorkerCount(Math.max(materializedCandidates.length, candidates.length)) : 1;
+  const workerPool = workerCount > 1 ? new AnalysisWorkerPool(workerCount) : null;
+
+  try {
   let project = cachedProjectModel(cacheSession);
   if (project && !options.analysisSession) {
     progress("project-cache", "Loading cached project analysis", 1, 1);
@@ -264,6 +269,7 @@ export async function scanPath(target = ".", options: ScanRuntimeOptions = {}): 
       },
       fileHashes,
       previousEffectModules,
+      workerPool ?? undefined,
     );
     project.sourceEffects = effectBuild.effects;
     cacheSession.effectModules = effectBuild.cacheModules;
@@ -334,27 +340,19 @@ export async function scanPath(target = ".", options: ScanRuntimeOptions = {}): 
     };
   };
 
-  const parallelEnabled = options.parallel !== false && deadlineAt === undefined;
   if (parallelEnabled) {
     const prepared = scanCandidates.map(prepareCandidate).filter((value) => value !== null);
-    const workerCount = analysisWorkerCount(prepared.length);
-
-    if (workerCount > 1) {
+    if (workerPool && prepared.length >= 16) {
       let completed = scanCandidates.length - prepared.length;
       progress("scan", scanLabel, completed, scanCandidates.length);
-      const pool = new AnalysisWorkerPool(workerCount);
-      try {
-        const results = await pool.scanReactFiles(
-          prepared.map((entry) => entry.input),
-          (count, file) => {
-            completed += count;
-            progress("scan", scanLabel, Math.min(completed, scanCandidates.length), scanCandidates.length, file);
-          },
-        );
-        for (const result of results) applyResult(result);
-      } finally {
-        await pool.close();
-      }
+      const results = await workerPool.scanReactFiles(
+        prepared.map((entry) => entry.input),
+        (count, file) => {
+          completed += count;
+          progress("scan", scanLabel, Math.min(completed, scanCandidates.length), scanCandidates.length, file);
+        },
+      );
+      for (const result of results) applyResult(result);
       processedCandidates = scanCandidates.length;
       progress("scan", scanLabel, processedCandidates, scanCandidates.length);
     } else {
@@ -420,4 +418,7 @@ export async function scanPath(target = ".", options: ScanRuntimeOptions = {}): 
   );
 
   return report;
+  } finally {
+    await workerPool?.close();
+  }
 }

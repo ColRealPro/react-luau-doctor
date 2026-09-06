@@ -9,6 +9,7 @@ import {
   type ModuleIdentity,
 } from "./module-resolution";
 import { parseLuau } from "./parser";
+import type { AnalysisWorkerPool } from "./parallel";
 import type { ScanFileInput, SourceEffectModuleSummary } from "./types";
 
 
@@ -39,6 +40,24 @@ export interface CachedSourceEffectModule {
 export interface ProjectSourceEffectsBuildResult {
   effects: Map<string, SourceEffectModuleSummary>;
   cacheModules: Record<string, CachedSourceEffectModule>;
+}
+
+export interface EffectWorkerIndexInput extends ModuleIdentity {
+  relativePath: string;
+  source: string;
+}
+
+export interface IndexedEffectWorkerModule {
+  id: string;
+  relativePath: string;
+  importedModuleIds: string[];
+  instanceFactories: string[];
+  exportedFunctionId?: string;
+}
+
+export interface AnalyzedEffectWorkerModule {
+  id: string;
+  functions: CachedSourceEffectFunction[];
 }
 
 export type ProjectEffectsProgressPhase =
@@ -76,6 +95,13 @@ interface FunctionRecord {
   parameters: string[];
   directEffect: boolean;
   dependencies: Set<string>;
+}
+
+export interface EffectWorkerState {
+  relativePath: string;
+  source: string;
+  record: ParsedRecord;
+  functions: FunctionRecord[];
 }
 
 function normalizeRelative(value: string): string {
@@ -364,6 +390,74 @@ function analyzeFunction(
   }
 }
 
+export async function indexEffectModuleForWorker(
+  input: EffectWorkerIndexInput,
+  moduleAliases: Map<string, string>,
+): Promise<{ indexed: IndexedEffectWorkerModule; state: EffectWorkerState; tree: Tree }> {
+  const tree = await parseLuau(input.source);
+  const imports = new Map<string, string>();
+  for (const match of input.source.matchAll(/\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)/gs)) {
+    const moduleId = resolveModuleReference(normalizeRequireTarget(match[2]), moduleAliases);
+    if (moduleId) imports.set(match[1], moduleId);
+  }
+
+  const record: ParsedRecord = {
+    id: input.id,
+    keys: input.keys,
+    source: input.source,
+    tree,
+    exportName: topLevelReturnName(tree.rootNode),
+    imports,
+  };
+  const functions = topLevelFunctionRecords(record);
+  const instanceFactories: string[] = [];
+  for (const fn of functions) {
+    if (fn.memberName && returnedFactoryMember(fn, record.exportName)) instanceFactories.push(fn.memberName);
+  }
+  const exportedFunctionId = functions.find((fn) => fn.exported && !fn.memberName)?.id;
+
+  return {
+    indexed: {
+      id: input.id,
+      relativePath: input.relativePath,
+      importedModuleIds: [...new Set(imports.values())].sort(),
+      instanceFactories: instanceFactories.sort(),
+      exportedFunctionId,
+    },
+    state: { relativePath: input.relativePath, source: input.source, record, functions },
+    tree,
+  };
+}
+
+export function analyzeEffectModuleForWorker(
+  state: EffectWorkerState,
+  moduleSummaries: Map<string, SourceEffectModuleSummary>,
+  exportedFunctions: Map<string, string>,
+): AnalyzedEffectWorkerModule {
+  const localFunctions = new Map<string, string>();
+  const memberFunctions = new Map<string, string>();
+  for (const fn of state.functions) {
+    if (fn.localName) localFunctions.set(fn.localName, fn.id);
+    if (fn.memberName) memberFunctions.set(fn.memberName, fn.id);
+  }
+  const moduleInstances = moduleLevelInstanceAliases(state.record, moduleSummaries);
+  for (const fn of state.functions) {
+    analyzeFunction(fn, state.record, localFunctions, memberFunctions, moduleSummaries, moduleInstances, exportedFunctions);
+  }
+  return {
+    id: state.record.id,
+    functions: state.functions.map((fn) => ({
+      id: fn.id,
+      moduleId: fn.moduleId,
+      localName: fn.localName,
+      memberName: fn.memberName,
+      exported: fn.exported,
+      directEffect: fn.directEffect,
+      dependencies: [...fn.dependencies].sort(),
+    })),
+  };
+}
+
 export async function buildProjectSourceEffects(
   root: string,
   candidates: ScanFileInput[],
@@ -371,6 +465,7 @@ export async function buildProjectSourceEffects(
   onProgress?: (progress: ProjectEffectsProgress) => void,
   fileHashes: Readonly<Record<string, string>> = {},
   cachedModules: Readonly<Record<string, CachedSourceEffectModule>> = {},
+  workerPool?: AnalysisWorkerPool,
 ): Promise<ProjectSourceEffectsBuildResult> {
   interface CandidateIdentity extends ModuleIdentity {
     relativePath: string;
@@ -416,115 +511,188 @@ export async function buildProjectSourceEffects(
     }
   }
 
-  const rawRecords = new Map<string, ParsedRecord>();
-  onProgress?.({ phase: "parse", current: 0, total: candidates.length });
-  for (let candidateIndex = 0; candidateIndex < identities.length; candidateIndex += 1) {
-    const identity = identities[candidateIndex];
-    const { candidate, relativePath } = identity;
-    try {
-      if (!dirtyIds.has(identity.id)) continue;
-      if (candidate.source === undefined && !fs.existsSync(candidate.absolutePath)) continue;
-      const source = candidate.source ?? fs.readFileSync(candidate.absolutePath, "utf8");
-      const tree = await parseLuau(source);
-      parseCache?.set(relativePath, { source, tree });
-      const imports = new Map<string, string>();
-      for (const match of source.matchAll(/\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)/gs)) {
-        const moduleId = resolveModuleReference(normalizeRequireTarget(match[2]), moduleAliases);
-        if (moduleId) imports.set(match[1], moduleId);
-      }
-      rawRecords.set(identity.id, {
-        id: identity.id,
-        keys: identity.keys,
-        source,
-        tree,
-        exportName: topLevelReturnName(tree.rootNode),
-        imports,
-      });
-    } catch {
-      // Parse diagnostics are handled by the normal scanner. An unparseable module
-      // simply cannot contribute source-derived effect information.
-    } finally {
-      onProgress?.({ phase: "parse", current: candidateIndex + 1, total: candidates.length, file: relativePath });
-    }
-  }
-
-  const functionIndexTotal = Math.max(1, identities.length * 2);
-  onProgress?.({ phase: "index-functions", current: 0, total: functionIndexTotal });
-
-  const functionsByModule = new Map<string, FunctionRecord[]>();
   const cachedFunctionStates = new Map<string, CachedSourceEffectFunction[]>();
+  const analyzedFunctionStatesByModule = new Map<string, CachedSourceEffectFunction[]>();
   const importedModuleIdsByModule = new Map<string, string[]>();
   const summariesByModuleId = new Map<string, SourceEffectModuleSummary>();
+  const exportedFunctions = new Map<string, string>();
 
-  for (const identity of identities) {
-    const record = rawRecords.get(identity.id);
-    if (record) {
-      const functions = topLevelFunctionRecords(record);
-      functionsByModule.set(identity.id, functions);
-      importedModuleIdsByModule.set(identity.id, [...new Set(record.imports.values())].sort());
-      const summary: SourceEffectModuleSummary = {
-        effectfulMembers: new Set<string>(),
-        effectfulExport: false,
-        instanceFactories: new Set<string>(),
-      };
-      for (const fn of functions) {
-        if (fn.memberName && returnedFactoryMember(fn, record.exportName)) summary.instanceFactories.add(fn.memberName);
+  if (workerPool && dirtyIds.size >= 16) {
+    const workerInputs: EffectWorkerIndexInput[] = [];
+    for (const identity of identities) {
+      if (!dirtyIds.has(identity.id)) continue;
+      const { candidate } = identity;
+      if (candidate.source === undefined && !fs.existsSync(candidate.absolutePath)) continue;
+      workerInputs.push({
+        id: identity.id,
+        keys: identity.keys,
+        relativePath: identity.relativePath,
+        source: candidate.source ?? fs.readFileSync(candidate.absolutePath, "utf8"),
+      });
+    }
+
+    let parsedCount = identities.length - workerInputs.length;
+    onProgress?.({ phase: "parse", current: parsedCount, total: candidates.length });
+    const indexedModules = await workerPool.indexEffectModules(workerInputs, moduleAliases, (count, file) => {
+      parsedCount += count;
+      onProgress?.({ phase: "parse", current: Math.min(parsedCount, candidates.length), total: candidates.length, file });
+    });
+    onProgress?.({ phase: "parse", current: candidates.length, total: candidates.length });
+
+    const indexedById = new Map(indexedModules.map((module) => [module.id, module] as const));
+    const functionIndexTotal = Math.max(1, identities.length * 2);
+    onProgress?.({ phase: "index-functions", current: 0, total: functionIndexTotal });
+
+    for (let identityIndex = 0; identityIndex < identities.length; identityIndex += 1) {
+      const identity = identities[identityIndex];
+      const indexed = indexedById.get(identity.id);
+      if (indexed) {
+        importedModuleIdsByModule.set(identity.id, indexed.importedModuleIds);
+        summariesByModuleId.set(identity.id, {
+          effectfulMembers: new Set<string>(),
+          effectfulExport: false,
+          instanceFactories: new Set(indexed.instanceFactories),
+        });
+        if (indexed.exportedFunctionId) exportedFunctions.set(identity.id, indexed.exportedFunctionId);
+      } else {
+        const cached = cachedModules[identity.relativePath];
+        const functions = cached?.functions ?? [];
+        cachedFunctionStates.set(identity.id, functions);
+        importedModuleIdsByModule.set(identity.id, cached?.importedModuleIds ?? []);
+        summariesByModuleId.set(identity.id, {
+          effectfulMembers: new Set<string>(),
+          effectfulExport: false,
+          instanceFactories: new Set(cached?.instanceFactories ?? []),
+        });
+        const exported = functions.find((fn) => fn.exported && !fn.memberName);
+        if (exported) exportedFunctions.set(identity.id, exported.id);
       }
-      summariesByModuleId.set(identity.id, summary);
+      if ((identityIndex & 63) === 63 || identityIndex + 1 === identities.length) {
+        onProgress?.({ phase: "index-functions", current: Math.min(functionIndexTotal, identityIndex + 1), total: functionIndexTotal });
+      }
+    }
+    onProgress?.({ phase: "index-functions", current: functionIndexTotal, total: functionIndexTotal });
+
+    const callAnalysisTotal = Math.max(1, indexedModules.length);
+    let analyzedCount = 0;
+    onProgress?.({ phase: "analyze-calls", current: 0, total: callAnalysisTotal });
+    const analyzedModules = await workerPool.analyzeEffectModules(summariesByModuleId, exportedFunctions, (count) => {
+      analyzedCount += count;
+      onProgress?.({ phase: "analyze-calls", current: Math.min(analyzedCount, callAnalysisTotal), total: callAnalysisTotal });
+    });
+    for (const module of analyzedModules) analyzedFunctionStatesByModule.set(module.id, module.functions);
+    onProgress?.({ phase: "analyze-calls", current: callAnalysisTotal, total: callAnalysisTotal });
+  } else {
+    const rawRecords = new Map<string, ParsedRecord>();
+    onProgress?.({ phase: "parse", current: 0, total: candidates.length });
+    for (let candidateIndex = 0; candidateIndex < identities.length; candidateIndex += 1) {
+      const identity = identities[candidateIndex];
+      const { candidate, relativePath } = identity;
+      try {
+        if (!dirtyIds.has(identity.id)) continue;
+        if (candidate.source === undefined && !fs.existsSync(candidate.absolutePath)) continue;
+        const source = candidate.source ?? fs.readFileSync(candidate.absolutePath, "utf8");
+        const tree = await parseLuau(source);
+        parseCache?.set(relativePath, { source, tree });
+        const imports = new Map<string, string>();
+        for (const match of source.matchAll(/\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)/gs)) {
+          const moduleId = resolveModuleReference(normalizeRequireTarget(match[2]), moduleAliases);
+          if (moduleId) imports.set(match[1], moduleId);
+        }
+        rawRecords.set(identity.id, {
+          id: identity.id,
+          keys: identity.keys,
+          source,
+          tree,
+          exportName: topLevelReturnName(tree.rootNode),
+          imports,
+        });
+      } catch {
+        // Parse diagnostics are handled by the normal scanner. An unparseable module
+        // simply cannot contribute source-derived effect information.
+      } finally {
+        onProgress?.({ phase: "parse", current: candidateIndex + 1, total: candidates.length, file: relativePath });
+      }
+    }
+
+    const functionIndexTotal = Math.max(1, identities.length * 2);
+    onProgress?.({ phase: "index-functions", current: 0, total: functionIndexTotal });
+    const functionsByModule = new Map<string, FunctionRecord[]>();
+
+    for (const identity of identities) {
+      const record = rawRecords.get(identity.id);
+      if (record) {
+        const functions = topLevelFunctionRecords(record);
+        functionsByModule.set(identity.id, functions);
+        importedModuleIdsByModule.set(identity.id, [...new Set(record.imports.values())].sort());
+        const summary: SourceEffectModuleSummary = {
+          effectfulMembers: new Set<string>(),
+          effectfulExport: false,
+          instanceFactories: new Set<string>(),
+        };
+        for (const fn of functions) {
+          if (fn.memberName && returnedFactoryMember(fn, record.exportName)) summary.instanceFactories.add(fn.memberName);
+        }
+        summariesByModuleId.set(identity.id, summary);
+      } else {
+        const cached = cachedModules[identity.relativePath];
+        cachedFunctionStates.set(identity.id, cached?.functions ?? []);
+        importedModuleIdsByModule.set(identity.id, cached?.importedModuleIds ?? []);
+        summariesByModuleId.set(identity.id, {
+          effectfulMembers: new Set<string>(),
+          effectfulExport: false,
+          instanceFactories: new Set(cached?.instanceFactories ?? []),
+        });
+      }
       const indexedCount = summariesByModuleId.size;
       if ((indexedCount & 63) === 0 || indexedCount === identities.length) {
         onProgress?.({ phase: "index-functions", current: indexedCount, total: functionIndexTotal });
       }
-      continue;
     }
 
-    const cached = cachedModules[identity.relativePath];
-    cachedFunctionStates.set(identity.id, cached?.functions ?? []);
-    importedModuleIdsByModule.set(identity.id, cached?.importedModuleIds ?? []);
-    summariesByModuleId.set(identity.id, {
-      effectfulMembers: new Set<string>(),
-      effectfulExport: false,
-      instanceFactories: new Set(cached?.instanceFactories ?? []),
-    });
-    const indexedCount = summariesByModuleId.size;
-    if ((indexedCount & 63) === 0 || indexedCount === identities.length) {
-      onProgress?.({ phase: "index-functions", current: indexedCount, total: functionIndexTotal });
+    for (let identityIndex = 0; identityIndex < identities.length; identityIndex += 1) {
+      const identity = identities[identityIndex];
+      const parsedFunctions = functionsByModule.get(identity.id);
+      if (parsedFunctions) {
+        const exported = parsedFunctions.find((fn) => fn.exported && !fn.memberName);
+        if (exported) exportedFunctions.set(identity.id, exported.id);
+      } else {
+        const exported = (cachedFunctionStates.get(identity.id) ?? []).find((fn) => fn.exported && !fn.memberName);
+        if (exported) exportedFunctions.set(identity.id, exported.id);
+      }
+      if ((identityIndex & 63) === 63 || identityIndex + 1 === identities.length) {
+        onProgress?.({ phase: "index-functions", current: identities.length + identityIndex + 1, total: functionIndexTotal });
+      }
     }
-  }
 
-  const exportedFunctions = new Map<string, string>();
-  for (let identityIndex = 0; identityIndex < identities.length; identityIndex += 1) {
-    const identity = identities[identityIndex];
-    const parsedFunctions = functionsByModule.get(identity.id);
-    if (parsedFunctions) {
-      const exported = parsedFunctions.find((fn) => fn.exported && !fn.memberName);
-      if (exported) exportedFunctions.set(identity.id, exported.id);
-    } else {
-      const exported = (cachedFunctionStates.get(identity.id) ?? []).find((fn) => fn.exported && !fn.memberName);
-      if (exported) exportedFunctions.set(identity.id, exported.id);
-    }
-    if ((identityIndex & 63) === 63 || identityIndex + 1 === identities.length) {
-      onProgress?.({ phase: "index-functions", current: identities.length + identityIndex + 1, total: functionIndexTotal });
-    }
-  }
-
-  const callAnalysisTotal = Math.max(1, rawRecords.size);
-  onProgress?.({ phase: "analyze-calls", current: 0, total: callAnalysisTotal });
-  let analyzedModuleCount = 0;
-  for (const [moduleId, record] of rawRecords) {
-    const localFunctions = new Map<string, string>();
-    const memberFunctions = new Map<string, string>();
-    for (const fn of functionsByModule.get(moduleId) ?? []) {
-      if (fn.localName) localFunctions.set(fn.localName, fn.id);
-      if (fn.memberName) memberFunctions.set(fn.memberName, fn.id);
-    }
-    const moduleInstances = moduleLevelInstanceAliases(record, summariesByModuleId);
-    for (const fn of functionsByModule.get(moduleId) ?? []) {
-      analyzeFunction(fn, record, localFunctions, memberFunctions, summariesByModuleId, moduleInstances, exportedFunctions);
-    }
-    analyzedModuleCount += 1;
-    if ((analyzedModuleCount & 31) === 0 || analyzedModuleCount === rawRecords.size) {
-      onProgress?.({ phase: "analyze-calls", current: analyzedModuleCount, total: callAnalysisTotal });
+    const callAnalysisTotal = Math.max(1, rawRecords.size);
+    onProgress?.({ phase: "analyze-calls", current: 0, total: callAnalysisTotal });
+    let analyzedModuleCount = 0;
+    for (const [moduleId, record] of rawRecords) {
+      const localFunctions = new Map<string, string>();
+      const memberFunctions = new Map<string, string>();
+      const functions = functionsByModule.get(moduleId) ?? [];
+      for (const fn of functions) {
+        if (fn.localName) localFunctions.set(fn.localName, fn.id);
+        if (fn.memberName) memberFunctions.set(fn.memberName, fn.id);
+      }
+      const moduleInstances = moduleLevelInstanceAliases(record, summariesByModuleId);
+      for (const fn of functions) {
+        analyzeFunction(fn, record, localFunctions, memberFunctions, summariesByModuleId, moduleInstances, exportedFunctions);
+      }
+      analyzedFunctionStatesByModule.set(moduleId, functions.map((fn) => ({
+        id: fn.id,
+        moduleId: fn.moduleId,
+        localName: fn.localName,
+        memberName: fn.memberName,
+        exported: fn.exported,
+        directEffect: fn.directEffect,
+        dependencies: [...fn.dependencies].sort(),
+      })));
+      analyzedModuleCount += 1;
+      if ((analyzedModuleCount & 31) === 0 || analyzedModuleCount === rawRecords.size) {
+        onProgress?.({ phase: "analyze-calls", current: analyzedModuleCount, total: callAnalysisTotal });
+      }
     }
   }
 
@@ -534,18 +702,8 @@ export async function buildProjectSourceEffects(
   const cacheModulesResult: Record<string, CachedSourceEffectModule> = {};
   let assembledCount = 0;
   for (const identity of identities) {
-    const parsedFunctions = functionsByModule.get(identity.id);
-    const states: CachedSourceEffectFunction[] = parsedFunctions
-      ? parsedFunctions.map((fn) => ({
-          id: fn.id,
-          moduleId: fn.moduleId,
-          localName: fn.localName,
-          memberName: fn.memberName,
-          exported: fn.exported,
-          directEffect: fn.directEffect,
-          dependencies: [...fn.dependencies].sort(),
-        }))
-      : (cachedFunctionStates.get(identity.id) ?? []).map((fn) => ({ ...fn, dependencies: [...fn.dependencies] }));
+    const states: CachedSourceEffectFunction[] = (analyzedFunctionStatesByModule.get(identity.id) ?? cachedFunctionStates.get(identity.id) ?? [])
+      .map((fn) => ({ ...fn, dependencies: [...fn.dependencies] }));
     for (const fn of states) functionStates.set(fn.id, fn);
     const summary = summariesByModuleId.get(identity.id)!;
     cacheModulesResult[identity.relativePath] = {

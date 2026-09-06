@@ -1,6 +1,12 @@
 import { availableParallelism } from "node:os";
 import { Worker } from "node:worker_threads";
 import type { ReactFileAnalysisInput, ReactFileAnalysisResult } from "./file-analysis";
+import type {
+  AnalyzedEffectWorkerModule,
+  EffectWorkerIndexInput,
+  IndexedEffectWorkerModule,
+} from "./project-effects";
+import type { SourceEffectModuleSummary } from "./types";
 
 export const MIN_PARALLEL_FILES = 16;
 const MAX_ANALYSIS_WORKERS = 8;
@@ -15,13 +21,36 @@ export interface ReactScanWorkerResponse {
   results: ReactFileAnalysisResult[];
 }
 
+export interface EffectIndexWorkerRequest {
+  type: "effect-index";
+  files: EffectWorkerIndexInput[];
+  moduleAliases: Map<string, string>;
+}
+
+export interface EffectIndexWorkerResponse {
+  type: "effect-index";
+  modules: IndexedEffectWorkerModule[];
+}
+
+export interface EffectAnalyzeWorkerRequest {
+  type: "effect-analyze";
+  moduleSummaries: Map<string, SourceEffectModuleSummary>;
+  exportedFunctions: Map<string, string>;
+}
+
+export interface EffectAnalyzeWorkerResponse {
+  type: "effect-analyze";
+  modules: AnalyzedEffectWorkerModule[];
+}
+
 interface WorkerErrorResponse {
   type: "error";
   message: string;
   stack?: string;
 }
 
-type WorkerResponse = ReactScanWorkerResponse | WorkerErrorResponse;
+export type AnalysisWorkerRequest = ReactScanWorkerRequest | EffectIndexWorkerRequest | EffectAnalyzeWorkerRequest;
+export type AnalysisWorkerResponse = ReactScanWorkerResponse | EffectIndexWorkerResponse | EffectAnalyzeWorkerResponse | WorkerErrorResponse;
 
 function workerUrl(): URL {
   const filename = import.meta.url.endsWith(".ts") ? "scan-worker.ts" : "scan-worker.js";
@@ -33,28 +62,72 @@ export function analysisWorkerCount(fileCount: number): number {
   return Math.max(1, Math.min(MAX_ANALYSIS_WORKERS, availableParallelism(), Math.ceil(fileCount / 8)));
 }
 
-function balanceBySourceSize(files: ReactFileAnalysisInput[], workerCount: number): ReactFileAnalysisInput[][] {
-  const batches = Array.from({ length: workerCount }, () => [] as ReactFileAnalysisInput[]);
+function balancedIndexes(files: Array<{ source: string }>, workerCount: number): number[] {
   const sizes = new Array<number>(workerCount).fill(0);
-  const ordered = [...files].sort((left, right) => right.source.length - left.source.length);
+  const indexes = new Array<number>(files.length);
+  const ordered = files.map((file, index) => ({ file, index })).sort((left, right) => right.file.source.length - left.file.source.length);
 
-  for (const file of ordered) {
+  for (const { file, index } of ordered) {
     let target = 0;
-    for (let index = 1; index < workerCount; index += 1) {
-      if (sizes[index] < sizes[target]) target = index;
+    for (let workerIndex = 1; workerIndex < workerCount; workerIndex += 1) {
+      if (sizes[workerIndex] < sizes[target]) target = workerIndex;
     }
-    batches[target].push(file);
+    indexes[index] = target;
     sizes[target] += file.source.length;
   }
 
-  return batches;
+  return indexes;
 }
 
 export class AnalysisWorkerPool {
   private readonly workers: Worker[];
+  private readonly effectOwners = new Map<string, number>();
 
   constructor(workerCount: number) {
     this.workers = Array.from({ length: workerCount }, () => new Worker(workerUrl()));
+  }
+
+  async indexEffectModules(
+    files: EffectWorkerIndexInput[],
+    moduleAliases: Map<string, string>,
+    onBatchComplete?: (count: number, file?: string) => void,
+  ): Promise<IndexedEffectWorkerModule[]> {
+    if (files.length === 0) return [];
+    const assignments = balancedIndexes(files, this.workers.length);
+    const batches = Array.from({ length: this.workers.length }, () => [] as EffectWorkerIndexInput[]);
+    for (let index = 0; index < files.length; index += 1) {
+      const owner = assignments[index];
+      const file = files[index];
+      batches[owner].push(file);
+      this.effectOwners.set(file.relativePath, owner);
+    }
+
+    const results = await Promise.all(batches.map(async (batch, index) => {
+      if (batch.length === 0) return [];
+      const response = await this.send(this.workers[index], {
+        type: "effect-index",
+        files: batch,
+        moduleAliases,
+      });
+      if (response.type !== "effect-index") throw new Error(`Unexpected analysis worker response: ${response.type}`);
+      onBatchComplete?.(batch.length, batch.at(-1)?.relativePath);
+      return response.modules;
+    }));
+    return results.flat();
+  }
+
+  async analyzeEffectModules(
+    moduleSummaries: Map<string, SourceEffectModuleSummary>,
+    exportedFunctions: Map<string, string>,
+    onBatchComplete?: (count: number) => void,
+  ): Promise<AnalyzedEffectWorkerModule[]> {
+    const results = await Promise.all(this.workers.map(async (worker) => {
+      const response = await this.send(worker, { type: "effect-analyze", moduleSummaries, exportedFunctions });
+      if (response.type !== "effect-analyze") throw new Error(`Unexpected analysis worker response: ${response.type}`);
+      onBatchComplete?.(response.modules.length);
+      return response.modules;
+    }));
+    return results.flat();
   }
 
   async scanReactFiles(
@@ -62,8 +135,36 @@ export class AnalysisWorkerPool {
     onBatchComplete?: (count: number, file?: string) => void,
   ): Promise<ReactFileAnalysisResult[]> {
     if (files.length === 0) return [];
-    const batches = balanceBySourceSize(files, Math.min(this.workers.length, files.length));
-    const results = await Promise.all(batches.map((batch, index) => this.sendReactBatch(this.workers[index], batch, onBatchComplete)));
+    const batches = Array.from({ length: this.workers.length }, () => [] as ReactFileAnalysisInput[]);
+    const sizes = new Array<number>(this.workers.length).fill(0);
+    const unassigned: ReactFileAnalysisInput[] = [];
+
+    for (const file of files) {
+      const owner = this.effectOwners.get(file.relativePath);
+      if (owner === undefined) {
+        unassigned.push(file);
+        continue;
+      }
+      batches[owner].push(file);
+      sizes[owner] += file.source.length;
+    }
+
+    for (const file of [...unassigned].sort((left, right) => right.source.length - left.source.length)) {
+      let target = 0;
+      for (let index = 1; index < this.workers.length; index += 1) {
+        if (sizes[index] < sizes[target]) target = index;
+      }
+      batches[target].push(file);
+      sizes[target] += file.source.length;
+    }
+
+    const results = await Promise.all(batches.map(async (batch, index) => {
+      if (batch.length === 0) return [];
+      const response = await this.send(this.workers[index], { type: "react-scan", files: batch });
+      if (response.type !== "react-scan") throw new Error(`Unexpected analysis worker response: ${response.type}`);
+      onBatchComplete?.(batch.length, batch.at(-1)?.relativePath);
+      return response.results;
+    }));
     return results.flat();
   }
 
@@ -71,18 +172,14 @@ export class AnalysisWorkerPool {
     await Promise.all(this.workers.map((worker) => worker.terminate()));
   }
 
-  private sendReactBatch(
-    worker: Worker,
-    files: ReactFileAnalysisInput[],
-    onBatchComplete?: (count: number, file?: string) => void,
-  ): Promise<ReactFileAnalysisResult[]> {
+  private send(worker: Worker, request: AnalysisWorkerRequest): Promise<AnalysisWorkerResponse> {
     return new Promise((resolve, reject) => {
       const cleanup = (): void => {
         worker.off("message", onMessage);
         worker.off("error", onError);
         worker.off("exit", onExit);
       };
-      const onMessage = (response: WorkerResponse): void => {
+      const onMessage = (response: AnalysisWorkerResponse): void => {
         cleanup();
         if (response.type === "error") {
           const error = new Error(response.message);
@@ -90,8 +187,7 @@ export class AnalysisWorkerPool {
           reject(error);
           return;
         }
-        onBatchComplete?.(files.length, files.at(-1)?.relativePath);
-        resolve(response.results);
+        resolve(response);
       };
       const onError = (error: Error): void => {
         cleanup();
@@ -105,7 +201,7 @@ export class AnalysisWorkerPool {
       worker.on("message", onMessage);
       worker.on("error", onError);
       worker.on("exit", onExit);
-      worker.postMessage({ type: "react-scan", files } satisfies ReactScanWorkerRequest);
+      worker.postMessage(request);
     });
   }
 }
