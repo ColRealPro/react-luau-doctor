@@ -45,6 +45,9 @@ parentPort.on("message", async (request: AnalysisWorkerRequest) => {
       for (const file of request.files) {
         const cached = treeCache.get(file.relativePath);
         results.push(await analyzeReactFile(file, cached?.source === file.source ? cached.tree : undefined));
+        if (request.reportProgress) {
+          parentPort!.postMessage({ type: "react-scan-progress", file: file.relativePath } satisfies AnalysisWorkerResponse);
+        }
       }
       parentPort!.postMessage({ type: "react-scan", results } satisfies AnalysisWorkerResponse);
       return;

@@ -347,10 +347,12 @@ export async function scanPath(target = ".", options: ScanRuntimeOptions = {}): 
       progress("scan", scanLabel, completed, scanCandidates.length);
       const results = await workerPool.scanReactFiles(
         prepared.map((entry) => entry.input),
-        (count, file) => {
-          completed += count;
-          progress("scan", scanLabel, Math.min(completed, scanCandidates.length), scanCandidates.length, file);
-        },
+        options.onProgress
+          ? (count, file) => {
+              completed += count;
+              progress("scan", scanLabel, Math.min(completed, scanCandidates.length), scanCandidates.length, file);
+            }
+          : undefined,
       );
       for (const result of results) applyResult(result);
       processedCandidates = scanCandidates.length;

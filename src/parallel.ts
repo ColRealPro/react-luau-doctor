@@ -14,6 +14,7 @@ const MAX_ANALYSIS_WORKERS = 8;
 export interface ReactScanWorkerRequest {
   type: "react-scan";
   files: ReactFileAnalysisInput[];
+  reportProgress?: boolean;
 }
 
 export interface ReactScanWorkerResponse {
@@ -43,6 +44,11 @@ export interface EffectAnalyzeWorkerResponse {
   modules: AnalyzedEffectWorkerModule[];
 }
 
+export interface ReactScanWorkerProgress {
+  type: "react-scan-progress";
+  file: string;
+}
+
 interface WorkerErrorResponse {
   type: "error";
   message: string;
@@ -50,7 +56,12 @@ interface WorkerErrorResponse {
 }
 
 export type AnalysisWorkerRequest = ReactScanWorkerRequest | EffectIndexWorkerRequest | EffectAnalyzeWorkerRequest;
-export type AnalysisWorkerResponse = ReactScanWorkerResponse | EffectIndexWorkerResponse | EffectAnalyzeWorkerResponse | WorkerErrorResponse;
+export type AnalysisWorkerResponse =
+  | ReactScanWorkerResponse
+  | ReactScanWorkerProgress
+  | EffectIndexWorkerResponse
+  | EffectAnalyzeWorkerResponse
+  | WorkerErrorResponse;
 
 function workerUrl(): URL {
   const filename = import.meta.url.endsWith(".ts") ? "scan-worker.ts" : "scan-worker.js";
@@ -160,9 +171,12 @@ export class AnalysisWorkerPool {
 
     const results = await Promise.all(batches.map(async (batch, index) => {
       if (batch.length === 0) return [];
-      const response = await this.send(this.workers[index], { type: "react-scan", files: batch });
+      const response = await this.send(
+        this.workers[index],
+        { type: "react-scan", files: batch, reportProgress: Boolean(onBatchComplete) },
+        (progress) => onBatchComplete?.(1, progress.file),
+      );
       if (response.type !== "react-scan") throw new Error(`Unexpected analysis worker response: ${response.type}`);
-      onBatchComplete?.(batch.length, batch.at(-1)?.relativePath);
       return response.results;
     }));
     return results.flat();
@@ -172,7 +186,11 @@ export class AnalysisWorkerPool {
     await Promise.all(this.workers.map((worker) => worker.terminate()));
   }
 
-  private send(worker: Worker, request: AnalysisWorkerRequest): Promise<AnalysisWorkerResponse> {
+  private send(
+    worker: Worker,
+    request: AnalysisWorkerRequest,
+    onProgress?: (progress: ReactScanWorkerProgress) => void,
+  ): Promise<AnalysisWorkerResponse> {
     return new Promise((resolve, reject) => {
       const cleanup = (): void => {
         worker.off("message", onMessage);
@@ -180,6 +198,10 @@ export class AnalysisWorkerPool {
         worker.off("exit", onExit);
       };
       const onMessage = (response: AnalysisWorkerResponse): void => {
+        if (response.type === "react-scan-progress") {
+          onProgress?.(response);
+          return;
+        }
         cleanup();
         if (response.type === "error") {
           const error = new Error(response.message);
