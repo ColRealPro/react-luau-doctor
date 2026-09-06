@@ -421,6 +421,6 @@ export async function scanPath(target = ".", options: ScanRuntimeOptions = {}): 
 
   return report;
   } finally {
-    await workerPool?.close();
+    workerPool?.close();
   }
 }

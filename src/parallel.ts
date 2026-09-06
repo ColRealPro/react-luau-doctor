@@ -182,8 +182,11 @@ export class AnalysisWorkerPool {
     return results.flat();
   }
 
-  async close(): Promise<void> {
-    await Promise.all(this.workers.map((worker) => worker.terminate()));
+  close(): void {
+    for (const worker of this.workers) {
+      worker.unref();
+      void worker.terminate().catch(() => {});
+    }
   }
 
   private send(
