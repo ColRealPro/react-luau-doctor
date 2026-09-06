@@ -79,55 +79,55 @@ function useBindingFixPreview(call: SyntaxNode): FixPreview | undefined {
   return after ? { kind: "exact", before: call.text, after } : undefined;
 }
 
-function importedBindingCandidateHooks(context: RuleContext): Map<string, BindingCandidateHookSummary> {
-  const result = new Map<string, BindingCandidateHookSummary>();
+interface ImportedBindingSummaries {
+  hooks: Map<string, BindingCandidateHookSummary>;
+  callbacks: Map<string, ExternalCallbackFunctionSummary>;
+  compatibleProps: Map<string, Set<string>>;
+}
+
+const importedBindingSummariesCache = new WeakMap<RuleContext, ImportedBindingSummaries>();
+
+function importedBindingSummaries(context: RuleContext): ImportedBindingSummaries {
+  const cached = importedBindingSummariesCache.get(context);
+  if (cached) return cached;
+
+  const result: ImportedBindingSummaries = {
+    hooks: new Map(),
+    callbacks: new Map(),
+    compatibleProps: new Map(),
+  };
 
   for (const node of context.walk(context.root)) {
     if (node.type !== "variable_declaration") continue;
     const match = node.text.match(/^\s*local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)\s*$/s);
     if (!match) continue;
-    const summary = resolveModuleReference(
-      normalizeRequireTarget(match[2]),
-      context.project.bindingCandidateHooks,
-    );
-    if (summary) result.set(match[1], summary);
+    const [, localName, target] = match;
+    const normalizedTarget = normalizeRequireTarget(target);
+
+    const hook = resolveModuleReference(normalizedTarget, context.project.bindingCandidateHooks);
+    if (hook) result.hooks.set(localName, hook);
+
+    const callback = resolveModuleReference(normalizedTarget, context.project.externalCallbackModules);
+    if (callback) result.callbacks.set(localName, callback);
+
+    const compatibleProps = resolveModuleReference(normalizedTarget, context.project.bindingCompatibleComponentProps);
+    if (compatibleProps) result.compatibleProps.set(localName, compatibleProps);
   }
 
+  importedBindingSummariesCache.set(context, result);
   return result;
+}
+
+function importedBindingCandidateHooks(context: RuleContext): Map<string, BindingCandidateHookSummary> {
+  return importedBindingSummaries(context).hooks;
 }
 
 function importedExternalCallbackFunctions(context: RuleContext): Map<string, ExternalCallbackFunctionSummary> {
-  const result = new Map<string, ExternalCallbackFunctionSummary>();
-
-  for (const node of context.walk(context.root)) {
-    if (node.type !== "variable_declaration") continue;
-    const match = node.text.match(/^\s*local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)\s*$/s);
-    if (!match) continue;
-    const summary = resolveModuleReference(
-      normalizeRequireTarget(match[2]),
-      context.project.externalCallbackModules,
-    );
-    if (summary) result.set(match[1], summary);
-  }
-
-  return result;
+  return importedBindingSummaries(context).callbacks;
 }
 
 function importedBindingCompatibleComponentProps(context: RuleContext): Map<string, Set<string>> {
-  const result = new Map<string, Set<string>>();
-
-  for (const node of context.walk(context.root)) {
-    if (node.type !== "variable_declaration") continue;
-    const match = node.text.match(/^\s*local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)\s*$/s);
-    if (!match) continue;
-    const summary = resolveModuleReference(
-      normalizeRequireTarget(match[2]),
-      context.project.bindingCompatibleComponentProps,
-    );
-    if (summary) result.set(match[1], summary);
-  }
-
-  return result;
+  return importedBindingSummaries(context).compatibleProps;
 }
 
 function declarationForCall(call: SyntaxNode): SyntaxNode | null {

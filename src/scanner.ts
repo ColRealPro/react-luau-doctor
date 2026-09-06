@@ -37,6 +37,8 @@ import type {
   SourceFile,
 } from "./types";
 
+const REACT_SOURCE_MARKER = /\bReact(?:Roblox)?\b/i;
+
 export const SEVERITY_RANK: Record<Severity, number> = {
   suggestion: 0,
   warning: 1,
@@ -363,6 +365,12 @@ export async function scanPath(target = ".", options: ScanRuntimeOptions = {}): 
       if (!forceScan && !cached && !changedFiles.includes(relativePath) && knownReactFile(cacheSession, relativePath) === false) continue;
 
       const source = candidate.source ?? cached?.source ?? cacheSession.sources.get(relativePath) ?? fs.readFileSync(candidate.absolutePath, "utf8");
+
+      if (!forceScan && !REACT_SOURCE_MARKER.test(source)) {
+        recordReactFile(cacheSession, relativePath, false);
+        continue;
+      }
+      
       const tree = cached && cached.source === source ? cached.tree : await parseLuau(source);
       const model = buildReactModel(tree.rootNode);
       recordReactFile(cacheSession, relativePath, model.isReactFile);

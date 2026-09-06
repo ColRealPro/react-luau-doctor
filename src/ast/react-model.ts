@@ -281,7 +281,8 @@ export function buildReactModel(root: SyntaxNode): ReactModel {
   const externalMutableVariablesByFunction = new Map<string, Set<string>>();
   const instanceVariablesByFunction = new Map<string, Set<string>>();
 
-  const declarations = [...walk(root)].filter((node) => node.type === "variable_declaration");
+  const allNodes = [...walk(root)];
+  const declarations = allNodes.filter((node) => node.type === "variable_declaration");
   let isReactFile = false;
 
   for (const declaration of declarations) {
@@ -298,7 +299,7 @@ export function buildReactModel(root: SyntaxNode): ReactModel {
     }
   }
 
-  for (const node of walk(root)) {
+  for (const node of allNodes) {
     if (node.type !== "function_call") continue;
     const rawPath = normalizeExpressionText(node.childForFieldName("name")?.text ?? "");
     const memberMatch = rawPath.match(/^([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)$/);
@@ -327,7 +328,7 @@ export function buildReactModel(root: SyntaxNode): ReactModel {
   const functions: FunctionInfo[] = [];
   const functionByNode = new Map<string, FunctionInfo>();
 
-  for (const node of walk(root)) {
+  for (const node of allNodes) {
     if (node.type !== "function_declaration" && node.type !== "function_definition") continue;
     const name = getFunctionName(node);
     const body = node.childForFieldName("body");
@@ -364,7 +365,7 @@ export function buildReactModel(root: SyntaxNode): ReactModel {
     }
   }
 
-  for (const call of walk(root)) {
+  for (const call of allNodes) {
     if (call.type !== "function_call") continue;
     const rawPath = call.childForFieldName("name")?.text ?? "";
     const path = resolvePath(rawPath, aliases, reactNamespaces, reactRobloxNamespaces);
@@ -469,7 +470,7 @@ export function buildReactModel(root: SyntaxNode): ReactModel {
   // React state/binding hooks can be assigned into previously declared locals.
   // The setter/Binding contracts are still stable even when the declaration and hook
   // call are split across statements. Rules-of-hooks separately reports conditional calls.
-  for (const assignment of walk(root)) {
+  for (const assignment of allNodes) {
     if (assignment.type !== "assignment_statement" || assignment.parent?.type === "variable_declaration") continue;
     const owner = nearestFunctionInfo(assignment, functionByNode);
     if (!owner || (!owner.isComponent && !owner.isHook)) continue;
@@ -499,7 +500,7 @@ export function buildReactModel(root: SyntaxNode): ReactModel {
   // Binding-like values are stable mutable handles. Custom React-Luau animation hooks
   // often return bindings without the analyzer knowing the hook implementation. Infer
   // them from Binding-only APIs instead of requiring them in dependency arrays.
-  for (const call of walk(root)) {
+  for (const call of allNodes) {
     if (call.type !== "function_call") continue;
     const rawPath = normalizeExpressionText(call.childForFieldName("name")?.text ?? "");
     const match = rawPath.match(/^([A-Za-z_][A-Za-z0-9_]*):(?:getValue|map)$/);
@@ -521,6 +522,7 @@ export function buildReactModel(root: SyntaxNode): ReactModel {
   }
 
   return {
+    allNodes,
     isReactFile,
     reactNamespaces,
     reactRobloxNamespaces,

@@ -74,6 +74,7 @@ export interface StateBinding {
 }
 
 export interface ReactModel {
+  allNodes: SyntaxNode[];
   isReactFile: boolean;
   reactNamespaces: Set<string>;
   reactRobloxNamespaces: Set<string>;

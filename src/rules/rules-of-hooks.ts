@@ -373,17 +373,22 @@ function hasReachableReturnBefore(
   call: SyntaxNode,
   fn: FunctionInfo,
   context: RuleContext,
+  cache: Map<string, SyntaxNode[]>,
 ): boolean {
   if (!fn.body) return false;
-  const parameterTypes = functionParameterTypes(fn);
-  for (const node of context.walk(fn.body)) {
-    if (node.endIndex > call.startIndex) continue;
-    if (node.type !== "return_statement") continue;
-    if (isNestedInsideFunction(node, fn.node)) continue;
-    if (impossibleNilGuardReturn(node, fn, parameterTypes)) continue;
-    return true;
+  const key = nodeKey(fn.node);
+  let returns = cache.get(key);
+  if (!returns) {
+    const parameterTypes = functionParameterTypes(fn);
+    returns = [...context.walk(fn.body)].filter(
+      (node) =>
+        node.type === "return_statement" &&
+        !isNestedInsideFunction(node, fn.node) &&
+        !impossibleNilGuardReturn(node, fn, parameterTypes),
+    );
+    cache.set(key, returns);
   }
-  return false;
+  return returns.some((node) => node.endIndex <= call.startIndex);
 }
 
 function conditionalFixPreview(kind: string, hookName: string): FixPreview {
@@ -432,6 +437,7 @@ export const rulesOfHooks: RuleDefinition = {
     const stableShapes = stableShapeVariablesByFunction(context);
     const modeImports = conditionalHookModeImports(context);
     const currentModeSummary = currentConditionalHookMode(context);
+    const reachableReturns = new Map<string, SyntaxNode[]>();
 
     for (const call of context.findCalls()) {
       const rawPath = context.getCallPath(call);
@@ -520,7 +526,7 @@ export const rulesOfHooks: RuleDefinition = {
         continue;
       }
 
-      if (hasReachableReturnBefore(call, fn, context)) {
+      if (hasReachableReturnBefore(call, fn, context, reachableReturns)) {
         diagnostics.push({
           node: callNameNode(call),
           message: `Hook ${path} may run after an earlier reachable return, so some renders can execute fewer hooks.`,

@@ -3,18 +3,18 @@ import type { FunctionInfo, RuleContext, SourceFile } from "../types";
 import { nodeKey, normalizeExpressionText, walk } from "./walk";
 
 export function createRuleContext(file: SourceFile): RuleContext {
-  // Most rules traverse the same AST repeatedly. Materialize the root traversal
-  // once and memoize subtree traversals so rule execution shares that work.
-  const allNodes = [...walk(file.root)];
+  // buildReactModel already materialized the root traversal. Reuse those node
+  // wrappers here and only materialize subtrees lazily when a rule needs one.
+  const allNodes = file.model.allNodes;
   const calls = allNodes.filter((node) => node.type === "function_call");
-  const traversalCache = new Map<string, SyntaxNode[]>([[nodeKey(file.root), allNodes]]);
-  const callPathCache = new Map<string, string | null>();
+  const traversalCache = new Map<number, SyntaxNode[]>([[file.root.id, allNodes]]);
+  const callPathCache = new Map<number, string | null>();
   const resolvedCallPathCache = new Map<string, string>();
-  const nearestFunctionCache = new Map<string, FunctionInfo | null>();
-  const componentCache = new Map<string, FunctionInfo | null>();
+  const nearestFunctionCache = new Map<number, FunctionInfo | null>();
+  const componentCache = new Map<number, FunctionInfo | null>();
 
   const traversal = (node: SyntaxNode): SyntaxNode[] => {
-    const key = nodeKey(node);
+    const key = node.id;
     const existing = traversalCache.get(key);
     if (existing) return existing;
     const result = [...walk(node)];
@@ -24,7 +24,7 @@ export function createRuleContext(file: SourceFile): RuleContext {
 
   const getCallPath = (node: SyntaxNode): string | null => {
     if (node.type !== "function_call") return null;
-    const key = nodeKey(node);
+    const key = node.id;
     if (callPathCache.has(key)) return callPathCache.get(key) ?? null;
     const name = node.childForFieldName("name");
     const result = name ? normalizeExpressionText(name.text) : null;
@@ -59,7 +59,7 @@ export function createRuleContext(file: SourceFile): RuleContext {
   };
 
   const nearestFunction = (node: SyntaxNode): FunctionInfo | null => {
-    const key = nodeKey(node);
+    const key = node.id;
     if (nearestFunctionCache.has(key)) return nearestFunctionCache.get(key) ?? null;
     let current = node.parent;
     while (current) {
@@ -75,7 +75,7 @@ export function createRuleContext(file: SourceFile): RuleContext {
   };
 
   const containingComponent = (node: SyntaxNode): FunctionInfo | null => {
-    const key = nodeKey(node);
+    const key = node.id;
     if (componentCache.has(key)) return componentCache.get(key) ?? null;
     let current = node.parent;
     while (current) {

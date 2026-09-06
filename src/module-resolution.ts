@@ -27,10 +27,6 @@ export function normalizeRequireTarget(text: string): string {
   return (text.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).join(".").toLowerCase();
 }
 
-function isSegmentSuffix(target: string, key: string): boolean {
-  return target === key || target.endsWith(`.${key}`);
-}
-
 /**
  * Builds feature aliases only when an alias uniquely identifies one module in
  * the entire project. This prevents basename collisions and overlapping names
@@ -63,16 +59,14 @@ export function buildUniqueFeatureAliases<T>(
 }
 
 export function resolveModuleReference<T>(target: string, aliases: Map<string, T>): T | null {
-  let bestKey: string | null = null;
-  let bestValue: T | null = null;
-
-  for (const [key, value] of aliases) {
-    if (!isSegmentSuffix(target, key)) continue;
-    if (bestKey === null || key.length > bestKey.length) {
-      bestKey = key;
-      bestValue = value;
-    }
+  // Module aliases are segment suffixes (for example `foo.bar` and `bar`).
+  // Walk those suffixes directly instead of scanning every alias in the project
+  // for every require expression. The first hit is necessarily the longest one.
+  let candidate = target;
+  while (true) {
+    if (aliases.has(candidate)) return aliases.get(candidate)!;
+    const separator = candidate.indexOf(".");
+    if (separator < 0) return null;
+    candidate = candidate.slice(separator + 1);
   }
-
-  return bestValue;
 }

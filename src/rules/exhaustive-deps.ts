@@ -482,6 +482,9 @@ export const exhaustiveDeps: RuleDefinition = {
   description: "React hook dependency tables should include captured reactive render values.",
   run(context: RuleContext) {
     const diagnostics: DiagnosticInput[] = [];
+    const derivedDependenciesByOwner = new Map<string, Map<string, Set<string>>>();
+    const dependencyHintsByOwner = new Map<string, CustomHookDependencyHints>();
+    const memoizedProducersByOwner = new Map<string, Map<string, Set<string>>>();
 
     for (const call of context.findCalls()) {
       const rawPath = context.getCallPath(call);
@@ -510,9 +513,14 @@ export const exhaustiveDeps: RuleDefinition = {
         context,
       );
       const dependencies = dependencyPaths(deps);
+      let derivedDependencies = derivedDependenciesByOwner.get(ownerKey);
+      if (!derivedDependencies) {
+        derivedDependencies = derivedLocalDependencies(owner, available, stableVariables, externallyMutableRoots, context);
+        derivedDependenciesByOwner.set(ownerKey, derivedDependencies);
+      }
       const captured = expandDerivedLocalCaptures(
         functionExpandedCaptures,
-        derivedLocalDependencies(owner, available, stableVariables, externallyMutableRoots, context),
+        derivedDependencies,
         dependencies,
       );
       const missing = minimalMissingDependencies(captured, dependencies);
@@ -528,8 +536,16 @@ export const exhaustiveDeps: RuleDefinition = {
         continue;
       }
 
-      const hints = customHookDependencyHints(owner, context);
-      const memoizedProducers = memoizedProducerDependencies(owner, context);
+      let hints = dependencyHintsByOwner.get(ownerKey);
+      if (!hints) {
+        hints = customHookDependencyHints(owner, context);
+        dependencyHintsByOwner.set(ownerKey, hints);
+      }
+      let memoizedProducers = memoizedProducersByOwner.get(ownerKey);
+      if (!memoizedProducers) {
+        memoizedProducers = memoizedProducerDependencies(owner, context);
+        memoizedProducersByOwner.set(ownerKey, memoizedProducers);
+      }
       const uncertainHandles = missing.filter((dependency) => isAmbiguousCustomHookHandle(dependency, hints));
       const transitivelyCoveredMemoized = missing.filter((dependency) =>
         !isAmbiguousCustomHookHandle(dependency, hints)
