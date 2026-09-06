@@ -74,13 +74,13 @@ function isProvenInstanceExpression(
   callback: FunctionInfo,
 ): boolean {
   if (!expression || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(expression)) return false;
-  const callbackInstances = context.model.instanceVariablesByFunction.get(`${callback.node.type}:${callback.node.startIndex}:${callback.node.endIndex}`);
+  const callbackInstances = context.model.instanceVariablesByFunction.get(callback.node.id);
   if (callbackInstances?.has(expression)) return true;
   if (bodyDeclaresInstanceBefore(callback.body, call.startIndex, expression, context)) return true;
 
   const effectOwner = context.nearestFunction(callback.node);
   if (effectOwner) {
-    const ownerInstances = context.model.instanceVariablesByFunction.get(`${effectOwner.node.type}:${effectOwner.node.startIndex}:${effectOwner.node.endIndex}`);
+    const ownerInstances = context.model.instanceVariablesByFunction.get(effectOwner.node.id);
     if (ownerInstances?.has(expression)) return true;
   }
   return Boolean(effectOwner && bodyDeclaresInstanceBefore(effectOwner.body, callback.node.startIndex, expression, context));

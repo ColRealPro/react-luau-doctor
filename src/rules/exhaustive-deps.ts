@@ -482,9 +482,9 @@ export const exhaustiveDeps: RuleDefinition = {
   description: "React hook dependency tables should include captured reactive render values.",
   run(context: RuleContext) {
     const diagnostics: DiagnosticInput[] = [];
-    const derivedDependenciesByOwner = new Map<string, Map<string, Set<string>>>();
-    const dependencyHintsByOwner = new Map<string, CustomHookDependencyHints>();
-    const memoizedProducersByOwner = new Map<string, Map<string, Set<string>>>();
+    const derivedDependenciesByOwner = new Map<number, Map<string, Set<string>>>();
+    const dependencyHintsByOwner = new Map<number, CustomHookDependencyHints>();
+    const memoizedProducersByOwner = new Map<number, Map<string, Set<string>>>();
 
     for (const call of context.findCalls()) {
       const rawPath = context.getCallPath(call);

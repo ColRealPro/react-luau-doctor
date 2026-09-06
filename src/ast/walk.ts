@@ -1,10 +1,20 @@
 import type { Node as SyntaxNode } from "web-tree-sitter";
 
-export function* walk(node: SyntaxNode): Iterable<SyntaxNode> {
-  yield node;
-  for (const child of node.namedChildren) {
-    yield* walk(child);
+export function walk(node: SyntaxNode): SyntaxNode[] {
+  const result: SyntaxNode[] = [];
+  const stack = [node];
+
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    result.push(current);
+
+    const children = current.namedChildren;
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push(children[index]);
+    }
   }
+
+  return result;
 }
 
 export function ancestors(node: SyntaxNode): SyntaxNode[] {
@@ -43,8 +53,8 @@ export function normalizeExpressionText(text: string): string {
   return text.replace(/\s+/g, "").replace(/^\((.*)\)$/s, "$1");
 }
 
-export function nodeKey(node: SyntaxNode): string {
-  return `${node.type}:${node.startIndex}:${node.endIndex}`;
+export function nodeKey(node: SyntaxNode): number {
+  return node.id;
 }
 
 export function sameNode(left: SyntaxNode | null | undefined, right: SyntaxNode | null | undefined): boolean {

@@ -69,7 +69,7 @@ function renderReachableNestedFunctions(context: RuleContext, owner: FunctionInf
     if (!fn.name || fn === owner) continue;
     let current = fn.node.parent;
     while (current) {
-      const parentInfo = context.model.functionByNode.get(`${current.type}:${current.startIndex}:${current.endIndex}`);
+      const parentInfo = context.model.functionByNode.get(current.id);
       if (parentInfo) {
         if (parentInfo === owner) byName.set(fn.name, fn);
         break;

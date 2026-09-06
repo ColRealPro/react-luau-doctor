@@ -132,7 +132,7 @@ export function functionYieldPoint(node: SyntaxNode, context: RuleContext): { ca
   for (const candidate of context.walk(node)) {
     if (candidate.type !== "function_call") continue;
     const nearest = context.nearestFunction(candidate);
-    const owner = context.model.functionByNode.get(`${node.type}:${node.startIndex}:${node.endIndex}`);
+    const owner = context.model.functionByNode.get(node.id);
     if (owner && nearest !== owner) continue;
     const path = context.resolveCallPath(context.getCallPath(candidate) ?? "");
     const reason = knownYieldReason(path);

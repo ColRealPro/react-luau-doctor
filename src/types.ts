@@ -85,13 +85,13 @@ export interface ReactModel {
   refVariables: Set<string>;
   bindingSetters: Set<string>;
   stableVariables: Set<string>;
-  refVariablesByFunction: Map<string, Set<string>>;
-  stableVariablesByFunction: Map<string, Set<string>>;
-  externalMutableVariablesByFunction: Map<string, Set<string>>;
-  instanceVariablesByFunction: Map<string, Set<string>>;
-  componentLocals: Map<string, Set<string>>;
+  refVariablesByFunction: Map<number, Set<string>>;
+  stableVariablesByFunction: Map<number, Set<string>>;
+  externalMutableVariablesByFunction: Map<number, Set<string>>;
+  instanceVariablesByFunction: Map<number, Set<string>>;
+  componentLocals: Map<number, Set<string>>;
   functions: FunctionInfo[];
-  functionByNode: Map<string, FunctionInfo>;
+  functionByNode: Map<number, FunctionInfo>;
 }
 
 export type BindingCandidateSourceKind =

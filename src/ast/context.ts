@@ -17,7 +17,7 @@ export function createRuleContext(file: SourceFile): RuleContext {
     const key = node.id;
     const existing = traversalCache.get(key);
     if (existing) return existing;
-    const result = [...walk(node)];
+    const result = walk(node);
     traversalCache.set(key, result);
     return result;
   };
@@ -61,33 +61,51 @@ export function createRuleContext(file: SourceFile): RuleContext {
   const nearestFunction = (node: SyntaxNode): FunctionInfo | null => {
     const key = node.id;
     if (nearestFunctionCache.has(key)) return nearestFunctionCache.get(key) ?? null;
+
+    const visited: number[] = [key];
     let current = node.parent;
+    let result: FunctionInfo | null = null;
     while (current) {
       const info = file.model.functionByNode.get(nodeKey(current));
       if (info) {
-        nearestFunctionCache.set(key, info);
-        return info;
+        result = info;
+        break;
       }
+      if (nearestFunctionCache.has(current.id)) {
+        result = nearestFunctionCache.get(current.id) ?? null;
+        break;
+      }
+      visited.push(current.id);
       current = current.parent;
     }
-    nearestFunctionCache.set(key, null);
-    return null;
+
+    for (const visitedKey of visited) nearestFunctionCache.set(visitedKey, result);
+    return result;
   };
 
   const containingComponent = (node: SyntaxNode): FunctionInfo | null => {
     const key = node.id;
     if (componentCache.has(key)) return componentCache.get(key) ?? null;
+
+    const visited: number[] = [key];
     let current = node.parent;
+    let result: FunctionInfo | null = null;
     while (current) {
       const info = file.model.functionByNode.get(nodeKey(current));
       if (info?.isComponent) {
-        componentCache.set(key, info);
-        return info;
+        result = info;
+        break;
       }
+      if (componentCache.has(current.id)) {
+        result = componentCache.get(current.id) ?? null;
+        break;
+      }
+      visited.push(current.id);
       current = current.parent;
     }
-    componentCache.set(key, null);
-    return null;
+
+    for (const visitedKey of visited) componentCache.set(visitedKey, result);
+    return result;
   };
 
   const isDirectlyExecutedInFunction = (node: SyntaxNode, fn: FunctionInfo): boolean => nearestFunction(node) === fn;

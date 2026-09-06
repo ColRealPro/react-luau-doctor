@@ -112,7 +112,7 @@ export function assignmentLeft(text: string): string {
 
 export function functionInfoForNode(context: RuleContext, node: SyntaxNode | null): FunctionInfo | null {
   if (!node) return null;
-  return context.model.functionByNode.get(`${node.type}:${node.startIndex}:${node.endIndex}`) ?? null;
+  return context.model.functionByNode.get(node.id) ?? null;
 }
 
 export function stateBindingsFor(context: RuleContext, owner: FunctionInfo): typeof context.model.stateBindings {

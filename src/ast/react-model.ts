@@ -171,7 +171,7 @@ function collectDirectLocals(body: SyntaxNode | null): Set<string> {
   return locals;
 }
 
-function nearestFunctionInfo(node: SyntaxNode, functionByNode: Map<string, FunctionInfo>): FunctionInfo | null {
+function nearestFunctionInfo(node: SyntaxNode, functionByNode: Map<number, FunctionInfo>): FunctionInfo | null {
   let current = node.parent;
   while (current) {
     const info = functionByNode.get(nodeKey(current));
@@ -276,10 +276,10 @@ export function buildReactModel(root: SyntaxNode): ReactModel {
   const refVariables = new Set<string>();
   const bindingSetters = new Set<string>();
   const stableVariables = new Set<string>();
-  const refVariablesByFunction = new Map<string, Set<string>>();
-  const stableVariablesByFunction = new Map<string, Set<string>>();
-  const externalMutableVariablesByFunction = new Map<string, Set<string>>();
-  const instanceVariablesByFunction = new Map<string, Set<string>>();
+  const refVariablesByFunction = new Map<number, Set<string>>();
+  const stableVariablesByFunction = new Map<number, Set<string>>();
+  const externalMutableVariablesByFunction = new Map<number, Set<string>>();
+  const instanceVariablesByFunction = new Map<number, Set<string>>();
 
   const allNodes = [...walk(root)];
   const declarations = allNodes.filter((node) => node.type === "variable_declaration");
@@ -326,7 +326,7 @@ export function buildReactModel(root: SyntaxNode): ReactModel {
   }
 
   const functions: FunctionInfo[] = [];
-  const functionByNode = new Map<string, FunctionInfo>();
+  const functionByNode = new Map<number, FunctionInfo>();
 
   for (const node of allNodes) {
     if (node.type !== "function_declaration" && node.type !== "function_definition") continue;
@@ -375,7 +375,7 @@ export function buildReactModel(root: SyntaxNode): ReactModel {
     for (const info of functionsBySimpleName.get(element) ?? []) info.isComponent = true;
   }
 
-  const addScopedVariable = (map: Map<string, Set<string>>, owner: FunctionInfo | null, name: string): void => {
+  const addScopedVariable = (map: Map<number, Set<string>>, owner: FunctionInfo | null, name: string): void => {
     if (!owner) return;
     const key = nodeKey(owner.node);
     const names = map.get(key) ?? new Set<string>();
@@ -512,7 +512,7 @@ export function buildReactModel(root: SyntaxNode): ReactModel {
     addScopedVariable(externalMutableVariablesByFunction, owner, match[1]);
   }
 
-  const componentLocals = new Map<string, Set<string>>();
+  const componentLocals = new Map<number, Set<string>>();
   for (const info of functions) {
     if (!info.isComponent && !info.isHook) continue;
     const names = collectDirectLocals(info.body);

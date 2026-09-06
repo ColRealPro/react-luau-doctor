@@ -123,7 +123,7 @@ export const noRefCurrentInRender: RuleDefinition = {
       const owner = context.nearestFunction(node);
       if (!owner || (!owner.isComponent && !owner.isHook)) continue;
       if (!context.isDirectlyExecutedInFunction(node, owner)) continue;
-      const refs = context.model.refVariablesByFunction.get(`${owner.node.type}:${owner.node.startIndex}:${owner.node.endIndex}`) ?? new Set<string>();
+      const refs = context.model.refVariablesByFunction.get(owner.node.id) ?? new Set<string>();
       const target = assignmentLeft(node.text);
       const refName = refRootFromTarget(target, refs);
       if (!refName || isNilGuardedLazyInit(node, refName)) continue;

@@ -167,8 +167,8 @@ function isEmptyTable(node: SyntaxNode | undefined): boolean {
 
 function stableShapeVariablesByFunction(
   context: RuleContext,
-): Map<string, Set<string>> {
-  const stable = new Map<string, Set<string>>();
+): Map<number, Set<string>> {
+  const stable = new Map<number, Set<string>>();
   const functionsByName = new Map<string, FunctionInfo>();
 
   for (const fn of context.model.functions) {
@@ -284,7 +284,7 @@ function loopIterationIsProvablyStable(
   loop: SyntaxNode,
   imports: Map<string, Set<string>>,
   owner: FunctionInfo,
-  stableShapes: Map<string, Set<string>>,
+  stableShapes: Map<number, Set<string>>,
 ): boolean {
   const numeric = loop.namedChildren.find(
     (child) => child.type === "for_numeric_clause",
@@ -373,7 +373,7 @@ function hasReachableReturnBefore(
   call: SyntaxNode,
   fn: FunctionInfo,
   context: RuleContext,
-  cache: Map<string, SyntaxNode[]>,
+  cache: Map<number, SyntaxNode[]>,
 ): boolean {
   if (!fn.body) return false;
   const key = nodeKey(fn.node);
@@ -437,7 +437,7 @@ export const rulesOfHooks: RuleDefinition = {
     const stableShapes = stableShapeVariablesByFunction(context);
     const modeImports = conditionalHookModeImports(context);
     const currentModeSummary = currentConditionalHookMode(context);
-    const reachableReturns = new Map<string, SyntaxNode[]>();
+    const reachableReturns = new Map<number, SyntaxNode[]>();
 
     for (const call of context.findCalls()) {
       const rawPath = context.getCallPath(call);

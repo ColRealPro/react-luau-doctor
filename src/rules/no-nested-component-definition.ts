@@ -3,7 +3,7 @@ import type { FunctionInfo, RuleContext, RuleDefinition } from "../types";
 function enclosingComponent(context: RuleContext, candidate: FunctionInfo): FunctionInfo | null {
   let current = candidate.node.parent;
   while (current) {
-    const info = context.model.functionByNode.get(`${current.type}:${current.startIndex}:${current.endIndex}`);
+    const info = context.model.functionByNode.get(current.id);
     if (info?.isComponent) return info;
     current = current.parent;
   }
