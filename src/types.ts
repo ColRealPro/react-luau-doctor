@@ -128,6 +128,8 @@ export interface ExternalCallbackFunctionSummary {
 export interface SourceEffectModuleSummary {
   effectfulMembers: Set<string>;
   effectfulExport: boolean;
+  /** Members that mutate their receiver but are not otherwise proven globally effectful. */
+  mutatingMembers: Set<string>;
   instanceFactories: Set<string>;
 }
 

@@ -1,7 +1,7 @@
 import type { Node as SyntaxNode } from "web-tree-sitter";
 import type { DiagnosticInput, FunctionInfo, RuleContext, RuleDefinition } from "../types";
 import { normalizeExpressionText, sameNode } from "../ast/walk";
-import { assignmentLeft, assignmentTargetNode, declarationNames } from "./helpers";
+import { assignmentLeft, assignmentTargetNode, declarationNames, isBindingShadowedBetween } from "./helpers";
 
 function refRootFromTarget(target: string, refs: Set<string>): string | null {
   const match = target.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*current\b/);
@@ -27,6 +27,22 @@ function isNilGuardedLazyInit(node: SyntaxNode, refName: string): boolean {
 function assignmentRight(text: string): string | null {
   const match = text.match(/^(?:.*?)(?:\+=|-=|\*=|\/=|%=|\^=|\.\.=|=)\s*(.+)$/s);
   return match?.[1]?.trim() ?? null;
+}
+
+function refDeclaration(owner: FunctionInfo, refName: string, context: RuleContext): SyntaxNode | null {
+  if (!owner.body) return null;
+  for (const statement of owner.body.namedChildren) {
+    if (statement.type !== "variable_declaration") continue;
+    const names = declarationNames(statement);
+    const index = names.indexOf(refName);
+    if (index === -1) continue;
+    const assignment = statement.namedChildren.find((child) => child.type === "assignment_statement");
+    const expressions = assignment?.namedChildren.find((child) => child.type === "expression_list")?.namedChildren ?? [];
+    const expression = expressions[index] ?? expressions[0];
+    if (!expression || expression.type !== "function_call") continue;
+    if (context.resolveCallPath(context.getCallPath(expression) ?? "") === "React.useRef") return statement;
+  }
+  return null;
 }
 
 function refInitializer(owner: FunctionInfo, refName: string, context: RuleContext): string | null {
@@ -127,6 +143,8 @@ export const noRefCurrentInRender: RuleDefinition = {
       const target = assignmentLeft(node.text);
       const refName = refRootFromTarget(target, refs);
       if (!refName || isNilGuardedLazyInit(node, refName)) continue;
+      const declaration = refDeclaration(owner, refName, context);
+      if (isBindingShadowedBetween(node, owner, refName, declaration)) continue;
 
       const latestValueMirror = isLatestValueMirror(node, owner, refName, context);
       diagnostics.push({

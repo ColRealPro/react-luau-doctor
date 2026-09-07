@@ -2,9 +2,9 @@ import { normalizeRequireTarget, resolveModuleReference } from "../module-resolu
 import type { Node as SyntaxNode } from "web-tree-sitter";
 import type { DiagnosticInput, FunctionInfo, RuleContext, RuleDefinition, StateBinding } from "../types";
 import { normalizeExpressionText, sameNode } from "../ast/walk";
-import { callNameNode, declarationNames, identifierNode, fieldName, fieldNameNode, fieldValue, isNameShadowedBetween, stateBindingsFor } from "./helpers";
+import { isHighFrequencyRunServiceCall } from "../roblox-semantics";
+import { callNameNode, declarationNames, identifierNode, fieldName, fieldNameNode, fieldValue, isBindingShadowedBetween, stateBindingsFor } from "./helpers";
 
-const HIGH_FREQUENCY = /(?:RenderStepped|Heartbeat|Stepped|PreRender|PreSimulation|PostSimulation)\s*:\s*Connect|BindToRenderStep|BindToSimulation/;
 const STATIC_DISCOVERY = /(?::|\.)(GetChildren|GetDescendants)$/;
 const PURE_TRIVIAL_CALLS = /^(?:tostring|tonumber|type|typeof|math\.[A-Za-z_][A-Za-z0-9_]*|string\.(?:lower|upper|format|len)|Color3\.(?:new|fromRGB|fromHSV)|Vector[23]\.new|UDim2?\.(?:new|fromOffset|fromScale)|CFrame\.new)$/;
 
@@ -44,7 +44,7 @@ function identifierReferences(
     if (node.type !== "identifier" || node.text !== name) continue;
     if (declaration && node.startIndex >= declaration.startIndex && node.endIndex <= declaration.endIndex) continue;
     if (isIdentifierPropertyName(node)) continue;
-    if (isNameShadowedBetween(node, owner, name)) continue;
+    if (isBindingShadowedBetween(node, owner, name, declaration)) continue;
     result.push(node);
   }
   return result;
@@ -59,16 +59,13 @@ function nearestAncestor(node: SyntaxNode, stop: SyntaxNode, type: string): Synt
   return null;
 }
 
-function highFrequencyCallback(node: SyntaxNode): SyntaxNode | null {
+function highFrequencyCallback(node: SyntaxNode, context: RuleContext): SyntaxNode | null {
   let current = node.parent;
   while (current) {
     if (current.type === "function_definition") {
       const argumentsNode = current.parent;
       const call = argumentsNode?.type === "arguments" ? argumentsNode.parent : null;
-      if (call?.type === "function_call") {
-        const name = call.childForFieldName("name")?.text ?? "";
-        if (HIGH_FREQUENCY.test(name)) return current;
-      }
+      if (call?.type === "function_call" && isHighFrequencyRunServiceCall(call, context)) return current;
     }
     current = current.parent;
   }
@@ -200,7 +197,7 @@ export const rerenderHighFrequencyState: RuleDefinition = {
     const seen = new Set<string>();
 
     for (const call of context.findCalls()) {
-      const callback = highFrequencyCallback(call);
+      const callback = highFrequencyCallback(call, context);
       if (!callback) continue;
       const component = context.containingComponent(call);
       if (!component) continue;

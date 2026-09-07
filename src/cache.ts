@@ -25,6 +25,7 @@ interface CachedFileState {
 interface SerializedSourceEffectSummary {
   effectfulMembers: string[];
   effectfulExport: boolean;
+  mutatingMembers: string[];
   instanceFactories: string[];
 }
 
@@ -235,6 +236,7 @@ function serializeSourceEffect(summary: SourceEffectModuleSummary): SerializedSo
   return {
     effectfulMembers: [...summary.effectfulMembers].sort(),
     effectfulExport: summary.effectfulExport,
+    mutatingMembers: [...summary.mutatingMembers].sort(),
     instanceFactories: [...summary.instanceFactories].sort(),
   };
 }
@@ -243,6 +245,7 @@ function deserializeSourceEffect(summary: SerializedSourceEffectSummary): Source
   return {
     effectfulMembers: new Set(summary.effectfulMembers),
     effectfulExport: summary.effectfulExport,
+    mutatingMembers: new Set(summary.mutatingMembers ?? []),
     instanceFactories: new Set(summary.instanceFactories),
   };
 }

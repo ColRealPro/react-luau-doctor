@@ -1,7 +1,7 @@
 import type { Node as SyntaxNode } from "web-tree-sitter";
 import type { DiagnosticInput, FunctionInfo, RuleContext, RuleDefinition, StateBinding } from "../types";
 import { sameNode } from "../ast/walk";
-import { assignmentTargetNode, callNameNode, containsUnshadowedIdentifier, identifierNode, isNameShadowedBetween, stateBindingsFor } from "./helpers";
+import { assignmentTargetNode, callNameNode, containsUnshadowedIdentifier, identifierNode, isBindingShadowedBetween, stateBindingsFor } from "./helpers";
 
 const TRIVIAL_INITIALIZER_PATHS = new Set([
   "tostring",
@@ -117,14 +117,14 @@ function directlyReadsValue(context: RuleContext, owner: FunctionInfo, binding: 
     if (!isIdentifierRead(node, binding.valueName)) continue;
     if (node.startIndex >= binding.declaration.startIndex && node.endIndex <= binding.declaration.endIndex) continue;
     if (isNestedFunctionFromOwner(context, node, owner)) continue;
-    if (isNameShadowedBetween(node, owner, binding.valueName)) continue;
+    if (isBindingShadowedBetween(node, owner, binding.valueName, binding.declaration)) continue;
     return true;
   }
 
   for (const fn of renderReachableNestedFunctions(context, owner)) {
     if (!fn.body) continue;
     for (const node of context.walk(fn.body)) {
-      if (isIdentifierRead(node, binding.valueName) && !isNameShadowedBetween(node, owner, binding.valueName)) return true;
+      if (isIdentifierRead(node, binding.valueName) && !isBindingShadowedBetween(node, owner, binding.valueName, binding.declaration)) return true;
     }
   }
 
@@ -324,7 +324,7 @@ export const noDirectStateMutation: RuleDefinition = {
           }
         }
 
-        if (!mutates || isNameShadowedBetween(node, owner, binding.valueName)) continue;
+        if (!mutates || isBindingShadowedBetween(node, owner, binding.valueName, binding.declaration)) continue;
         const key = `${node.startIndex}:${binding.valueName}`;
         if (seen.has(key)) continue;
         seen.add(key);

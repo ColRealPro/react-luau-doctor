@@ -2,9 +2,9 @@ import type { Node as SyntaxNode } from "web-tree-sitter";
 import { normalizeRequireTarget, resolveModuleReference } from "../module-resolution";
 import type { BindingCandidateHookSummary, ExternalCallbackFunctionSummary, FixPreview, FunctionInfo, RuleContext, RuleDefinition, StateBinding } from "../types";
 import { sameNode } from "../ast/walk";
-import { callNameNode, declarationNames, fieldName, fieldValue, isNameShadowedBetween } from "./helpers";
+import { isHighFrequencyRunServiceCall, isHighFrequencyRunServiceExpression } from "../roblox-semantics";
+import { callNameNode, declarationNames, fieldName, fieldValue, isBindingShadowedBetween } from "./helpers";
 
-const HIGH_FREQUENCY = /(?:RenderStepped|Heartbeat|Stepped|PreRender|PreSimulation|PostSimulation)\s*:\s*Connect|BindToRenderStep|BindToSimulation/;
 const EXTERNAL_CALLBACK = /(?:^|[.:])(?:Connect|Once|Subscribe|Observe|Listen|Watch)$/i;
 const NON_BINDABLE_HOST_FIELDS = new Set(["ref", "key", "children"]);
 
@@ -178,7 +178,7 @@ function isReadNode(node: SyntaxNode, valueName: string, owner: FunctionInfo, de
   if (node.type !== "identifier" || node.text !== valueName) return false;
   if (isInside(node, declaration)) return false;
   if (isIdentifierPropertyName(node)) return false;
-  if (isNameShadowedBetween(node, owner, valueName)) return false;
+  if (isBindingShadowedBetween(node, owner, valueName, declaration)) return false;
   const parent = node.parent;
   if (parent?.type === "variable_list" || parent?.type === "typed_identifier") return false;
   if (parent?.type === "field" && !sameNode(fieldValue(parent), node) && /^[A-Za-z_][A-Za-z0-9_]*\s*=/.test(parent.text.trim())) {
@@ -294,9 +294,9 @@ function stateReadsAreBindingCompatible(
   return reads > 0;
 }
 
-function callbackSource(path: string): { highFrequency: boolean; external: boolean } {
-  const normalized = path.replace(/\s+/g, "");
-  const highFrequency = HIGH_FREQUENCY.test(normalized);
+function callbackSource(call: SyntaxNode, context: RuleContext): { highFrequency: boolean; external: boolean } {
+  const normalized = (context.getCallPath(call) ?? "").replace(/\s+/g, "");
+  const highFrequency = isHighFrequencyRunServiceCall(call, context);
   const final = normalized.split(/[.:]/).at(-1) ?? normalized;
   const external = highFrequency || EXTERNAL_CALLBACK.test(normalized) || EXTERNAL_CALLBACK.test(final);
   return { highFrequency, external };
@@ -315,7 +315,7 @@ function importedCallbackSource(
   const callbackIndex = args.findIndex((arg) => sameNode(arg, callbackArgument));
   if (callbackIndex < 0 || !summary.callbackParameterIndexes.includes(callbackIndex)) return null;
   return {
-    highFrequency: summary.highFrequency || args.some((arg) => HIGH_FREQUENCY.test(arg.text)),
+    highFrequency: summary.highFrequency || args.some((arg) => isHighFrequencyRunServiceExpression(arg, context)),
     external: true,
   };
 }
@@ -330,8 +330,7 @@ function directCallbackSource(
   const call = parent.parent;
   const imported = importedCallbackSource(call, node, importedCallbacks, context);
   if (imported) return imported;
-  const raw = call.childForFieldName("name")?.text ?? "";
-  const source = callbackSource(raw);
+  const source = callbackSource(call, context);
   return source.external ? source : null;
 }
 
@@ -351,7 +350,7 @@ function namedFunctionCallbackSource(
     const callbackArg = args.find((arg) => arg.type === "identifier" && arg.text === fn.name);
     if (!callbackArg) continue;
     const imported = importedCallbackSource(call, callbackArg, importedCallbacks, context);
-    const source = imported ?? callbackSource(context.getCallPath(call) ?? "");
+    const source = imported ?? callbackSource(call, context);
     if (!source.external) continue;
     foundExternal = true;
     foundHighFrequency ||= source.highFrequency;

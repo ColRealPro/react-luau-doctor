@@ -205,13 +205,14 @@ return Consumer
   assert.match(diagnostics[0].message, /useTrackedHostValue returns state updated from a high-frequency source/);
 });
 
-test("yield-in-render recognizes bundled Roblox yielding APIs without matching arbitrary Async names", async () => {
+test("yield-in-render requires Roblox receiver provenance and ignores opaque lookalikes", async () => {
   const report = await scanPath(path.join(fixtures, "yielding-engine-apis.luau"));
   const diagnostics = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-yield-in-render");
   assert.equal(diagnostics.length, 2);
   assert.ok(diagnostics.some((diagnostic) => diagnostic.message.includes("GetAsync")));
   assert.ok(diagnostics.some((diagnostic) => diagnostic.message.includes("PreloadAsync")));
   assert.equal(diagnostics.some((diagnostic) => diagnostic.message.includes("DoAsync")), false);
+  assert.equal(diagnostics.some((diagnostic) => diagnostic.message.includes("props.cache:GetAsync")), false);
 });
 
 test("diagnostic ids are deterministic across scans", async () => {
@@ -1045,6 +1046,30 @@ return Component`);
   assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rerender-unnecessary-usememo"), false);
 });
 
+test("high-frequency state requires a real RunService source", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-custom-heartbeat-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local function Component(props)
+  local value, setValue = React.useState(0)
+  React.useEffect(function()
+    return props.Heartbeat:Connect(function(nextValue)
+      setValue(nextValue)
+    end)
+  end, { props.Heartbeat })
+  return React.createElement("Frame", { Rotation = value })
+end
+return Component
+`);
+
+  const report = await scanPath(root);
+  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rerender-high-frequency-state"), false);
+  const binding = report.diagnostics.find((diagnostic) => diagnostic.rule === "react-luau/prefer-binding-over-state");
+  assert.match(binding?.message ?? "", /external callback/);
+  assert.doesNotMatch(binding?.message ?? "", /high-frequency/);
+});
+
 test("high-frequency state ignores a provable one-shot guard", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-one-shot-frame-state-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -1277,37 +1302,122 @@ return useGroupValues`);
   assert.ok(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks"));
 });
 
-test("render side effects are inferred from source-visible method implementations without method-name allowlists", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-source-effects-"));
+test("binding-aware rules respect same-scope local redeclarations", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-shadowing-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  fs.writeFileSync(path.join(root, "Cleaner.luau"), `local Cleaner = {}
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
 
-local function clearStoredItems(self)
-  local items = self._items
-  items[1] = nil
+local function PropsComponent(props)
+  local props = table.clone(props)
+  props.changed = true
+  return React.createElement("Frame")
 end
 
-function Cleaner.make(): Cleaner
-  return setmetatable({ _items = { "value" } }, Cleaner)
+local function StateComponent()
+  local state, setState = React.useState({ changed = false })
+  local state = table.clone(state)
+  state.changed = true
+  return React.createElement("Frame", { Name = tostring(state.changed) })
 end
 
-function Cleaner:flushAll()
-  clearStoredItems(self)
+local function SetterComponent()
+  local value, setValue = React.useState(0)
+  local setValue = function() return nil end
+  setValue()
+  return React.createElement("Frame", { Name = tostring(value) })
 end
 
-return Cleaner
+local function RefComponent()
+  local ref = React.useRef(nil)
+  local ref = { current = nil }
+  ref.current = 123
+  return React.createElement("Frame")
+end
+
+return PropsComponent
+`);
+
+  const report = await scanPath(root);
+  const forbidden = new Set([
+    "react-luau/no-prop-mutation",
+    "react-luau/no-direct-state-mutation",
+    "react-luau/no-set-state-in-render",
+    "react-luau/no-ref-current-in-render",
+  ]);
+  assert.deepEqual(report.diagnostics.filter((diagnostic) => forbidden.has(diagnostic.rule)), []);
+});
+
+test("source effect inference keeps fresh receiver and argument mutation local to render", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-source-effects-conditional-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Mutator.luau"), `local Mutator = {}
+
+function Mutator.make()
+  return setmetatable({ items = { "value" } }, Mutator)
+end
+
+function Mutator:flushAll()
+  self.items[1] = nil
+end
+
+function Mutator.mutateArgument(value)
+  value.changed = true
+end
+
+return Mutator
 `);
 
   fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
-local Cleaner = require(script.Parent.Cleaner)
+local Mutator = require(script.Parent.Mutator)
+
+local function Component(props)
+  local localValue = {}
+  Mutator.mutateArgument(localValue)
+
+  local instance = Mutator.make()
+  instance:flushAll()
+
+  return React.createElement("Frame", { Name = tostring(props.value) })
+end
+
+return Component
+`);
+
+  const report = await scanPath(root);
+  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render"), false);
+});
+
+test("source effect inference flags mutation of persistent factory instances", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-source-effects-persistent-receiver-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Mutator.luau"), `local Mutator = {}
+
+local function clearStoredItems(value)
+  value.items[1] = nil
+end
+
+function Mutator.make()
+  return setmetatable({ items = { "value" } }, Mutator)
+end
+
+function Mutator:flushAll()
+  clearStoredItems(self)
+end
+
+return Mutator
+`);
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local Mutator = require(script.Parent.Mutator)
 
 local function Component()
-  local cleaner = React.useMemo(function()
-    return Cleaner.make()
+  local instance = React.useMemo(function()
+    return Mutator.make()
   end, {})
-
-  cleaner:flushAll()
+  instance:flushAll()
   return React.createElement("Frame")
 end
 
@@ -1315,10 +1425,9 @@ return Component
 `);
 
   const report = await scanPath(root);
-  const diagnostics = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render");
-  assert.equal(diagnostics.length, 1);
-  assert.equal(diagnostics[0].file, "Component.luau");
-  assert.match(diagnostics[0].message, /flushAll runs during render, and code it calls eventually changes state outside the current render/);
+  const diagnostic = report.diagnostics.find((entry) => entry.rule === "react-luau/no-side-effects-in-render");
+  assert.ok(diagnostic);
+  assert.match(diagnostic.message, /instance:flushAll runs during render/);
 });
 
 test("source effect inference propagates through imported source-visible functions", async (t) => {
@@ -1354,6 +1463,47 @@ return Component
   assert.match(diagnostic.message, /performWork runs during render, and code it calls eventually changes state outside the current render/);
 });
 
+
+test("source effect inference does not confuse function-local imports or shadowed aliases", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-source-effects-import-shadow-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Impure.luau"), `local stored = {}
+local function mutate()
+  stored.changed = true
+end
+return mutate
+`);
+
+  fs.writeFileSync(path.join(root, "Safe.luau"), `local function run()
+  return 1
+end
+return run
+`);
+
+  fs.writeFileSync(path.join(root, "Wrapper.luau"), `local run = require(script.Parent.Impure)
+
+local function performWork()
+  local run = require(script.Parent.Safe)
+  run()
+end
+
+return performWork
+`);
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local performWork = require(script.Parent.Wrapper)
+local function Component()
+  performWork()
+  return React.createElement("Frame")
+end
+return Component
+`);
+
+  const report = await scanPath(root);
+  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render"), false);
+});
+
 test("unknown opaque methods are not assumed to be render side effects", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-source-effects-unknown-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -1362,6 +1512,78 @@ test("unknown opaque methods are not assumed to be render side effects", async (
 local function Component(props)
   props.service:DoSomething()
   return React.createElement("Frame")
+end
+return Component
+`);
+
+  const report = await scanPath(root);
+  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render"), false);
+});
+
+test("render side-effect source bindings respect lexical shadowing and sibling scopes", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-source-effects-scope-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Cleaner.luau"), `local Cleaner = {}
+local function clearStoredItems(self)
+  local items = self._items
+  items[1] = nil
+end
+function Cleaner.make(): Cleaner
+  return setmetatable({ _items = { "value" } }, Cleaner)
+end
+function Cleaner:flushAll()
+  clearStoredItems(self)
+end
+return Cleaner
+`);
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local Cleaner = require(script.Parent.Cleaner)
+
+local function useScale()
+  return React.useBinding(1)
+end
+
+local function First()
+  local scale = Cleaner.make()
+  return React.createElement("Frame")
+end
+
+local function Second()
+  local scale = useScale()
+  scale:flushAll()
+  return React.createElement("Frame")
+end
+
+local function Third()
+  local Cleaner = { flushAll = function() return 1 end }
+  Cleaner.flushAll()
+  return React.createElement("Frame")
+end
+
+local function Reassigned()
+  local scale = Cleaner.make()
+  scale = useScale()
+  scale:flushAll()
+  return React.createElement("Frame")
+end
+
+return Second
+`);
+
+  const report = await scanPath(root);
+  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render"), false);
+});
+
+test("opaque render methods are not treated as side effects by name alone", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-source-effects-render-name-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local function Component(props)
+  local text = props.formatter:render(props.value)
+  return React.createElement("TextLabel", { Text = text })
 end
 return Component
 `);
@@ -1408,6 +1630,61 @@ return Component
   const diagnostics = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render");
   assert.equal(diagnostics.length, 1);
   assert.match(diagnostics[0].message, /useImpureValue runs during render, and code it calls eventually changes state outside the current render/);
+});
+
+test("source effect inference treats locally constructed tables as owned values", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-source-effects-owned-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Factory.luau"), `local Factory = {}
+function Factory.new()
+  local self = setmetatable({}, Factory)
+  self.value = 1
+  return self
+end
+return Factory
+`);
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local Factory = require(script.Parent.Factory)
+local function Component()
+  local value = Factory.new()
+  return React.createElement("Frame", { Name = tostring(value.value) })
+end
+return Component
+`);
+
+  const report = await scanPath(root);
+  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render"), false);
+});
+
+test("source effect inference does not escalate useRef latest-value mirrors at hook call sites", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-source-effects-ref-mirror-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "useLatest.luau"), `local React = require(script.Parent.React)
+local function useLatest(value)
+  local ref = React.useRef(value)
+  ref.current = value
+  return ref
+end
+return useLatest
+`);
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local useLatest = require(script.Parent.useLatest)
+local function Component(props)
+  local latest = useLatest(props.value)
+  return React.createElement("Frame", { Name = tostring(latest) })
+end
+return Component
+`);
+
+  const report = await scanPath(root);
+  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render"), false);
+  const mirror = report.diagnostics.find((diagnostic) => diagnostic.rule === "react-luau/no-ref-current-in-render");
+  assert.equal(mirror?.file, "useLatest.luau");
+  assert.equal(mirror?.severity, "suggestion");
 });
 
 test("Instance and tween render work share the side-effects rule and policy", async (t) => {

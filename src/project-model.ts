@@ -7,6 +7,7 @@ import {
   resolveModuleReference,
   type ModuleIdentity,
 } from "./module-resolution";
+import { sourceHasHighFrequencyRunService } from "./roblox-semantics";
 import type {
   BindingCandidateHookSummary,
   ConditionalHookModeSummary,
@@ -15,8 +16,6 @@ import type {
   ScanFileInput,
 } from "./types";
 
-const HIGH_FREQUENCY_SOURCE =
-  /(?:RenderStepped|Heartbeat|Stepped|PreRender|PreSimulation|PostSimulation)\s*:\s*Connect|BindToRenderStep|BindToSimulation/;
 const EXTERNAL_UPDATE_SOURCE =
   /(?::|\.)(?:Connect|Once|Subscribe|Observe|Listen|Watch)\s*\(|\b(?:subscribe|observe|listen|watch)[A-Za-z0-9_]*\s*\(|GetPropertyChangedSignal\s*\(|\.Changed\b/i;
 const CALLBACK_PARAMETER_NAME =
@@ -482,7 +481,7 @@ function findExternalCallbackFunction(
   return {
     name,
     callbackParameterIndexes,
-    highFrequency: HIGH_FREQUENCY_SOURCE.test(source),
+    highFrequency: sourceHasHighFrequencyRunService(source),
   };
 }
 
@@ -521,7 +520,7 @@ function findBindingCandidateHook(
   ).test(source);
   if (!setterCalled && !setterPassedToSubscription) return null;
 
-  const highFrequency = HIGH_FREQUENCY_SOURCE.test(source);
+  const highFrequency = sourceHasHighFrequencyRunService(source);
   const external = highFrequency || EXTERNAL_UPDATE_SOURCE.test(source);
   if (!external) return null;
 

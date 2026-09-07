@@ -4,6 +4,18 @@ import { normalizeRequireTarget, resolveModuleReference } from "../module-resolu
 import { knownYieldReason } from "../roblox-semantics";
 import { callNameNode } from "./helpers";
 
+interface SourceBinding<T> {
+  declaration: SyntaxNode;
+  value: T | null;
+}
+
+type SourceBindings<T> = Map<string, SourceBinding<T>[]>;
+
+interface EffectInstance {
+  summary: SourceEffectModuleSummary;
+  persistent: boolean;
+}
+
 function declarationParts(node: SyntaxNode): { names: string[]; expressions: SyntaxNode[] } {
   if (node.type !== "variable_declaration") return { names: [], expressions: [] };
   const assignment = node.namedChildren.find((child) => child.type === "assignment_statement");
@@ -16,14 +28,113 @@ function declarationParts(node: SyntaxNode): { names: string[]; expressions: Syn
   };
 }
 
-function sourceEffectImports(context: RuleContext): Map<string, SourceEffectModuleSummary> {
-  const result = new Map<string, SourceEffectModuleSummary>();
+function assignmentParts(node: SyntaxNode): { names: string[]; expressions: SyntaxNode[] } {
+  if (node.type !== "assignment_statement" || node.parent?.type === "variable_declaration") return { names: [], expressions: [] };
+  const variables = node.namedChildren.find((child) => child.type === "variable_list");
+  const expressions = node.namedChildren.find((child) => child.type === "expression_list");
+  return {
+    names: variables?.namedChildren.filter((child) => child.type === "identifier").map((child) => child.text) ?? [],
+    expressions: expressions?.namedChildren ?? [],
+  };
+}
+
+function bindingParts(node: SyntaxNode): { names: string[]; expressions: SyntaxNode[] } {
+  return node.type === "variable_declaration" ? declarationParts(node) : assignmentParts(node);
+}
+
+function addSourceBinding<T>(bindings: SourceBindings<T>, name: string, declaration: SyntaxNode, value: T | null): void {
+  const existing = bindings.get(name) ?? [];
+  existing.push({ declaration, value });
+  bindings.set(name, existing);
+}
+
+function nearestScopeContainer(node: SyntaxNode, context: RuleContext): SyntaxNode {
+  const owner = context.nearestFunction(node);
+  let current = node.parent;
+  while (current) {
+    if (current.type === "block") return current;
+    if (owner && current.id === owner.node.id) return owner.body ?? owner.node;
+    current = current.parent;
+  }
+  return context.root;
+}
+
+function declarationVisibleAt(declaration: SyntaxNode, node: SyntaxNode, context: RuleContext): boolean {
+  if (declaration.startIndex >= node.startIndex) return false;
+  const container = nearestScopeContainer(declaration, context);
+  return node.startIndex >= container.startIndex && node.endIndex <= container.endIndex;
+}
+
+function functionParameterNames(node: SyntaxNode): Set<string> {
+  const result = new Set<string>();
+  const parameters = node.childForFieldName("parameters")
+    ?? node.namedChildren.find((child) => child.type === "parameters");
+  for (const parameter of parameters?.namedChildren ?? []) {
+    if (parameter.type === "identifier") result.add(parameter.text);
+    for (const child of parameter.namedChildren) {
+      if (child.type === "identifier") result.add(child.text);
+    }
+  }
+  return result;
+}
+
+function loopBindsName(node: SyntaxNode, name: string): boolean {
+  if (node.type !== "for_statement") return false;
+  const header = node.text.split(/\bdo\b/s, 1)[0] ?? "";
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*for\\s+(?:${escaped}\\s*=|[^\\n]*\\b${escaped}\\b[^\\n]*\\bin\\b)`, "s").test(header);
+}
+
+function bindingShadowedAfterDeclaration(declaration: SyntaxNode, node: SyntaxNode, name: string): boolean {
+  let current = node.parent;
+  while (current) {
+    // Once we reach a scope that already contains the source binding, binders
+    // outside that scope cannot shadow the binding at this use site.
+    if (declaration.startIndex >= current.startIndex && declaration.endIndex <= current.endIndex) return false;
+    if (
+      (current.type === "function_definition" || current.type === "function_declaration")
+      && functionParameterNames(current).has(name)
+    ) return true;
+    if (loopBindsName(current, name)) return true;
+    current = current.parent;
+  }
+  return false;
+}
+
+function resolveSourceBinding<T>(
+  bindings: SourceBindings<T>,
+  name: string,
+  node: SyntaxNode,
+  context: RuleContext,
+): T | null {
+  const candidates = bindings.get(name);
+  if (!candidates) return null;
+
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const candidate = candidates[index];
+    if (!declarationVisibleAt(candidate.declaration, node, context)) continue;
+    if (bindingShadowedAfterDeclaration(candidate.declaration, node, name)) return null;
+    return candidate.value;
+  }
+  return null;
+}
+
+function sourceEffectImports(context: RuleContext): SourceBindings<SourceEffectModuleSummary> {
+  const result: SourceBindings<SourceEffectModuleSummary> = new Map();
   for (const node of context.walk(context.root)) {
-    if (node.type !== "variable_declaration") continue;
-    const match = node.text.match(/^\s*local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)\s*$/s);
-    if (!match) continue;
-    const summary = resolveModuleReference(normalizeRequireTarget(match[2]), context.project.sourceEffects);
-    if (summary) result.set(match[1], summary);
+    if (node.type !== "variable_declaration" && node.type !== "assignment_statement") continue;
+    if (node.type === "assignment_statement" && node.parent?.type === "variable_declaration") continue;
+    const { names, expressions } = bindingParts(node);
+    for (let index = 0; index < names.length; index += 1) {
+      const expression = expressions[index] ?? expressions[0];
+      const requireMatch = expression?.type === "function_call"
+        ? expression.text.match(/^\s*require\s*\((.*?)\)\s*$/s)
+        : null;
+      const summary = requireMatch
+        ? resolveModuleReference(normalizeRequireTarget(requireMatch[1]), context.project.sourceEffects)
+        : null;
+      addSourceBinding(result, names[index], node, summary);
+    }
   }
   return result;
 }
@@ -31,12 +142,12 @@ function sourceEffectImports(context: RuleContext): Map<string, SourceEffectModu
 function factorySummaryFromCall(
   call: SyntaxNode,
   context: RuleContext,
-  imports: Map<string, SourceEffectModuleSummary>,
+  imports: SourceBindings<SourceEffectModuleSummary>,
 ): SourceEffectModuleSummary | null {
   const path = context.getCallPath(call)?.replace(/\s+/g, "") ?? "";
   const match = path.match(/^([A-Za-z_][A-Za-z0-9_]*)[.:]([A-Za-z_][A-Za-z0-9_]*)$/);
   if (!match) return null;
-  const summary = imports.get(match[1]);
+  const summary = resolveSourceBinding(imports, match[1], call, context);
   if (!summary?.instanceFactories.has(match[2])) return null;
   return summary;
 }
@@ -44,7 +155,7 @@ function factorySummaryFromCall(
 function returnedFactorySummary(
   callback: SyntaxNode,
   context: RuleContext,
-  imports: Map<string, SourceEffectModuleSummary>,
+  imports: SourceBindings<SourceEffectModuleSummary>,
 ): SourceEffectModuleSummary | null {
   for (const node of context.walk(callback)) {
     if (node !== callback && (node.type === "function_definition" || node.type === "function_declaration")) continue;
@@ -58,66 +169,71 @@ function returnedFactorySummary(
 
 function sourceEffectInstances(
   context: RuleContext,
-  imports: Map<string, SourceEffectModuleSummary>,
-): Map<string, SourceEffectModuleSummary> {
-  const result = new Map<string, SourceEffectModuleSummary>();
+  imports: SourceBindings<SourceEffectModuleSummary>,
+): SourceBindings<EffectInstance> {
+  const result: SourceBindings<EffectInstance> = new Map();
 
   for (const node of context.walk(context.root)) {
-    if (node.type !== "variable_declaration") continue;
-    const { names, expressions } = declarationParts(node);
+    if (node.type !== "variable_declaration" && node.type !== "assignment_statement") continue;
+    if (node.type === "assignment_statement" && node.parent?.type === "variable_declaration") continue;
+    const { names, expressions } = bindingParts(node);
     for (let index = 0; index < names.length; index += 1) {
       const expression = expressions[index] ?? expressions[0];
-      if (!expression) continue;
-      let summary: SourceEffectModuleSummary | null = null;
-      if (expression.type === "function_call") {
-        summary = factorySummaryFromCall(expression, context, imports);
-        if (!summary && context.resolveCallPath(context.getCallPath(expression) ?? "") === "React.useMemo") {
+      let instance: EffectInstance | null = null;
+      if (expression?.type === "function_call") {
+        const directFactory = factorySummaryFromCall(expression, context, imports);
+        if (directFactory) {
+          // An instance created at module scope persists across renders. A fresh
+          // factory result created inside render is local to that render and
+          // receiver-only mutation is not externally observable by itself.
+          instance = {
+            summary: directFactory,
+            persistent: context.nearestFunction(node) === null,
+          };
+        } else if (context.resolveCallPath(context.getCallPath(expression) ?? "") === "React.useMemo") {
           const callback = context.callArguments(expression)[0];
-          if (callback?.type === "function_definition") summary = returnedFactorySummary(callback, context, imports);
+          if (callback?.type === "function_definition") {
+            const memoizedFactory = returnedFactorySummary(callback, context, imports);
+            if (memoizedFactory) instance = { summary: memoizedFactory, persistent: true };
+          }
         }
-      } else if (expression.type === "identifier") {
-        summary = result.get(expression.text) ?? null;
+      } else if (expression?.type === "identifier") {
+        instance = resolveSourceBinding(result, expression.text, expression, context);
       }
-      if (summary) result.set(names[index], summary);
+      addSourceBinding(result, names[index], node, instance);
     }
   }
 
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const node of context.walk(context.root)) {
-      if (node.type !== "variable_declaration") continue;
-      const { names, expressions } = declarationParts(node);
-      for (let index = 0; index < names.length; index += 1) {
-        if (result.has(names[index])) continue;
-        const expression = expressions[index] ?? expressions[0];
-        if (expression?.type !== "identifier") continue;
-        const summary = result.get(expression.text);
-        if (!summary) continue;
-        result.set(names[index], summary);
-        changed = true;
-      }
-    }
-  }
   return result;
 }
 
 function sourceInferredEffectCall(
   call: SyntaxNode,
   context: RuleContext,
-  imports: Map<string, SourceEffectModuleSummary>,
-  instances: Map<string, SourceEffectModuleSummary>,
+  imports: SourceBindings<SourceEffectModuleSummary>,
+  instances: SourceBindings<EffectInstance>,
 ): boolean {
   const path = context.getCallPath(call)?.replace(/\s+/g, "") ?? "";
-  const direct = imports.get(path);
-  if (direct?.effectfulExport) return true;
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(path)) {
+    const direct = resolveSourceBinding(imports, path, call, context);
+    if (direct?.effectfulExport) return true;
+  }
 
   const member = path.match(/^([A-Za-z_][A-Za-z0-9_]*)[.:]([A-Za-z_][A-Za-z0-9_]*)$/);
   if (!member) return false;
-  const summary = imports.get(member[1]) ?? instances.get(member[1]);
-  return summary?.effectfulMembers.has(member[2]) ?? false;
-}
 
+  const instance = resolveSourceBinding(instances, member[1], call, context);
+  if (instance) {
+    if (instance.summary.effectfulMembers.has(member[2])) return true;
+    return instance.persistent && instance.summary.mutatingMembers.has(member[2]);
+  }
+
+  const imported = resolveSourceBinding(imports, member[1], call, context);
+  if (!imported) return false;
+  // The imported module table is itself persistent project state, so a method
+  // that mutates its receiver is observable even if it has no other effects.
+  return imported.effectfulMembers.has(member[2]) || imported.mutatingMembers.has(member[2]);
+}
 
 const RENDER_EFFECT_PATTERNS = [
   /^Instance\.new$/,
@@ -129,7 +245,6 @@ const RENDER_EFFECT_PATTERNS = [
   /BindToRenderStep$/,
   /BindToSimulation$/,
   /:Destroy$/,
-  /:render$/,
   /:unmount$/,
 ];
 
@@ -139,7 +254,7 @@ function hasNestedKnownRenderSideEffect(call: SyntaxNode, context: RuleContext):
     if (node.type !== "function_call") continue;
     const path = context.resolveCallPath(context.getCallPath(node) ?? "");
     if (path === "task.spawn" || path === "task.defer" || path === "task.delay") return true;
-    if (knownYieldReason(path) || RENDER_EFFECT_PATTERNS.some(pattern => pattern.test(path))) return true;
+    if (knownYieldReason(path, node, context) || RENDER_EFFECT_PATTERNS.some(pattern => pattern.test(path))) return true;
   }
   return false;
 }
@@ -155,7 +270,7 @@ export const noYieldInRender: RuleDefinition = {
       const component = context.containingComponent(call);
       if (!component || !context.isDirectlyExecutedInFunction(call, component)) continue;
       const path = context.resolveCallPath(context.getCallPath(call) ?? "");
-      const reason = knownYieldReason(path);
+      const reason = knownYieldReason(path, call, context);
       if (!reason) continue;
       diagnostics.push({
         node: callNameNode(call),

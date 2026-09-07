@@ -225,6 +225,47 @@ export function isNameShadowedBetween(node: SyntaxNode, boundary: FunctionInfo, 
   return false;
 }
 
+const topLevelBindingsCache = new WeakMap<FunctionInfo, Map<string, SyntaxNode[]>>();
+
+function topLevelBindings(boundary: FunctionInfo): Map<string, SyntaxNode[]> {
+  const cached = topLevelBindingsCache.get(boundary);
+  if (cached) return cached;
+
+  const result = new Map<string, SyntaxNode[]>();
+  const add = (name: string, node: SyntaxNode): void => {
+    const existing = result.get(name) ?? [];
+    existing.push(node);
+    result.set(name, existing);
+  };
+
+  for (const child of boundary.body?.namedChildren ?? []) {
+    if (child.type === "variable_declaration") {
+      for (const name of declarationNames(child)) add(name, child);
+    } else if (child.type === "function_declaration") {
+      const declared = child.childForFieldName("name")?.text.replace(/\s+/g, "") ?? "";
+      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(declared)) add(declared, child);
+    }
+  }
+
+  topLevelBindingsCache.set(boundary, result);
+  return result;
+}
+
+export function isBindingShadowedBetween(
+  node: SyntaxNode,
+  boundary: FunctionInfo,
+  name: string,
+  declaration: SyntaxNode | null = null,
+): boolean {
+  if (isNameShadowedBetween(node, boundary, name)) return true;
+  if (!boundary.body) return false;
+
+  const afterIndex = declaration?.endIndex ?? boundary.body.startIndex - 1;
+  return (topLevelBindings(boundary).get(name) ?? []).some((binding) =>
+    binding.startIndex > afterIndex && binding.startIndex < node.startIndex
+  );
+}
+
 export function containsUnshadowedIdentifier(
   node: SyntaxNode | null | undefined,
   name: string,

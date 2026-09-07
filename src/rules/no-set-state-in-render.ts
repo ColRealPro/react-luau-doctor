@@ -1,5 +1,5 @@
 import type { RuleDefinition } from "../types";
-import { callNameNode, stateBindingsFor } from "./helpers";
+import { callNameNode, isBindingShadowedBetween, stateBindingsFor } from "./helpers";
 
 export const noSetStateInRender: RuleDefinition = {
   id: "react-luau/no-set-state-in-render",
@@ -11,13 +11,15 @@ export const noSetStateInRender: RuleDefinition = {
 
     for (const component of context.model.functions) {
       if (!component.isComponent || !component.body) continue;
-      const setters = new Set(stateBindingsFor(context, component).map((binding) => binding.setterName));
+      const bindings = stateBindingsFor(context, component);
+      const setters = new Map(bindings.map((binding) => [binding.setterName, binding]));
       if (setters.size === 0) continue;
 
       for (const statement of component.body.namedChildren) {
         if (statement.type !== "function_call") continue;
         const path = context.getCallPath(statement);
-        if (!path || !setters.has(path)) continue;
+        const binding = path ? setters.get(path) : undefined;
+        if (!path || !binding || isBindingShadowedBetween(statement, component, path, binding.declaration)) continue;
 
         diagnostics.push({
           node: callNameNode(statement),

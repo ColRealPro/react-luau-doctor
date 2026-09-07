@@ -1,5 +1,5 @@
 import type { RuleDefinition } from "../types";
-import { assignmentLeft, assignmentTargetNode, isNameShadowedBetween } from "./helpers";
+import { assignmentLeft, assignmentTargetNode, isBindingShadowedBetween } from "./helpers";
 
 export const noPropMutation: RuleDefinition = {
   id: "react-luau/no-prop-mutation",
@@ -16,7 +16,7 @@ export const noPropMutation: RuleDefinition = {
 
       const propsName = component.parameters[0];
       if (!propsName) continue;
-      if (isNameShadowedBetween(node, component, propsName)) continue;
+      if (isBindingShadowedBetween(node, component, propsName)) continue;
       const left = assignmentLeft(node.text);
       const escaped = propsName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       if (!new RegExp(`^${escaped}\\s*(?:\\.|\\[)`).test(left)) continue;

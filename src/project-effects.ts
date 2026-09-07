@@ -25,6 +25,8 @@ export interface CachedSourceEffectFunction {
   memberName: string | null;
   exported: boolean;
   directEffect: boolean;
+  mutatesReceiver: boolean;
+  mutatedParameterIndexes: number[];
   dependencies: string[];
 }
 
@@ -83,6 +85,12 @@ interface ParsedRecord extends ModuleIdentity {
   imports: Map<string, string>;
 }
 
+interface MutationCall {
+  targetId: string;
+  receiverRoot: string | null;
+  argumentRoots: Array<string | null>;
+}
+
 interface FunctionRecord {
   id: string;
   moduleId: string;
@@ -94,7 +102,14 @@ interface FunctionRecord {
   body: SyntaxNode;
   parameters: string[];
   directEffect: boolean;
+  mutatesReceiver: boolean;
+  mutatedParameterIndexes: Set<number>;
   dependencies: Set<string>;
+  mutationCalls: MutationCall[];
+  parameterOrigins: Map<string, number>;
+  externalRoots: Set<string>;
+  ownedRoots: Set<string>;
+  localNames: Set<string>;
 }
 
 export interface EffectWorkerState {
@@ -121,6 +136,24 @@ function topLevelReturnName(root: SyntaxNode): string | null {
     return null;
   }
   return null;
+}
+
+function topLevelImports(root: SyntaxNode, moduleAliases: Map<string, string>): Map<string, string> {
+  const imports = new Map<string, string>();
+  for (const node of root.namedChildren) {
+    if (node.type !== "variable_declaration") continue;
+    const { names, expressions } = declarationParts(node);
+    for (let index = 0; index < names.length; index += 1) {
+      const expression = expressions[index] ?? expressions[0];
+      if (expression?.type !== "function_call") continue;
+      const text = expression.text.trim();
+      const match = text.match(/^require\s*\((.*?)\)\s*$/s);
+      if (!match) continue;
+      const moduleId = resolveModuleReference(normalizeRequireTarget(match[1]), moduleAliases);
+      if (moduleId) imports.set(names[index], moduleId);
+    }
+  }
+  return imports;
 }
 
 function parameterNames(node: SyntaxNode): string[] {
@@ -174,6 +207,26 @@ function rootIdentifier(node: SyntaxNode | null | undefined): string | null {
   return text.match(/^([A-Za-z_][A-Za-z0-9_]*)/)?.[1] ?? null;
 }
 
+function callArguments(node: SyntaxNode): SyntaxNode[] {
+  if (node.type !== "function_call") return [];
+  return node.childForFieldName("arguments")?.namedChildren ?? [];
+}
+
+function expressionCreatesOwnedValue(node: SyntaxNode, owned: Set<string>): boolean {
+  if (node.type === "table_constructor" || node.type === "function_definition") return true;
+  if (node.type !== "function_call") return false;
+
+  const path = callPath(node)?.replace(/\s+/g, "") ?? "";
+  if (path === "table.clone" || path === "table.create" || path === "table.pack") return true;
+  if (path !== "setmetatable" && path !== "table.freeze") return false;
+
+  const first = callArguments(node)[0];
+  if (!first) return false;
+  if (first.type === "table_constructor") return true;
+  const root = rootIdentifier(first);
+  return Boolean(root && owned.has(root));
+}
+
 function directNodes(body: SyntaxNode): SyntaxNode[] {
   const result: SyntaxNode[] = [];
   const visit = (node: SyntaxNode): void => {
@@ -210,7 +263,14 @@ function topLevelFunctionRecords(record: ParsedRecord): FunctionRecord[] {
       body,
       parameters: parameterNames(node),
       directEffect: false,
+      mutatesReceiver: false,
+      mutatedParameterIndexes: new Set<number>(),
       dependencies: new Set<string>(),
+      mutationCalls: [],
+      parameterOrigins: new Map<string, number>(),
+      externalRoots: new Set<string>(),
+      ownedRoots: new Set<string>(),
+      localNames: new Set<string>(),
     });
   };
 
@@ -307,14 +367,24 @@ function analyzeFunction(
   exportedFunctions: Map<string, string>,
 ): void {
   const parameters = new Set(fn.parameters);
-  if (fn.method) parameters.add("self");
+  const parameterOrigins = new Map<string, number>(fn.parameters.map((name, index) => [name, index] as const));
+  if (fn.method) {
+    parameters.add("self");
+    parameterOrigins.set("self", -1);
+  }
   const locals = new Set<string>();
   const owned = new Set<string>();
   const externalAliases = new Set<string>();
+  const refLocals = new Set<string>();
   const instanceAliases = new Map(moduleInstances);
   const nodes = directNodes(fn.body);
 
   for (const node of nodes) {
+    if (node.type === "function_declaration" && node.id !== fn.node.id) {
+      const declared = node.childForFieldName("name")?.text.replace(/\s+/g, "") ?? "";
+      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(declared)) locals.add(declared);
+      continue;
+    }
     if (node.type !== "variable_declaration") continue;
     const { names, expressions } = declarationParts(node);
     for (let index = 0; index < names.length; index += 1) {
@@ -322,17 +392,26 @@ function analyzeFunction(
       const expression = expressions[index] ?? expressions[0];
       locals.add(name);
       if (!expression) continue;
-      if (expression.type === "table_constructor" || expression.type === "function_definition") owned.add(name);
+      const createsOwnedValue = expressionCreatesOwnedValue(expression, owned);
+      if (createsOwnedValue) owned.add(name);
       const root = rootIdentifier(expression);
-      if (root && (parameters.has(root) || externalAliases.has(root) || (!locals.has(root) && root !== name))) {
+      const parameterOrigin = root ? parameterOrigins.get(root) : undefined;
+      if (!createsOwnedValue && root && parameterOrigin !== undefined) {
+        // Keep argument/receiver mutation conditional. A caller may pass a fresh
+        // render-local value, so it must not become an unconditional effect.
+        parameterOrigins.set(name, parameterOrigin);
+      } else if (!createsOwnedValue && root && (externalAliases.has(root) || (!locals.has(root) && root !== name))) {
+        // Module/global state is externally observable regardless of call-site
+        // ownership, so aliases of it remain safe to classify as effects.
         externalAliases.add(name);
       } else if (root && owned.has(root)) {
         owned.add(name);
       }
 
       if (expression.type === "function_call") {
-        const path = callPath(expression);
-        const match = path?.match(/^([A-Za-z_][A-Za-z0-9_]*)[.:]([A-Za-z_][A-Za-z0-9_]*)$/);
+        const path = callPath(expression)?.replace(/\s+/g, "") ?? "";
+        if (path === "React.useRef") refLocals.add(name);
+        const match = path.match(/^([A-Za-z_][A-Za-z0-9_]*)[.:]([A-Za-z_][A-Za-z0-9_]*)$/);
         if (match) {
           const moduleId = record.imports.get(match[1]);
           const summary = moduleId ? moduleSummaries.get(moduleId) : null;
@@ -357,7 +436,14 @@ function analyzeFunction(
         const root = rootIdentifier(target);
         if (!root) continue;
         if (owned.has(root)) continue;
-        if (parameters.has(root) || externalAliases.has(root) || !locals.has(root)) fn.directEffect = true;
+        if (refLocals.has(root) && target.text.replace(/\s+/g, "") === `${root}.current`) continue;
+        const parameterOrigin = parameterOrigins.get(root);
+        if (parameterOrigin !== undefined) {
+          if (parameterOrigin === -1) fn.mutatesReceiver = true;
+          else fn.mutatedParameterIndexes.add(parameterOrigin);
+          continue;
+        }
+        if (externalAliases.has(root) || !locals.has(root)) fn.directEffect = true;
       }
       continue;
     }
@@ -366,26 +452,89 @@ function analyzeFunction(
     const path = callPath(node);
     if (!path) continue;
 
-    const localTarget = localFunctions.get(path);
-    if (localTarget) fn.dependencies.add(localTarget);
+    const localTarget = !locals.has(path) && !parameters.has(path) ? localFunctions.get(path) : null;
+    if (localTarget) {
+      fn.dependencies.add(localTarget);
+      fn.mutationCalls.push({
+        targetId: localTarget,
+        receiverRoot: null,
+        argumentRoots: callArguments(node).map((argument) => rootIdentifier(argument)),
+      });
+    }
 
-    const sameMember = path.match(/^(?:self|[A-Za-z_][A-Za-z0-9_]*)[:.]([A-Za-z_][A-Za-z0-9_]*)$/);
+    const sameMember = path.match(/^([A-Za-z_][A-Za-z0-9_]*)([:.])([A-Za-z_][A-Za-z0-9_]*)$/);
     if (sameMember) {
-      const receiver = path.split(/[.:]/, 1)[0];
-      if (receiver === "self" || receiver === record.exportName) {
-        const target = memberFunctions.get(sameMember[1]);
-        if (target) fn.dependencies.add(target);
+      const receiver = sameMember[1];
+      if (receiver === "self" || (receiver === record.exportName && !locals.has(receiver) && !parameters.has(receiver))) {
+        const target = memberFunctions.get(sameMember[3]);
+        if (target) {
+          fn.dependencies.add(target);
+          fn.mutationCalls.push({
+            targetId: target,
+            receiverRoot: sameMember[2] === ":" ? receiver : null,
+            argumentRoots: callArguments(node).map((argument) => rootIdentifier(argument)),
+          });
+        }
       }
     }
 
     const importedMember = path.match(/^([A-Za-z_][A-Za-z0-9_]*)[.:]([A-Za-z_][A-Za-z0-9_]*)$/);
     if (importedMember) {
-      const moduleId = record.imports.get(importedMember[1]) ?? instanceAliases.get(importedMember[1]);
+      const root = importedMember[1];
+      const moduleId = instanceAliases.get(root)
+        ?? (!locals.has(root) && !parameters.has(root) ? record.imports.get(root) : undefined);
       if (moduleId) fn.dependencies.add(`${moduleId}::member:${importedMember[2]}`);
-    } else {
+    } else if (!locals.has(path) && !parameters.has(path)) {
       const moduleId = record.imports.get(path);
       const target = moduleId ? exportedFunctions.get(moduleId) : null;
       if (target) fn.dependencies.add(target);
+    }
+  }
+
+  fn.parameterOrigins = parameterOrigins;
+  fn.externalRoots = externalAliases;
+  fn.ownedRoots = owned;
+  fn.localNames = locals;
+}
+
+function markMutationThroughRoot(fn: FunctionRecord, root: string | null): boolean {
+  if (!root) return false;
+  const parameterOrigin = fn.parameterOrigins.get(root);
+  if (parameterOrigin !== undefined) {
+    if (parameterOrigin === -1) {
+      if (fn.mutatesReceiver) return false;
+      fn.mutatesReceiver = true;
+      return true;
+    }
+    if (fn.mutatedParameterIndexes.has(parameterOrigin)) return false;
+    fn.mutatedParameterIndexes.add(parameterOrigin);
+    return true;
+  }
+
+  if (fn.ownedRoots.has(root)) return false;
+  if (fn.externalRoots.has(root) || !fn.localNames.has(root)) {
+    if (fn.directEffect) return false;
+    fn.directEffect = true;
+    return true;
+  }
+  if (fn.localNames.has(root)) return false;
+  return false;
+}
+
+function propagateLocalMutationEffects(functions: FunctionRecord[]): void {
+  const byId = new Map(functions.map((fn) => [fn.id, fn] as const));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const fn of functions) {
+      for (const call of fn.mutationCalls) {
+        const target = byId.get(call.targetId);
+        if (!target) continue;
+        if (target.mutatesReceiver && markMutationThroughRoot(fn, call.receiverRoot)) changed = true;
+        for (const index of target.mutatedParameterIndexes) {
+          if (markMutationThroughRoot(fn, call.argumentRoots[index] ?? null)) changed = true;
+        }
+      }
     }
   }
 }
@@ -395,11 +544,7 @@ export async function indexEffectModuleForWorker(
   moduleAliases: Map<string, string>,
 ): Promise<{ indexed: IndexedEffectWorkerModule; state: EffectWorkerState; tree: Tree }> {
   const tree = await parseLuau(input.source);
-  const imports = new Map<string, string>();
-  for (const match of input.source.matchAll(/\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)/gs)) {
-    const moduleId = resolveModuleReference(normalizeRequireTarget(match[2]), moduleAliases);
-    if (moduleId) imports.set(match[1], moduleId);
-  }
+  const imports = topLevelImports(tree.rootNode, moduleAliases);
 
   const record: ParsedRecord = {
     id: input.id,
@@ -444,6 +589,7 @@ export function analyzeEffectModuleForWorker(
   for (const fn of state.functions) {
     analyzeFunction(fn, state.record, localFunctions, memberFunctions, moduleSummaries, moduleInstances, exportedFunctions);
   }
+  propagateLocalMutationEffects(state.functions);
   return {
     id: state.record.id,
     functions: state.functions.map((fn) => ({
@@ -453,6 +599,8 @@ export function analyzeEffectModuleForWorker(
       memberName: fn.memberName,
       exported: fn.exported,
       directEffect: fn.directEffect,
+      mutatesReceiver: fn.mutatesReceiver,
+      mutatedParameterIndexes: [...fn.mutatedParameterIndexes].sort((a, b) => a - b),
       dependencies: [...fn.dependencies].sort(),
     })),
   };
@@ -551,6 +699,7 @@ export async function buildProjectSourceEffects(
         summariesByModuleId.set(identity.id, {
           effectfulMembers: new Set<string>(),
           effectfulExport: false,
+          mutatingMembers: new Set<string>(),
           instanceFactories: new Set(indexed.instanceFactories),
         });
         if (indexed.exportedFunctionId) exportedFunctions.set(identity.id, indexed.exportedFunctionId);
@@ -562,6 +711,7 @@ export async function buildProjectSourceEffects(
         summariesByModuleId.set(identity.id, {
           effectfulMembers: new Set<string>(),
           effectfulExport: false,
+          mutatingMembers: new Set<string>(),
           instanceFactories: new Set(cached?.instanceFactories ?? []),
         });
         const exported = functions.find((fn) => fn.exported && !fn.memberName);
@@ -594,11 +744,7 @@ export async function buildProjectSourceEffects(
         const source = candidate.source ?? fs.readFileSync(candidate.absolutePath, "utf8");
         const tree = await parseLuau(source);
         parseCache?.set(relativePath, { source, tree });
-        const imports = new Map<string, string>();
-        for (const match of source.matchAll(/\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)/gs)) {
-          const moduleId = resolveModuleReference(normalizeRequireTarget(match[2]), moduleAliases);
-          if (moduleId) imports.set(match[1], moduleId);
-        }
+        const imports = topLevelImports(tree.rootNode, moduleAliases);
         rawRecords.set(identity.id, {
           id: identity.id,
           keys: identity.keys,
@@ -628,6 +774,7 @@ export async function buildProjectSourceEffects(
         const summary: SourceEffectModuleSummary = {
           effectfulMembers: new Set<string>(),
           effectfulExport: false,
+          mutatingMembers: new Set<string>(),
           instanceFactories: new Set<string>(),
         };
         for (const fn of functions) {
@@ -641,6 +788,7 @@ export async function buildProjectSourceEffects(
         summariesByModuleId.set(identity.id, {
           effectfulMembers: new Set<string>(),
           effectfulExport: false,
+          mutatingMembers: new Set<string>(),
           instanceFactories: new Set(cached?.instanceFactories ?? []),
         });
       }
@@ -680,6 +828,7 @@ export async function buildProjectSourceEffects(
       for (const fn of functions) {
         analyzeFunction(fn, record, localFunctions, memberFunctions, summariesByModuleId, moduleInstances, exportedFunctions);
       }
+      propagateLocalMutationEffects(functions);
       analyzedFunctionStatesByModule.set(moduleId, functions.map((fn) => ({
         id: fn.id,
         moduleId: fn.moduleId,
@@ -687,6 +836,8 @@ export async function buildProjectSourceEffects(
         memberName: fn.memberName,
         exported: fn.exported,
         directEffect: fn.directEffect,
+        mutatesReceiver: fn.mutatesReceiver,
+        mutatedParameterIndexes: [...fn.mutatedParameterIndexes].sort((a, b) => a - b),
         dependencies: [...fn.dependencies].sort(),
       })));
       analyzedModuleCount += 1;
@@ -703,7 +854,12 @@ export async function buildProjectSourceEffects(
   let assembledCount = 0;
   for (const identity of identities) {
     const states: CachedSourceEffectFunction[] = (analyzedFunctionStatesByModule.get(identity.id) ?? cachedFunctionStates.get(identity.id) ?? [])
-      .map((fn) => ({ ...fn, dependencies: [...fn.dependencies] }));
+      .map((fn) => ({
+        ...fn,
+        mutatesReceiver: fn.mutatesReceiver ?? false,
+        mutatedParameterIndexes: [...(fn.mutatedParameterIndexes ?? [])],
+        dependencies: [...fn.dependencies],
+      }));
     for (const fn of states) functionStates.set(fn.id, fn);
     const summary = summariesByModuleId.get(identity.id)!;
     cacheModulesResult[identity.relativePath] = {
@@ -770,15 +926,15 @@ export async function buildProjectSourceEffects(
   for (const summary of summariesByModuleId.values()) {
     summary.effectfulMembers.clear();
     summary.effectfulExport = false;
+    summary.mutatingMembers.clear();
   }
   for (let index = 0; index < functions.length; index += 1) {
     const fn = functions[index];
-    if (effectful.has(fn.id)) {
-      const summary = summariesByModuleId.get(fn.moduleId);
-      if (summary) {
-        if (fn.memberName) summary.effectfulMembers.add(fn.memberName);
-        if (fn.exported) summary.effectfulExport = true;
-      }
+    const summary = summariesByModuleId.get(fn.moduleId);
+    if (summary && fn.memberName && fn.mutatesReceiver) summary.mutatingMembers.add(fn.memberName);
+    if (summary && effectful.has(fn.id)) {
+      if (fn.memberName) summary.effectfulMembers.add(fn.memberName);
+      if (fn.exported) summary.effectfulExport = true;
     }
     if ((index & 127) === 127 || index + 1 === functions.length) {
       onProgress?.({ phase: "summarize", current: index + 1, total: summarizeTotal });
