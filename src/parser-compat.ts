@@ -308,6 +308,78 @@ function applyMasks(source: string, ranges: Range[]): string {
   return output;
 }
 
+function genericFunctionParameterRanges(source: string, mask: Uint8Array): Range[] {
+  const ranges: Range[] = [];
+  const functionPattern = /\bfunction\b/g;
+
+  for (const match of source.matchAll(functionPattern)) {
+    const start = match.index;
+    if (!isCode(mask, start, start + match[0].length)) continue;
+
+    let cursor = start + match[0].length;
+    while (cursor < source.length) {
+      const char = source[cursor];
+      if (/\s/.test(char)) {
+        cursor += 1;
+        continue;
+      }
+      if (char === "(") break;
+      if (char === "<") {
+        let depth = 0;
+        const rangeStart = cursor;
+        while (cursor < source.length) {
+          if (isCode(mask, cursor)) {
+            if (source[cursor] === "<") depth += 1;
+            else if (source[cursor] === ">") {
+              depth -= 1;
+              if (depth === 0) {
+                cursor += 1;
+                ranges.push({ start: rangeStart, end: cursor });
+                break;
+              }
+            }
+          }
+          cursor += 1;
+        }
+        break;
+      }
+
+      if (/[A-Za-z0-9_.:]/.test(char)) {
+        cursor += 1;
+        continue;
+      }
+      break;
+    }
+  }
+
+  return ranges;
+}
+
+// The bundled grammar understands variadic types (`...T`) but not generic
+// type-pack references (`T...`). Reorder only pack uses outside a function's
+// generic declaration so Tree-sitter sees an equal-width type node.
+function normalizeGenericTypePackUses(source: string, mask: Uint8Array): string {
+  const declarationRanges = genericFunctionParameterRanges(source, mask);
+  const replacements: Array<{ start: number; end: number; value: string }> = [];
+  const packPattern = /\b[A-Za-z_][A-Za-z0-9_]*\.\.\./g;
+
+  for (const match of source.matchAll(packPattern)) {
+    const start = match.index;
+    const end = start + match[0].length;
+    if (!isCode(mask, start, end)) continue;
+    if (declarationRanges.some((range) => start >= range.start && end <= range.end)) continue;
+
+    const name = match[0].slice(0, -3);
+    replacements.push({ start, end, value: `...${name}` });
+  }
+
+  let output = source;
+  for (const replacement of replacements.sort((a, b) => b.start - a.start)) {
+    output = `${output.slice(0, replacement.start)}${replacement.value}${output.slice(replacement.end)}`;
+  }
+  return output;
+}
+
 function normalizeIntegerLiteralSuffixes(source: string, mask: Uint8Array): string {
   const suffixes: number[] = [];
   const integerPattern = /\b(?:0[xX][0-9A-Fa-f_]+|0[bB][01_]+|[0-9][0-9_]*)i\b/g;
@@ -357,13 +429,14 @@ export function parserCompatibleSource(source: string): string {
   const mask = codeMask(source);
   const keywordCompatible = replaceContextualKeywords(source, mask);
   const literalCompatible = normalizeIntegerLiteralSuffixes(keywordCompatible, mask);
+  const packCompatible = normalizeGenericTypePackUses(literalCompatible, mask);
   const ranges = [
     ...maskTypeAliases(source, mask),
     ...maskTypeLevelBlocks(source, mask),
     ...attributeRanges(source, mask),
     ...explicitTypeArgumentRanges(source, mask),
   ];
-  const masked = applyMasks(literalCompatible, ranges);
+  const masked = applyMasks(packCompatible, ranges);
 
   // tree-sitter-luau 1.2.0 treats a statement-level assignment to the valid
   // Luau identifier `type` as a malformed type alias. Replace only that token
