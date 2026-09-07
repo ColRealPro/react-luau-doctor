@@ -224,7 +224,16 @@ async function runWithApi(
   }));
   const child = Bun.spawn([process.execPath, cli, "ci", "run", "--blocking", blocking], {
     cwd: root,
-    env: { ...process.env, GITHUB_TOKEN: "local-test-token", GITHUB_API_URL: api, GITHUB_REPOSITORY: "test/project", GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: path.join(root, "outputs.txt") },
+    env: {
+      ...process.env,
+      GITHUB_TOKEN: "local-test-token",
+      GITHUB_API_URL: api,
+      GITHUB_GRAPHQL_URL: "",
+      GITHUB_REPOSITORY: "test/project",
+      GITHUB_EVENT_NAME: "pull_request",
+      GITHUB_EVENT_PATH: eventPath,
+      GITHUB_OUTPUT: path.join(root, "outputs.txt"),
+    },
     stdout: "pipe", stderr: "pipe",
   });
   const [stdout, stderr, status] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
@@ -314,6 +323,43 @@ test("PR reporting creates only new comments, resolves fixed threads, counts fix
   assert.equal(result.status, 0, result.stderr);
   assert.ok(requests.some(r => r.method === "PATCH" && r.body.body.includes("1 fixed")));
   assert.match(fs.readFileSync(path.join(root, "outputs.txt"), "utf8"), /fixed-issues=1/);
+});
+
+test("GitHub Enterprise derives the GraphQL endpoint from the REST API URL", async (t) => {
+  const root = createRepo(VALID_COMPONENT);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const base = git(root, "rev-parse", "HEAD");
+  const requests: string[] = [];
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(request) {
+    const url = new URL(request.url);
+    requests.push(url.pathname);
+    if (request.method === "GET") return Response.json([]);
+    if (url.pathname === "/api/graphql") {
+      const body: any = await request.json();
+      if (body.query.includes("DoctorReviewThreads")) {
+        return Response.json({
+          data: {
+            repository: {
+              pullRequest: {
+                reviewThreads: {
+                  nodes: [],
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                },
+              },
+            },
+          },
+        });
+      }
+    }
+    return Response.json({ id: 1 });
+  } });
+  t.after(() => server.stop(true));
+
+  const apiBase = new URL("api/v3", server.url).toString();
+  const result = await runWithApi(root, base, apiBase);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(requests.includes("/api/graphql"));
+  assert.equal(requests.includes("/api/v3graphql"), false);
 });
 
 test("read-only fork token failures preserve diagnostics and the blocking gate", async (t) => {

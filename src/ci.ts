@@ -492,7 +492,9 @@ async function githubApi<T>(repo: string, endpoint: string, options: { method?: 
 function githubGraphQLUrl(): string {
   if (process.env.GITHUB_GRAPHQL_URL) return process.env.GITHUB_GRAPHQL_URL;
   const apiBase = (process.env.GITHUB_API_URL ?? "https://api.github.com").replace(/\/$/, "");
-  return apiBase.endsWith("/api/v3") ? `${apiBase.slice(0, -3)}graphql` : `${apiBase}/graphql`;
+  return apiBase.endsWith("/api/v3")
+    ? `${apiBase.slice(0, -"/v3".length)}/graphql`
+    : `${apiBase}/graphql`;
 }
 
 interface GraphQLResponse<T> {
