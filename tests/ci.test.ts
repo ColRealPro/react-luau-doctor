@@ -317,7 +317,7 @@ test("PR reporting creates only new comments, deletes stale comments, archives e
   fs.writeFileSync(path.join(root, "Component.luau"), INVALID_COMPONENT);
   let result = await runWithApi(root, base, server.url.toString());
   assert.equal(result.status, 1, result.stderr);
-  assert.ok(requests.some(r => r.path.endsWith("/reviews") && r.body.comments[0].line === 3));
+  assert.ok(requests.some(r => r.method === "POST" && r.path.endsWith("/reviews") && r.body.comments[0].line === 3));
   assert.ok(requests.some(r => r.path.includes("/statuses/") && r.body.state === "failure"));
   assert.equal(reviewComments.length, 1);
   assert.match(reviews.get(99)?.body ?? "", /no longer current/);
