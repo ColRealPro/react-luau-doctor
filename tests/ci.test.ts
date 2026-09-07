@@ -59,6 +59,7 @@ test("generated GitHub workflow includes required triggers, permissions, and a p
 
   assert.match(workflow, /pull_request:/);
   assert.match(workflow, /push:\n    branches: \[main\]/);
+  assert.match(workflow, /contents: write/);
   assert.match(workflow, /pull-requests: write/);
   assert.match(workflow, /issues: write/);
   assert.match(workflow, /statuses: write/);
@@ -67,6 +68,22 @@ test("generated GitHub workflow includes required triggers, permissions, and a p
   assert.match(workflow, /bun-version: "1\.4\.0"/);
   assert.ok(workflow.includes(`bunx --bun ${packageJson.name}@${packageJson.version} ci run`));
   assert.match(workflow, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
+});
+
+test("generated GitHub workflow keeps contents read-only when inline review comments are disabled", () => {
+  const workflow = renderGitHubWorkflow({
+    provider: "github",
+    blocking: "none",
+    scope: "changed",
+    comment: true,
+    reviewComments: false,
+    commitStatus: true,
+    directory: ".",
+    project: "*",
+  });
+
+  assert.match(workflow, /contents: read/);
+  assert.doesNotMatch(workflow, /contents: write/);
 });
 
 test("ci install writes a version-pinned GitHub workflow", (t) => {

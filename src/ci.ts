@@ -77,7 +77,8 @@ on:
     branches: [main]
 
 permissions:
-  contents: read
+  # GitHub currently requires Contents: write for the resolveReviewThread GraphQL mutation.
+  contents: ${settings.reviewComments ? "write" : "read"}
   pull-requests: write
   issues: write
   statuses: write
