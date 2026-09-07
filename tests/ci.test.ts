@@ -59,9 +59,10 @@ test("generated GitHub workflow includes required triggers, permissions, and a p
 
   assert.match(workflow, /pull_request:/);
   assert.match(workflow, /push:\n    branches: \[main\]/);
-  assert.match(workflow, /contents: write/);
+  assert.match(workflow, /contents: read/);
+  assert.doesNotMatch(workflow, /contents: write/);
   assert.match(workflow, /pull-requests: write/);
-  assert.match(workflow, /issues: write/);
+  assert.doesNotMatch(workflow, /issues: write/);
   assert.match(workflow, /statuses: write/);
   assert.match(workflow, /fetch-depth: 0/);
   assert.match(workflow, /cancel-in-progress: true/);
@@ -245,7 +246,6 @@ async function runWithApi(
       ...process.env,
       GITHUB_TOKEN: "local-test-token",
       GITHUB_API_URL: api,
-      GITHUB_GRAPHQL_URL: "",
       GITHUB_REPOSITORY: "test/project",
       GITHUB_EVENT_NAME: "pull_request",
       GITHUB_EVENT_PATH: eventPath,
@@ -257,53 +257,76 @@ async function runWithApi(
   return { stdout, stderr, status };
 }
 
-test("PR reporting creates only new comments, resolves fixed threads, counts fixes, and publishes gate status", async (t) => {
+test("PR reporting creates only new comments, deletes stale comments, archives empty reviews, counts fixes, and publishes gate status", async (t) => {
   const root = createRepo(VALID_COMPONENT);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const base = git(root, "rev-parse", "HEAD");
   const requests: Array<{ method: string; path: string; body: any }> = [];
   let sticky: any[] = [];
-  let threads: any[] = [];
+  let reviewComments: any[] = [];
+  const reviews = new Map<number, { body: string }>();
+  reviews.set(99, { body: "React-Luau Doctor review" });
+  let nextReviewId = 100;
+  let nextCommentId = 1000;
   const server = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(request) {
     const url = new URL(request.url);
-    const body: any = request.method === "GET" ? null : await request.json().catch(() => null);
+    const body: any = request.method === "GET" || request.method === "DELETE" ? null : await request.json().catch(() => null);
     requests.push({ method: request.method, path: url.pathname, body });
-    if (request.method === "GET") return Response.json(sticky);
-    if (url.pathname === "/graphql" && body.query.includes("DoctorReviewThreads")) {
-      return Response.json({ data: { repository: { pullRequest: { reviewThreads: {
-        nodes: threads,
-        pageInfo: { hasNextPage: false, endCursor: null },
-      } } } } });
+
+    if (request.method === "GET" && url.pathname.endsWith("/issues/7/comments")) return Response.json(sticky);
+    if (request.method === "GET" && url.pathname.endsWith("/pulls/7/comments")) return Response.json(reviewComments);
+    if (request.method === "GET" && url.pathname.endsWith("/pulls/7/reviews")) {
+      return Response.json([...reviews].map(([id, review]) => ({ id, body: review.body, user: { type: "Bot" } })));
     }
-    if (url.pathname === "/graphql" && body.query.includes("ResolveDoctorThreads")) {
-      for (const id of Object.values(body.variables)) {
-        const thread = threads.find((entry) => entry.id === id);
-        if (thread) thread.isResolved = true;
-      }
-      return Response.json({ data: { thread0: { thread: { id: body.variables.thread0, isResolved: true } } } });
+    if (url.pathname.endsWith("/issues/7/comments") && request.method === "POST") {
+      sticky = [{ id: 10, body: body.body, user: { type: "Bot" } }];
+      return Response.json(sticky[0]);
     }
-    if (url.pathname.endsWith("/issues/7/comments") && request.method === "POST") sticky = [{ id: 10, body: body.body, user: { type: "Bot" } }];
-    if (url.pathname.endsWith("/reviews")) threads.push(...body.comments.map((comment: any, index: number) => ({
-      id: `thread-${threads.length + index}`,
-      isResolved: false,
-      isOutdated: false,
-      path: comment.path,
-      comments: { nodes: [{ body: comment.body, author: { __typename: "Bot" } }] },
-    })));
+    if (url.pathname.endsWith("/issues/comments/10") && request.method === "PATCH") {
+      sticky = [{ id: 10, body: body.body, user: { type: "Bot" } }];
+      return Response.json(sticky[0]);
+    }
+    if (url.pathname.endsWith("/pulls/7/reviews") && request.method === "POST") {
+      const reviewId = nextReviewId++;
+      reviews.set(reviewId, { body: body.body });
+      reviewComments.push(...body.comments.map((comment: any) => ({
+        id: nextCommentId++,
+        pull_request_review_id: reviewId,
+        path: comment.path,
+        position: 1,
+        body: comment.body,
+        user: { type: "Bot" },
+      })));
+      return Response.json({ id: reviewId, body: body.body });
+    }
+    if (url.pathname.includes("/pulls/comments/") && request.method === "DELETE") {
+      const id = Number(url.pathname.split("/").at(-1));
+      reviewComments = reviewComments.filter((comment) => comment.id !== id);
+      return new Response(null, { status: 204 });
+    }
+    const reviewMatch = url.pathname.match(/\/pulls\/7\/reviews\/(\d+)$/);
+    if (reviewMatch && request.method === "PUT") {
+      const reviewId = Number(reviewMatch[1]);
+      reviews.set(reviewId, { body: body.body });
+      return Response.json({ id: reviewId, body: body.body });
+    }
     return Response.json({ id: 1 });
   } });
   t.after(() => server.stop(true));
+
   fs.writeFileSync(path.join(root, "Component.luau"), INVALID_COMPONENT);
   let result = await runWithApi(root, base, server.url.toString());
   assert.equal(result.status, 1, result.stderr);
   assert.ok(requests.some(r => r.path.endsWith("/reviews") && r.body.comments[0].line === 3));
   assert.ok(requests.some(r => r.path.includes("/statuses/") && r.body.state === "failure"));
+  assert.equal(reviewComments.length, 1);
+  assert.match(reviews.get(99)?.body ?? "", /no longer current/);
+
   requests.length = 0;
   result = await runWithApi(root, base, server.url.toString());
   assert.equal(result.status, 1, result.stderr);
-  assert.equal(requests.filter(r => r.path.endsWith("/reviews")).length, 0);
-  assert.equal(threads.filter(thread => !thread.isResolved).length, 1);
-  requests.length = 0;
+  assert.equal(requests.filter(r => r.path.endsWith("/reviews") && r.method === "POST").length, 0);
+  assert.equal(reviewComments.length, 1);
 
   git(root, "add", "Component.luau");
   git(root, "commit", "-m", "first issue");
@@ -311,22 +334,25 @@ test("PR reporting creates only new comments, resolves fixed threads, counts fix
   fs.writeFileSync(path.join(root, "Second.luau"), INVALID_COMPONENT);
   git(root, "add", "Second.luau");
   git(root, "commit", "-m", "second issue");
+  requests.length = 0;
   result = await runWithApi(root, base, server.url.toString(), "error", { action: "synchronize", before: previousHead });
   assert.equal(result.status, 1, result.stderr);
-  const incrementalReview = requests.find(r => r.path.endsWith("/reviews"));
+  const incrementalReview = requests.find(r => r.path.endsWith("/reviews") && r.method === "POST");
   assert.equal(incrementalReview?.body.comments.length, 1);
   assert.equal(incrementalReview?.body.comments[0].path, "Second.luau");
-  assert.equal(threads.filter(thread => !thread.isResolved).length, 2);
-  requests.length = 0;
+  assert.equal(reviewComments.length, 2);
 
   fs.writeFileSync(path.join(root, "Component.luau"), VALID_COMPONENT);
   fs.unlinkSync(path.join(root, "Second.luau"));
+  requests.length = 0;
   result = await runWithApi(root, base, server.url.toString());
   assert.equal(result.status, 0, result.stderr);
   assert.ok(requests.some(r => r.method === "PATCH" && r.path.endsWith("/issues/comments/10")));
-  assert.ok(requests.some(r => r.path === "/graphql" && r.body.query.includes("ResolveDoctorThreads")));
-  assert.equal(requests.some(r => r.method === "DELETE"), false);
-  assert.equal(threads.every(thread => thread.isResolved), true);
+  assert.equal(requests.filter(r => r.method === "DELETE" && r.path.includes("/pulls/comments/")).length, 2);
+  const archivedReviews = requests.filter(r => r.method === "PUT" && /\/pulls\/7\/reviews\/\d+$/.test(r.path));
+  assert.equal(archivedReviews.length, 2);
+  assert.ok(archivedReviews.every(r => r.body.body.includes("no longer current")));
+  assert.equal(reviewComments.length, 0);
   assert.ok(requests.some(r => r.path.includes("/statuses/") && r.body.state === "success"));
 
   git(root, "add", "-A");
@@ -342,37 +368,48 @@ test("PR reporting creates only new comments, resolves fixed threads, counts fix
   assert.match(fs.readFileSync(path.join(root, "outputs.txt"), "utf8"), /fixed-issues=1/);
 });
 
-test("reintroduced findings replace stale outdated Doctor threads", async (t) => {
+test("reintroduced findings replace stale outdated Doctor comments", async (t) => {
   const root = createRepo(VALID_COMPONENT);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const base = git(root, "rev-parse", "HEAD");
   const requests: Array<{ method: string; path: string; body: any }> = [];
-  let threads: any[] = [];
+  let reviewComments: any[] = [];
+  const reviews = new Map<number, { body: string }>();
+  let nextReviewId = 200;
+  let nextCommentId = 2000;
   const server = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(request) {
     const url = new URL(request.url);
-    const body: any = request.method === "GET" ? null : await request.json().catch(() => null);
+    const body: any = request.method === "GET" || request.method === "DELETE" ? null : await request.json().catch(() => null);
     requests.push({ method: request.method, path: url.pathname, body });
-    if (request.method === "GET") return Response.json([]);
-    if (url.pathname === "/graphql" && body.query.includes("DoctorReviewThreads")) {
-      return Response.json({ data: { repository: { pullRequest: { reviewThreads: {
-        nodes: threads,
-        pageInfo: { hasNextPage: false, endCursor: null },
-      } } } } });
+    if (request.method === "GET" && url.pathname.endsWith("/issues/7/comments")) return Response.json([]);
+    if (request.method === "GET" && url.pathname.endsWith("/pulls/7/comments")) return Response.json(reviewComments);
+    if (request.method === "GET" && url.pathname.endsWith("/pulls/7/reviews")) {
+      return Response.json([...reviews].map(([id, review]) => ({ id, body: review.body, user: { type: "Bot" } })));
     }
-    if (url.pathname === "/graphql" && body.query.includes("ResolveDoctorThreads")) {
-      for (const id of Object.values(body.variables)) {
-        const thread = threads.find((entry) => entry.id === id);
-        if (thread) thread.isResolved = true;
-      }
-      return Response.json({ data: { thread0: { thread: { id: body.variables.thread0, isResolved: true } } } });
+    if (url.pathname.endsWith("/pulls/7/reviews") && request.method === "POST") {
+      const reviewId = nextReviewId++;
+      reviews.set(reviewId, { body: body.body });
+      reviewComments.push(...body.comments.map((comment: any) => ({
+        id: nextCommentId++,
+        pull_request_review_id: reviewId,
+        path: comment.path,
+        position: 1,
+        body: comment.body,
+        user: { type: "Bot" },
+      })));
+      return Response.json({ id: reviewId });
     }
-    if (url.pathname.endsWith("/reviews")) threads.push(...body.comments.map((comment: any, index: number) => ({
-      id: `thread-${threads.length + index}`,
-      isResolved: false,
-      isOutdated: false,
-      path: comment.path,
-      comments: { nodes: [{ body: comment.body, author: { __typename: "Bot" } }] },
-    })));
+    if (url.pathname.includes("/pulls/comments/") && request.method === "DELETE") {
+      const id = Number(url.pathname.split("/").at(-1));
+      reviewComments = reviewComments.filter((comment) => comment.id !== id);
+      return new Response(null, { status: 204 });
+    }
+    const reviewMatch = url.pathname.match(/\/pulls\/7\/reviews\/(\d+)$/);
+    if (reviewMatch && request.method === "PUT") {
+      const reviewId = Number(reviewMatch[1]);
+      reviews.set(reviewId, { body: body.body });
+      return Response.json({ id: reviewId, body: body.body });
+    }
     return Response.json({ id: 1 });
   } });
   t.after(() => server.stop(true));
@@ -380,7 +417,8 @@ test("reintroduced findings replace stale outdated Doctor threads", async (t) =>
   fs.writeFileSync(path.join(root, "Component.luau"), INVALID_COMPONENT);
   let result = await runWithApi(root, base, server.url.toString());
   assert.equal(result.status, 1, result.stderr);
-  assert.equal(threads.length, 1);
+  assert.equal(reviewComments.length, 1);
+  const originalReviewId = reviewComments[0].pull_request_review_id;
 
   git(root, "add", "Component.luau");
   git(root, "commit", "-m", "introduce issue");
@@ -388,7 +426,7 @@ test("reintroduced findings replace stale outdated Doctor threads", async (t) =>
   git(root, "add", "Component.luau");
   git(root, "commit", "-m", "fix issue");
   const fixedHead = git(root, "rev-parse", "HEAD");
-  threads[0].isOutdated = true;
+  reviewComments[0].position = null;
 
   fs.writeFileSync(path.join(root, "Component.luau"), INVALID_COMPONENT);
   git(root, "add", "Component.luau");
@@ -396,14 +434,22 @@ test("reintroduced findings replace stale outdated Doctor threads", async (t) =>
   requests.length = 0;
   result = await runWithApi(root, base, server.url.toString(), "error", { action: "synchronize", before: fixedHead });
   assert.equal(result.status, 1, result.stderr);
-  assert.ok(requests.some(r => r.path === "/graphql" && r.body.query.includes("ResolveDoctorThreads")));
-  const review = requests.find(r => r.path.endsWith("/reviews"));
+  const review = requests.find(r => r.path.endsWith("/reviews") && r.method === "POST");
   assert.equal(review?.body.comments.length, 1);
-  assert.equal(threads.filter(thread => !thread.isResolved).length, 1);
-  assert.equal(threads.length, 2);
+  assert.ok(requests.some(r => r.method === "DELETE" && r.path.includes("/pulls/comments/")));
+  assert.ok(requests.some(r => r.method === "PUT" && r.path.endsWith(`/pulls/7/reviews/${originalReviewId}`)));
+  assert.equal(reviewComments.length, 1);
+  assert.notEqual(reviewComments[0].pull_request_review_id, originalReviewId);
+  assert.match(reviews.get(originalReviewId)?.body ?? "", /no longer current/);
+
+  requests.length = 0;
+  result = await runWithApi(root, base, server.url.toString(), "error", { action: "synchronize", before: fixedHead });
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(requests.filter(r => r.path.endsWith("/reviews") && r.method === "POST").length, 0);
+  assert.equal(requests.filter(r => r.method === "DELETE" && r.path.includes("/pulls/comments/")).length, 0);
 });
 
-test("GitHub Enterprise derives the GraphQL endpoint from the REST API URL", async (t) => {
+test("GitHub Enterprise review management stays on the REST API base", async (t) => {
   const root = createRepo(VALID_COMPONENT);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const base = git(root, "rev-parse", "HEAD");
@@ -412,23 +458,6 @@ test("GitHub Enterprise derives the GraphQL endpoint from the REST API URL", asy
     const url = new URL(request.url);
     requests.push(url.pathname);
     if (request.method === "GET") return Response.json([]);
-    if (url.pathname === "/api/graphql") {
-      const body: any = await request.json();
-      if (body.query.includes("DoctorReviewThreads")) {
-        return Response.json({
-          data: {
-            repository: {
-              pullRequest: {
-                reviewThreads: {
-                  nodes: [],
-                  pageInfo: { hasNextPage: false, endCursor: null },
-                },
-              },
-            },
-          },
-        });
-      }
-    }
     return Response.json({ id: 1 });
   } });
   t.after(() => server.stop(true));
@@ -436,8 +465,8 @@ test("GitHub Enterprise derives the GraphQL endpoint from the REST API URL", asy
   const apiBase = new URL("api/v3", server.url).toString();
   const result = await runWithApi(root, base, apiBase);
   assert.equal(result.status, 0, result.stderr);
-  assert.ok(requests.includes("/api/graphql"));
-  assert.equal(requests.includes("/api/v3graphql"), false);
+  assert.ok(requests.some(pathname => pathname.includes("/api/v3/repos/test/project/pulls/7/comments")));
+  assert.equal(requests.some(pathname => pathname.includes("graphql")), false);
 });
 
 test("read-only fork token failures preserve diagnostics and the blocking gate", async (t) => {
@@ -456,12 +485,12 @@ test("read-only fork token failures preserve diagnostics and the blocking gate",
   assert.match(fs.readFileSync(path.join(root, "outputs.txt"), "utf8"), /error-count=1/);
 });
 
-test("GitHub reporting retries rate limits using Retry-After", async (t) => {
+test("GitHub reporting retries REST rate limits using Retry-After", async (t) => {
   const root = createRepo(VALID_COMPONENT);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const base = git(root, "rev-parse", "HEAD");
   let summaryRequests = 0;
-  let graphqlRequests = 0;
+  let reviewCommentRequests = 0;
   const server = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(request) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname.endsWith("/issues/7/comments")) {
@@ -471,19 +500,14 @@ test("GitHub reporting retries rate limits using Retry-After", async (t) => {
       }
       return Response.json([]);
     }
-    if (url.pathname === "/graphql") {
-      graphqlRequests += 1;
-      if (graphqlRequests === 1) {
-        return Response.json({ errors: [{ message: "API rate limit exceeded" }] }, { headers: { "Retry-After": "0" } });
+    if (request.method === "GET" && url.pathname.endsWith("/pulls/7/comments")) {
+      reviewCommentRequests += 1;
+      if (reviewCommentRequests === 1) {
+        return Response.json({ message: "secondary rate limit" }, { status: 429, headers: { "Retry-After": "0" } });
       }
-      const body: any = await request.json();
-      if (body.query.includes("DoctorReviewThreads")) {
-        return Response.json({ data: { repository: { pullRequest: { reviewThreads: {
-          nodes: [],
-          pageInfo: { hasNextPage: false, endCursor: null },
-        } } } } });
-      }
+      return Response.json([]);
     }
+    if (request.method === "GET" && url.pathname.endsWith("/pulls/7/reviews")) return Response.json([]);
     return Response.json({ id: 1 });
   } });
   t.after(() => server.stop(true));
@@ -491,9 +515,8 @@ test("GitHub reporting retries rate limits using Retry-After", async (t) => {
   const result = await runWithApi(root, base, server.url.toString());
   assert.equal(result.status, 0, result.stderr);
   assert.equal(summaryRequests, 2);
-  assert.equal(graphqlRequests, 2);
-  assert.match(result.stderr, /GitHub API 429; retrying in 0 seconds/);
-  assert.match(result.stderr, /GitHub API 200; retrying in 0 seconds/);
+  assert.equal(reviewCommentRequests, 2);
+  assert.equal((result.stderr.match(/GitHub API 429; retrying in 0 seconds/g) ?? []).length, 2);
 });
 
 test("generated workflow passes directory values as data, including shell metacharacters", (t) => {

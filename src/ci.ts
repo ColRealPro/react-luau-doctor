@@ -60,7 +60,6 @@ const GITLAB_WORKFLOW = ".gitlab-ci.yml";
 const SUMMARY_MARKER = "<!-- react-luau-doctor:summary -->";
 const REVIEW_MARKER = "<!-- react-luau-doctor:review -->";
 const MAX_REVIEW_COMMENTS = 20;
-const MAX_RESOLVE_THREADS_PER_REQUEST = 100;
 const MAX_GITHUB_RETRIES = 2;
 const MAX_RATE_LIMIT_WAIT_MS = 60_000;
 const PACKAGE_SPEC = `${packageJson.name}@${packageJson.version}`;
@@ -77,10 +76,8 @@ on:
     branches: [main]
 
 permissions:
-  # GitHub currently requires Contents: write for the resolveReviewThread GraphQL mutation.
-  contents: ${settings.reviewComments ? "write" : "read"}
+  contents: read
   pull-requests: write
-  issues: write
   statuses: write
 
 concurrency:
@@ -490,29 +487,6 @@ async function githubApi<T>(repo: string, endpoint: string, options: { method?: 
   return githubRequest<T>(`${apiBase}/repos/${repo}${endpoint}`, options);
 }
 
-function githubGraphQLUrl(): string {
-  if (process.env.GITHUB_GRAPHQL_URL) return process.env.GITHUB_GRAPHQL_URL;
-  const apiBase = (process.env.GITHUB_API_URL ?? "https://api.github.com").replace(/\/$/, "");
-  return apiBase.endsWith("/api/v3")
-    ? `${apiBase.slice(0, -"/v3".length)}/graphql`
-    : `${apiBase}/graphql`;
-}
-
-interface GraphQLResponse<T> {
-  data?: T;
-  errors?: Array<{ message?: string }>;
-}
-
-async function githubGraphQL<T>(query: string, variables: Record<string, unknown>): Promise<T> {
-  const response = await githubRequest<GraphQLResponse<T>>(githubGraphQLUrl(), {
-    method: "POST",
-    body: { query, variables },
-  });
-  if (response.errors?.length) throw new Error(`GitHub GraphQL: ${response.errors.map((error) => error.message ?? "unknown error").join("; ")}`);
-  if (!response.data) throw new Error("GitHub GraphQL returned no data");
-  return response.data;
-}
-
 function repoRelativeDiagnosticPath(directory: string, diagnosticFile: string): string {
   const absoluteDirectory = path.resolve(directory);
   const repoRoot = findGitRoot(absoluteDirectory);
@@ -629,73 +603,48 @@ function reviewCommentBody(directory: string, diagnostic: Diagnostic): string {
   return `${REVIEW_MARKER}\n<!-- react-luau-doctor:fingerprint:${fingerprint} -->\n**React-Luau Doctor** · \`${diagnostic.rule}\` (${diagnostic.severity})\n\n${diagnostic.message}${diagnostic.help ? `\n\n${diagnostic.help}` : ""}`;
 }
 
-interface GitHubReviewThread {
-  id: string;
-  isResolved: boolean;
-  isOutdated: boolean;
+interface GitHubReviewComment {
+  id: number;
+  pull_request_review_id: number;
   path: string;
-  comments: {
-    nodes: Array<{
-      body: string;
-      author: { __typename?: string } | null;
-    }>;
-  };
+  position: number | null;
+  body: string;
+  user: { type?: string } | null;
 }
 
-async function listReviewThreads(repo: string, pullNumber: number): Promise<GitHubReviewThread[]> {
-  const separator = repo.indexOf("/");
-  if (separator < 1 || separator === repo.length - 1) throw new Error(`Invalid GitHub repository name: ${repo}`);
-  const owner = repo.slice(0, separator);
-  const name = repo.slice(separator + 1);
-  const threads: GitHubReviewThread[] = [];
-  let cursor: string | null = null;
+interface GitHubReview {
+  id: number;
+  body: string | null;
+  user: { type?: string } | null;
+}
 
-  for (;;) {
-    const data: {
-      repository: {
-        pullRequest: {
-          reviewThreads: {
-            nodes: GitHubReviewThread[];
-            pageInfo: { hasNextPage: boolean; endCursor: string | null };
-          };
-        } | null;
-      } | null;
-    } = await githubGraphQL(`
-      query DoctorReviewThreads($owner: String!, $name: String!, $pull: Int!, $cursor: String) {
-        repository(owner: $owner, name: $name) {
-          pullRequest(number: $pull) {
-            reviewThreads(first: 100, after: $cursor) {
-              nodes {
-                id
-                isResolved
-                isOutdated
-                path
-                comments(first: 1) {
-                  nodes {
-                    body
-                    author { __typename }
-                  }
-                }
-              }
-              pageInfo { hasNextPage endCursor }
-            }
-          }
-        }
-      }
-    `, { owner, name, pull: pullNumber, cursor });
-    const connection = data.repository?.pullRequest?.reviewThreads;
-    if (!connection) throw new Error(`Could not load review threads for pull request ${pullNumber}`);
-    threads.push(...connection.nodes);
-    if (!connection.pageInfo.hasNextPage) return threads;
-    cursor = connection.pageInfo.endCursor;
-    if (!cursor) throw new Error("GitHub review thread pagination returned no cursor");
+const ARCHIVED_REVIEW_BODY = "✅ React-Luau Doctor: findings from this review are no longer current. Active findings, if any, are shown in newer reviews.";
+
+async function listReviewComments(repo: string, pullNumber: number): Promise<GitHubReviewComment[]> {
+  const comments: GitHubReviewComment[] = [];
+  for (let page = 1; ; page += 1) {
+    const batch = await githubApi<GitHubReviewComment[]>(repo, `/pulls/${pullNumber}/comments?per_page=100&page=${page}`);
+    comments.push(...batch);
+    if (batch.length < 100) return comments;
   }
 }
 
-function doctorThreadFingerprint(thread: GitHubReviewThread): string | null {
-  const comment = thread.comments.nodes[0];
-  if (comment?.author?.__typename !== "Bot" || !comment.body.startsWith(REVIEW_MARKER)) return null;
-  return fingerprintFromReviewBody(comment.body, thread.path);
+async function listReviews(repo: string, pullNumber: number): Promise<GitHubReview[]> {
+  const reviews: GitHubReview[] = [];
+  for (let page = 1; ; page += 1) {
+    const batch = await githubApi<GitHubReview[]>(repo, `/pulls/${pullNumber}/reviews?per_page=100&page=${page}`);
+    reviews.push(...batch);
+    if (batch.length < 100) return reviews;
+  }
+}
+
+function isDoctorReview(review: GitHubReview): boolean {
+  return review.user?.type === "Bot" && (review.body?.includes("React-Luau Doctor") ?? false);
+}
+
+function doctorReviewCommentFingerprint(comment: GitHubReviewComment): string | null {
+  if (comment.user?.type !== "Bot" || !comment.body.startsWith(REVIEW_MARKER)) return null;
+  return fingerprintFromReviewBody(comment.body, comment.path);
 }
 
 function takeCount(counts: Map<string, number>, key: string): boolean {
@@ -705,15 +654,8 @@ function takeCount(counts: Map<string, number>, key: string): boolean {
   return true;
 }
 
-async function resolveReviewThreads(threadIds: string[]): Promise<void> {
-  for (let offset = 0; offset < threadIds.length; offset += MAX_RESOLVE_THREADS_PER_REQUEST) {
-    const batch = threadIds.slice(offset, offset + MAX_RESOLVE_THREADS_PER_REQUEST);
-    const declarations = batch.map((_, index) => `$thread${index}: ID!`).join(", ");
-    const mutations = batch.map((_, index) => `thread${index}: resolveReviewThread(input: { threadId: $thread${index} }) { thread { id isResolved } }`).join("\n");
-    const variables = Object.fromEntries(batch.map((id, index) => [`thread${index}`, id]));
-    await githubGraphQL(`mutation ResolveDoctorThreads(${declarations}) { ${mutations} }`, variables);
-    if (offset + batch.length < threadIds.length) await wait(1000);
-  }
+function incrementCount(counts: Map<string, number>, key: string): void {
+  counts.set(key, (counts.get(key) ?? 0) + 1);
 }
 
 async function manageReviewComments(
@@ -723,54 +665,83 @@ async function manageReviewComments(
   newDiagnostics: Diagnostic[],
   directory: string,
   newBase: string,
+  pullBase: string,
 ): Promise<void> {
-  const threads = await listReviewThreads(repo, pullNumber);
+  const [allReviewComments, reviews] = await Promise.all([
+    listReviewComments(repo, pullNumber),
+    listReviews(repo, pullNumber),
+  ]);
+  const reviewComments = allReviewComments
+    .map((comment) => ({ comment, fingerprint: doctorReviewCommentFingerprint(comment) }))
+    .filter((entry): entry is { comment: GitHubReviewComment; fingerprint: string } => entry.fingerprint !== null);
+
   const activeCounts = new Map<string, number>();
-  for (const diagnostic of currentReport.diagnostics) {
-    const fingerprint = diagnosticReviewFingerprint(directory, diagnostic);
-    activeCounts.set(fingerprint, (activeCounts.get(fingerprint) ?? 0) + 1);
-  }
+  for (const diagnostic of currentReport.diagnostics) incrementCount(activeCounts, diagnosticReviewFingerprint(directory, diagnostic));
+
   const newCounts = new Map<string, number>();
-  for (const diagnostic of newDiagnostics) {
-    const fingerprint = diagnosticReviewFingerprint(directory, diagnostic);
-    newCounts.set(fingerprint, (newCounts.get(fingerprint) ?? 0) + 1);
+  for (const diagnostic of newDiagnostics) incrementCount(newCounts, diagnosticReviewFingerprint(directory, diagnostic));
+
+  interface StaleComment {
+    comment: GitHubReviewComment;
+    fingerprint: string;
+    needsReplacement: boolean;
   }
 
-  const resolvedThreadIds: string[] = [];
-  for (const thread of threads) {
-    if (thread.isResolved) continue;
-    const fingerprint = doctorThreadFingerprint(thread);
-    if (!fingerprint) continue;
+  const replacementCounts = new Map<string, number>();
+  const staleComments: StaleComment[] = [];
 
-    if (thread.isOutdated && (newCounts.get(fingerprint) ?? 0) > 0) {
-      resolvedThreadIds.push(thread.id);
-      continue;
-    }
+  // Prefer live comments when duplicate fingerprints exist. Outdated comments
+  // have position=null in GitHub's REST API and should never suppress a current
+  // inline comment for the same finding.
+  const orderedComments = reviewComments.slice().sort((left, right) =>
+    Number(left.comment.position === null) - Number(right.comment.position === null));
 
-    if (takeCount(activeCounts, fingerprint)) {
+  for (const { comment, fingerprint } of orderedComments) {
+    if (comment.position !== null && takeCount(activeCounts, fingerprint)) {
+      // A live existing comment represents this finding. Consume the introduced
+      // occurrence too so workflow reruns do not create duplicates.
       takeCount(newCounts, fingerprint);
       continue;
     }
 
-    resolvedThreadIds.push(thread.id);
+    const needsReplacement = takeCount(activeCounts, fingerprint);
+    if (needsReplacement) {
+      incrementCount(replacementCounts, fingerprint);
+      // Replacing an outdated comment also satisfies a newly introduced copy of
+      // the same finding, if this push reintroduced it.
+      takeCount(newCounts, fingerprint);
+    }
+    staleComments.push({ comment, fingerprint, needsReplacement });
   }
 
-  const lineMap = changedLineMap(directory, newBase);
-  const comments = newDiagnostics
-    .filter((diagnostic) => touchesChangedLine(diagnostic, lineMap.get(diagnostic.file) ?? []))
-    .filter((diagnostic) => {
-      const fingerprint = diagnosticReviewFingerprint(directory, diagnostic);
-      return takeCount(newCounts, fingerprint);
-    })
-    .slice(0, MAX_REVIEW_COMMENTS)
-    .map((diagnostic) => ({
-      path: repoRelativeDiagnosticPath(directory, diagnostic.file),
-      line: diagnostic.location.line,
-      side: "RIGHT",
-      body: reviewCommentBody(directory, diagnostic),
-    }));
+  const newLineMap = changedLineMap(directory, newBase);
+  const pullLineMap = newBase === pullBase ? newLineMap : changedLineMap(directory, pullBase);
+  const candidates: Array<{ diagnostic: Diagnostic; replacement: boolean }> = [];
+
+  for (const diagnostic of newDiagnostics) {
+    if (!touchesChangedLine(diagnostic, newLineMap.get(diagnostic.file) ?? [])) continue;
+    const fingerprint = diagnosticReviewFingerprint(directory, diagnostic);
+    if (!takeCount(newCounts, fingerprint)) continue;
+    candidates.push({ diagnostic, replacement: false });
+  }
+
+  for (const diagnostic of currentReport.diagnostics) {
+    if (!touchesChangedLine(diagnostic, pullLineMap.get(diagnostic.file) ?? [])) continue;
+    const fingerprint = diagnosticReviewFingerprint(directory, diagnostic);
+    if (!takeCount(replacementCounts, fingerprint)) continue;
+    candidates.push({ diagnostic, replacement: true });
+  }
+
+  const selected = candidates.slice(0, MAX_REVIEW_COMMENTS);
+  const comments = selected.map(({ diagnostic }) => ({
+    path: repoRelativeDiagnosticPath(directory, diagnostic.file),
+    line: diagnostic.location.line,
+    side: "RIGHT",
+    body: reviewCommentBody(directory, diagnostic),
+  }));
 
   const failures: string[] = [];
+  let postedNewComments = true;
   if (comments.length > 0) {
     try {
       await githubApi(repo, `/pulls/${pullNumber}/reviews`, {
@@ -778,16 +749,53 @@ async function manageReviewComments(
         body: { event: "COMMENT", body: "React-Luau Doctor found new issues", comments },
       });
     } catch (error) {
+      postedNewComments = false;
       failures.push(`could not create new review comments: ${errorMessage(error)}`);
     }
   }
-  if (resolvedThreadIds.length > 0) {
-    try {
-      await resolveReviewThreads(resolvedThreadIds);
-    } catch (error) {
-      failures.push(`could not resolve fixed review threads: ${errorMessage(error)}`);
+
+  // Do not remove old feedback if a replacement review failed to post. Fixed
+  // findings can be deleted immediately when there was nothing new to publish.
+  if (postedNewComments) {
+    const postedReplacementCounts = new Map<string, number>();
+    for (const candidate of selected) {
+      if (candidate.replacement) incrementCount(postedReplacementCounts, diagnosticReviewFingerprint(directory, candidate.diagnostic));
+    }
+
+    const remainingByReview = new Map<number, number>();
+    for (const { comment } of reviewComments) {
+      remainingByReview.set(comment.pull_request_review_id, (remainingByReview.get(comment.pull_request_review_id) ?? 0) + 1);
+    }
+    for (const stale of staleComments) {
+      if (stale.needsReplacement && !takeCount(postedReplacementCounts, stale.fingerprint)) continue;
+      try {
+        await githubApi<void>(repo, `/pulls/comments/${stale.comment.id}`, { method: "DELETE" });
+        const reviewId = stale.comment.pull_request_review_id;
+        const remaining = Math.max(0, (remainingByReview.get(reviewId) ?? 1) - 1);
+        remainingByReview.set(reviewId, remaining);
+      } catch (error) {
+        failures.push(`could not delete stale review comment ${stale.comment.id}: ${errorMessage(error)}`);
+      }
+    }
+
+    // Submitted reviews themselves cannot be deleted. Rewrite any old Doctor
+    // review that no longer has Doctor comments so the PR timeline does not
+    // accumulate blank review cards. This also cleans up blank reviews created
+    // by older Doctor versions on the next run.
+    for (const review of reviews) {
+      if (!isDoctorReview(review) || review.body === ARCHIVED_REVIEW_BODY) continue;
+      if ((remainingByReview.get(review.id) ?? 0) > 0) continue;
+      try {
+        await githubApi(repo, `/pulls/${pullNumber}/reviews/${review.id}`, {
+          method: "PUT",
+          body: { body: ARCHIVED_REVIEW_BODY },
+        });
+      } catch (error) {
+        failures.push(`could not archive empty review ${review.id}: ${errorMessage(error)}`);
+      }
     }
   }
+
   if (failures.length > 0) throw new Error(failures.join("; "));
 }
 
@@ -884,6 +892,7 @@ async function runCiJob(argv: string[]): Promise<void> {
           reviewChanges.diagnostics,
           path.resolve(settings.directory),
           reviewChanges.base ?? base,
+          base,
         );
       } catch (error) {
         process.stderr.write(`react-luau-doctor: could not update inline review comments: ${errorMessage(error)}\n`);
