@@ -130,6 +130,12 @@ export interface SourceEffectModuleSummary {
   effectfulExport: boolean;
   /** Members that mutate their receiver but are not otherwise proven globally effectful. */
   mutatingMembers: Set<string>;
+  /** Parameters mutated by the module's exported function. */
+  mutatingExportParameters: Set<number>;
+  /** Parameters mutated by exported/member functions, keyed by member name. */
+  mutatingMemberParameters: Map<string, Set<number>>;
+  /** Parameters mutated by named module-local functions in this source file. */
+  localMutatingParameters: Map<string, Set<number>>;
   instanceFactories: Set<string>;
 }
 

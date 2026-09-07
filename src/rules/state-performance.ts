@@ -2,6 +2,7 @@ import type { Node as SyntaxNode } from "web-tree-sitter";
 import type { DiagnosticInput, FunctionInfo, RuleContext, RuleDefinition, StateBinding } from "../types";
 import { sameNode } from "../ast/walk";
 import { assignmentTargetNode, callNameNode, containsUnshadowedIdentifier, identifierNode, isBindingShadowedBetween, stateBindingsFor } from "./helpers";
+import { mightMutateParameters, mutatedParameterIndexesForCall, mutationOriginForExpression } from "./parameter-mutations";
 
 const TRIVIAL_INITIALIZER_PATHS = new Set([
   "tostring",
@@ -317,10 +318,16 @@ export const noDirectStateMutation: RuleDefinition = {
 
         if (node.type === "assignment_statement" || node.type === "update_statement") {
           mutates = new RegExp(`^\\s*${escaped}\\s*(?:\\.|\\[)`).test(node.text);
-        } else if (node.type === "function_call") {
-          const path = context.getCallPath(node) ?? "";
-          if (["table.insert", "table.remove", "table.sort", "table.clear", "table.move"].includes(path)) {
-            mutates = context.callArguments(node)[0]?.text.trim() === binding.valueName;
+        } else if (node.type === "function_call" && mightMutateParameters(context, node)) {
+          const arguments_ = context.callArguments(node);
+          for (const index of mutatedParameterIndexesForCall(context, node, owner)) {
+            const argument = arguments_[index];
+            if (!argument) continue;
+            const origin = mutationOriginForExpression(context, argument, owner);
+            if (origin.kind === "state" && origin.binding === binding) {
+              mutates = true;
+              break;
+            }
           }
         }
 

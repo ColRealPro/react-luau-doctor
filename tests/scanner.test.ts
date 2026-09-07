@@ -1721,3 +1721,102 @@ return Component
     assert.ok(findings.every(d => d.severity === severity));
   }
 });
+
+test("parameter mutation summaries follow props through local and imported helpers without flagging fresh copies", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-parameter-props-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Mutator.luau"), `local Mutator = {}
+function Mutator.mutate(value)
+  value.changed = true
+end
+return Mutator
+`);
+
+  fs.writeFileSync(path.join(root, "FunctionMutator.luau"), `local function mutate(value)
+  table.insert(value, "changed")
+end
+return mutate
+`);
+
+  fs.writeFileSync(path.join(root, "Wrapper.luau"), `local mutate = require(script.Parent.FunctionMutator)
+local function wrappedMutate(value)
+  mutate(value)
+end
+return wrappedMutate
+`);
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local Mutator = require(script.Parent.Mutator)
+local wrappedMutate = require(script.Parent.Wrapper)
+
+local function localMutate(value)
+  value.changed = true
+end
+
+local function outer(value)
+  localMutate(value)
+end
+
+local function Component(props)
+  local alias = props.data
+  outer(alias)
+  Mutator.mutate(props.other)
+  wrappedMutate(props.third)
+  table.insert(props.items, "value")
+
+  local reassigned = props.reassigned
+  reassigned = {}
+  localMutate(reassigned)
+
+  local cloned = table.clone(props.cloned)
+  Mutator.mutate(cloned)
+
+  return React.createElement("Frame")
+end
+
+return Component
+`);
+
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation");
+  assert.equal(diagnostics.length, 4);
+  assert.ok(diagnostics.some((diagnostic) => diagnostic.message.includes("outer mutates an argument derived from props")));
+  assert.ok(diagnostics.some((diagnostic) => diagnostic.message.includes("Mutator.mutate mutates an argument derived from props")));
+  assert.ok(diagnostics.some((diagnostic) => diagnostic.message.includes("wrappedMutate mutates an argument derived from props")));
+  assert.ok(diagnostics.some((diagnostic) => diagnostic.message.includes("table.insert mutates an argument derived from props")));
+});
+
+test("parameter mutation summaries follow table state through helper calls without flagging cloned state", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-parameter-state-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Mutator.luau"), `local Mutator = {}
+function Mutator.mutate(value)
+  value.changed = true
+end
+return Mutator
+`);
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local Mutator = require(script.Parent.Mutator)
+
+local function Component()
+  local state, setState = React.useState({ changed = false })
+  local alias = state
+  Mutator.mutate(alias)
+
+  local cloned = table.clone(state)
+  Mutator.mutate(cloned)
+
+  return React.createElement("Frame", { Name = tostring(state.changed) })
+end
+
+return Component
+`);
+
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-direct-state-mutation");
+  assert.equal(diagnostics.length, 1);
+  assert.match(diagnostics[0].message, /state is React state backed by a table and is mutated in place/);
+});

@@ -26,6 +26,9 @@ interface SerializedSourceEffectSummary {
   effectfulMembers: string[];
   effectfulExport: boolean;
   mutatingMembers: string[];
+  mutatingExportParameters: number[];
+  mutatingMemberParameters: Array<[string, number[]]>;
+  localMutatingParameters: Array<[string, number[]]>;
   instanceFactories: string[];
 }
 
@@ -237,6 +240,13 @@ function serializeSourceEffect(summary: SourceEffectModuleSummary): SerializedSo
     effectfulMembers: [...summary.effectfulMembers].sort(),
     effectfulExport: summary.effectfulExport,
     mutatingMembers: [...summary.mutatingMembers].sort(),
+    mutatingExportParameters: [...summary.mutatingExportParameters].sort((a, b) => a - b),
+    mutatingMemberParameters: [...summary.mutatingMemberParameters]
+      .map(([name, indexes]) => [name, [...indexes].sort((a, b) => a - b)] as [string, number[]])
+      .sort(([left], [right]) => left.localeCompare(right)),
+    localMutatingParameters: [...summary.localMutatingParameters]
+      .map(([name, indexes]) => [name, [...indexes].sort((a, b) => a - b)] as [string, number[]])
+      .sort(([left], [right]) => left.localeCompare(right)),
     instanceFactories: [...summary.instanceFactories].sort(),
   };
 }
@@ -246,6 +256,13 @@ function deserializeSourceEffect(summary: SerializedSourceEffectSummary): Source
     effectfulMembers: new Set(summary.effectfulMembers),
     effectfulExport: summary.effectfulExport,
     mutatingMembers: new Set(summary.mutatingMembers ?? []),
+    mutatingExportParameters: new Set(summary.mutatingExportParameters ?? []),
+    mutatingMemberParameters: new Map(
+      (summary.mutatingMemberParameters ?? []).map(([name, indexes]) => [name, new Set(indexes)]),
+    ),
+    localMutatingParameters: new Map(
+      (summary.localMutatingParameters ?? []).map(([name, indexes]) => [name, new Set(indexes)]),
+    ),
     instanceFactories: new Set(summary.instanceFactories),
   };
 }

@@ -18,6 +18,18 @@ export interface ProjectEffectParseCacheEntry {
   tree: Tree;
 }
 
+export type CachedMutationOrigin =
+  | { kind: "receiver" }
+  | { kind: "parameter"; index: number }
+  | { kind: "external" }
+  | { kind: "local" };
+
+export interface CachedMutationCall {
+  targetId: string;
+  receiverOrigin: CachedMutationOrigin | null;
+  argumentOrigins: Array<CachedMutationOrigin | null>;
+}
+
 export interface CachedSourceEffectFunction {
   id: string;
   moduleId: string;
@@ -28,6 +40,7 @@ export interface CachedSourceEffectFunction {
   mutatesReceiver: boolean;
   mutatedParameterIndexes: number[];
   dependencies: string[];
+  mutationCalls: CachedMutationCall[];
 }
 
 export interface CachedSourceEffectModule {
@@ -210,6 +223,25 @@ function rootIdentifier(node: SyntaxNode | null | undefined): string | null {
 function callArguments(node: SyntaxNode): SyntaxNode[] {
   if (node.type !== "function_call") return [];
   return node.childForFieldName("arguments")?.namedChildren ?? [];
+}
+
+function builtinMutatedArgumentIndexes(path: string, argumentCount: number): number[] {
+  switch (path.replace(/\s+/g, "")) {
+    case "rawset":
+    case "setmetatable":
+    case "table.clear":
+    case "table.freeze":
+    case "table.insert":
+    case "table.remove":
+    case "table.sort":
+      return argumentCount > 0 ? [0] : [];
+    case "table.move":
+      // table.move writes into the optional destination table, or back into the
+      // source table when the destination argument is omitted.
+      return argumentCount >= 5 ? [4] : argumentCount > 0 ? [0] : [];
+    default:
+      return [];
+  }
 }
 
 function expressionCreatesOwnedValue(node: SyntaxNode, owned: Set<string>): boolean {
@@ -421,6 +453,11 @@ function analyzeFunction(
     }
   }
 
+  fn.parameterOrigins = parameterOrigins;
+  fn.externalRoots = externalAliases;
+  fn.ownedRoots = owned;
+  fn.localNames = locals;
+
   // Luau locals are lexically scoped from their declaration onward, so the
   // source-order pass above is enough to propagate aliases through local
   // declarations. Repeated fixed-point rescans of every function body were
@@ -451,6 +488,11 @@ function analyzeFunction(
     if (node.type !== "function_call") continue;
     const path = callPath(node);
     if (!path) continue;
+    const arguments_ = callArguments(node);
+
+    for (const index of builtinMutatedArgumentIndexes(path, arguments_.length)) {
+      markMutationThroughRoot(fn, rootIdentifier(arguments_[index]));
+    }
 
     const localTarget = !locals.has(path) && !parameters.has(path) ? localFunctions.get(path) : null;
     if (localTarget) {
@@ -458,7 +500,7 @@ function analyzeFunction(
       fn.mutationCalls.push({
         targetId: localTarget,
         receiverRoot: null,
-        argumentRoots: callArguments(node).map((argument) => rootIdentifier(argument)),
+        argumentRoots: arguments_.map((argument) => rootIdentifier(argument)),
       });
     }
 
@@ -472,29 +514,39 @@ function analyzeFunction(
           fn.mutationCalls.push({
             targetId: target,
             receiverRoot: sameMember[2] === ":" ? receiver : null,
-            argumentRoots: callArguments(node).map((argument) => rootIdentifier(argument)),
+            argumentRoots: arguments_.map((argument) => rootIdentifier(argument)),
           });
         }
       }
     }
 
-    const importedMember = path.match(/^([A-Za-z_][A-Za-z0-9_]*)[.:]([A-Za-z_][A-Za-z0-9_]*)$/);
+    const importedMember = path.match(/^([A-Za-z_][A-Za-z0-9_]*)([.:])([A-Za-z_][A-Za-z0-9_]*)$/);
     if (importedMember) {
       const root = importedMember[1];
       const moduleId = instanceAliases.get(root)
         ?? (!locals.has(root) && !parameters.has(root) ? record.imports.get(root) : undefined);
-      if (moduleId) fn.dependencies.add(`${moduleId}::member:${importedMember[2]}`);
+      if (moduleId) {
+        const target = `${moduleId}::member:${importedMember[3]}`;
+        fn.dependencies.add(target);
+        fn.mutationCalls.push({
+          targetId: target,
+          receiverRoot: importedMember[2] === ":" ? root : null,
+          argumentRoots: arguments_.map((argument) => rootIdentifier(argument)),
+        });
+      }
     } else if (!locals.has(path) && !parameters.has(path)) {
       const moduleId = record.imports.get(path);
       const target = moduleId ? exportedFunctions.get(moduleId) : null;
-      if (target) fn.dependencies.add(target);
+      if (target) {
+        fn.dependencies.add(target);
+        fn.mutationCalls.push({
+          targetId: target,
+          receiverRoot: null,
+          argumentRoots: arguments_.map((argument) => rootIdentifier(argument)),
+        });
+      }
     }
   }
-
-  fn.parameterOrigins = parameterOrigins;
-  fn.externalRoots = externalAliases;
-  fn.ownedRoots = owned;
-  fn.localNames = locals;
 }
 
 function markMutationThroughRoot(fn: FunctionRecord, root: string | null): boolean {
@@ -533,6 +585,60 @@ function propagateLocalMutationEffects(functions: FunctionRecord[]): void {
         if (target.mutatesReceiver && markMutationThroughRoot(fn, call.receiverRoot)) changed = true;
         for (const index of target.mutatedParameterIndexes) {
           if (markMutationThroughRoot(fn, call.argumentRoots[index] ?? null)) changed = true;
+        }
+      }
+    }
+  }
+}
+
+function mutationOriginForRoot(fn: FunctionRecord, root: string | null): CachedMutationOrigin | null {
+  if (!root) return null;
+  const parameterOrigin = fn.parameterOrigins.get(root);
+  if (parameterOrigin === -1) return { kind: "receiver" };
+  if (parameterOrigin !== undefined) return { kind: "parameter", index: parameterOrigin };
+  if (fn.ownedRoots.has(root) || fn.localNames.has(root)) return { kind: "local" };
+  if (fn.externalRoots.has(root) || !fn.localNames.has(root)) return { kind: "external" };
+  return null;
+}
+
+function cachedMutationCalls(fn: FunctionRecord): CachedMutationCall[] {
+  return fn.mutationCalls.map((call) => ({
+    targetId: call.targetId,
+    receiverOrigin: mutationOriginForRoot(fn, call.receiverRoot),
+    argumentOrigins: call.argumentRoots.map((root) => mutationOriginForRoot(fn, root)),
+  }));
+}
+
+function applyCachedMutationOrigin(fn: CachedSourceEffectFunction, origin: CachedMutationOrigin | null): boolean {
+  if (!origin || origin.kind === "local") return false;
+  if (origin.kind === "external") {
+    if (fn.directEffect) return false;
+    fn.directEffect = true;
+    return true;
+  }
+  if (origin.kind === "receiver") {
+    if (fn.mutatesReceiver) return false;
+    fn.mutatesReceiver = true;
+    return true;
+  }
+  if (fn.mutatedParameterIndexes.includes(origin.index)) return false;
+  fn.mutatedParameterIndexes.push(origin.index);
+  fn.mutatedParameterIndexes.sort((a, b) => a - b);
+  return true;
+}
+
+function propagateMutationEffects(functions: CachedSourceEffectFunction[]): void {
+  const byId = new Map(functions.map((fn) => [fn.id, fn] as const));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const fn of functions) {
+      for (const call of fn.mutationCalls) {
+        const target = byId.get(call.targetId);
+        if (!target) continue;
+        if (target.mutatesReceiver && applyCachedMutationOrigin(fn, call.receiverOrigin)) changed = true;
+        for (const index of target.mutatedParameterIndexes) {
+          if (applyCachedMutationOrigin(fn, call.argumentOrigins[index] ?? null)) changed = true;
         }
       }
     }
@@ -602,6 +708,7 @@ export function analyzeEffectModuleForWorker(
       mutatesReceiver: fn.mutatesReceiver,
       mutatedParameterIndexes: [...fn.mutatedParameterIndexes].sort((a, b) => a - b),
       dependencies: [...fn.dependencies].sort(),
+      mutationCalls: cachedMutationCalls(fn),
     })),
   };
 }
@@ -700,6 +807,9 @@ export async function buildProjectSourceEffects(
           effectfulMembers: new Set<string>(),
           effectfulExport: false,
           mutatingMembers: new Set<string>(),
+          mutatingExportParameters: new Set<number>(),
+          mutatingMemberParameters: new Map<string, Set<number>>(),
+          localMutatingParameters: new Map<string, Set<number>>(),
           instanceFactories: new Set(indexed.instanceFactories),
         });
         if (indexed.exportedFunctionId) exportedFunctions.set(identity.id, indexed.exportedFunctionId);
@@ -712,6 +822,9 @@ export async function buildProjectSourceEffects(
           effectfulMembers: new Set<string>(),
           effectfulExport: false,
           mutatingMembers: new Set<string>(),
+          mutatingExportParameters: new Set<number>(),
+          mutatingMemberParameters: new Map<string, Set<number>>(),
+          localMutatingParameters: new Map<string, Set<number>>(),
           instanceFactories: new Set(cached?.instanceFactories ?? []),
         });
         const exported = functions.find((fn) => fn.exported && !fn.memberName);
@@ -775,6 +888,9 @@ export async function buildProjectSourceEffects(
           effectfulMembers: new Set<string>(),
           effectfulExport: false,
           mutatingMembers: new Set<string>(),
+          mutatingExportParameters: new Set<number>(),
+          mutatingMemberParameters: new Map<string, Set<number>>(),
+          localMutatingParameters: new Map<string, Set<number>>(),
           instanceFactories: new Set<string>(),
         };
         for (const fn of functions) {
@@ -789,6 +905,9 @@ export async function buildProjectSourceEffects(
           effectfulMembers: new Set<string>(),
           effectfulExport: false,
           mutatingMembers: new Set<string>(),
+          mutatingExportParameters: new Set<number>(),
+          mutatingMemberParameters: new Map<string, Set<number>>(),
+          localMutatingParameters: new Map<string, Set<number>>(),
           instanceFactories: new Set(cached?.instanceFactories ?? []),
         });
       }
@@ -839,6 +958,7 @@ export async function buildProjectSourceEffects(
         mutatesReceiver: fn.mutatesReceiver,
         mutatedParameterIndexes: [...fn.mutatedParameterIndexes].sort((a, b) => a - b),
         dependencies: [...fn.dependencies].sort(),
+        mutationCalls: cachedMutationCalls(fn),
       })));
       analyzedModuleCount += 1;
       if ((analyzedModuleCount & 31) === 0 || analyzedModuleCount === rawRecords.size) {
@@ -859,6 +979,7 @@ export async function buildProjectSourceEffects(
         mutatesReceiver: fn.mutatesReceiver ?? false,
         mutatedParameterIndexes: [...(fn.mutatedParameterIndexes ?? [])],
         dependencies: [...fn.dependencies],
+        mutationCalls: [...(fn.mutationCalls ?? [])],
       }));
     for (const fn of states) functionStates.set(fn.id, fn);
     const summary = summariesByModuleId.get(identity.id)!;
@@ -875,6 +996,12 @@ export async function buildProjectSourceEffects(
       onProgress?.({ phase: "assemble-graph", current: assembledCount, total: graphAssemblyTotal });
     }
   }
+
+  // Parameter/receiver mutation is conditional on what each caller passes.
+  // Resolve that information across the complete project graph before seeding
+  // unconditional side effects, so wrappers preserve precise parameter effects
+  // instead of becoming globally impure.
+  propagateMutationEffects([...functionStates.values()]);
 
   // Build a reverse dependency graph once, then propagate effectfulness only
   // through callers that can actually become affected. This avoids repeatedly
@@ -927,11 +1054,25 @@ export async function buildProjectSourceEffects(
     summary.effectfulMembers.clear();
     summary.effectfulExport = false;
     summary.mutatingMembers.clear();
+    summary.mutatingExportParameters.clear();
+    summary.mutatingMemberParameters.clear();
+    summary.localMutatingParameters.clear();
   }
   for (let index = 0; index < functions.length; index += 1) {
     const fn = functions[index];
     const summary = summariesByModuleId.get(fn.moduleId);
     if (summary && fn.memberName && fn.mutatesReceiver) summary.mutatingMembers.add(fn.memberName);
+    if (summary && fn.mutatedParameterIndexes.length > 0) {
+      if (fn.exported && !fn.memberName) {
+        for (const parameterIndex of fn.mutatedParameterIndexes) summary.mutatingExportParameters.add(parameterIndex);
+      }
+      if (fn.memberName) {
+        summary.mutatingMemberParameters.set(fn.memberName, new Set(fn.mutatedParameterIndexes));
+      }
+      if (fn.localName) {
+        summary.localMutatingParameters.set(fn.localName, new Set(fn.mutatedParameterIndexes));
+      }
+    }
     if (summary && effectful.has(fn.id)) {
       if (fn.memberName) summary.effectfulMembers.add(fn.memberName);
       if (fn.exported) summary.effectfulExport = true;
