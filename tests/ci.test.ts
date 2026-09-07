@@ -210,9 +210,18 @@ test("ci run reports fixed issues for pull requests", (t) => {
   assert.match(outputs, /fixed-issues=1/);
 });
 
-async function runWithApi(root: string, base: string, api: string, blocking = "error"): Promise<Result> {
+async function runWithApi(
+  root: string,
+  base: string,
+  api: string,
+  blocking = "error",
+  eventFields: Record<string, unknown> = {},
+): Promise<Result> {
   const eventPath = path.join(root, "event.json");
-  fs.writeFileSync(eventPath, JSON.stringify({ pull_request: { number: 7, base: { sha: base, ref: "main" }, head: { sha: base, ref: "feature" } } }));
+  fs.writeFileSync(eventPath, JSON.stringify({
+    ...eventFields,
+    pull_request: { number: 7, base: { sha: base, ref: "main" }, head: { sha: git(root, "rev-parse", "HEAD"), ref: "feature" } },
+  }));
   const child = Bun.spawn([process.execPath, cli, "ci", "run", "--blocking", blocking], {
     cwd: root,
     env: { ...process.env, GITHUB_TOKEN: "local-test-token", GITHUB_API_URL: api, GITHUB_REPOSITORY: "test/project", GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: eventPath, GITHUB_OUTPUT: path.join(root, "outputs.txt") },
@@ -222,21 +231,39 @@ async function runWithApi(root: string, base: string, api: string, blocking = "e
   return { stdout, stderr, status };
 }
 
-test("PR reporting creates, updates, cleans reviews, counts deletions, and publishes gate status", async (t) => {
+test("PR reporting creates only new comments, resolves fixed threads, counts fixes, and publishes gate status", async (t) => {
   const root = createRepo(VALID_COMPONENT);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const base = git(root, "rev-parse", "HEAD");
   const requests: Array<{ method: string; path: string; body: any }> = [];
   let sticky: any[] = [];
-  let reviews: any[] = [];
+  let threads: any[] = [];
   const server = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(request) {
     const url = new URL(request.url);
     const body: any = request.method === "GET" ? null : await request.json().catch(() => null);
     requests.push({ method: request.method, path: url.pathname, body });
-    if (request.method === "GET") return Response.json(url.pathname.includes("/issues/") ? sticky : reviews);
+    if (request.method === "GET") return Response.json(sticky);
+    if (url.pathname === "/graphql" && body.query.includes("DoctorReviewThreads")) {
+      return Response.json({ data: { repository: { pullRequest: { reviewThreads: {
+        nodes: threads,
+        pageInfo: { hasNextPage: false, endCursor: null },
+      } } } } });
+    }
+    if (url.pathname === "/graphql" && body.query.includes("ResolveDoctorThreads")) {
+      for (const id of Object.values(body.variables)) {
+        const thread = threads.find((entry) => entry.id === id);
+        if (thread) thread.isResolved = true;
+      }
+      return Response.json({ data: { thread0: { thread: { id: body.variables.thread0, isResolved: true } } } });
+    }
     if (url.pathname.endsWith("/issues/7/comments") && request.method === "POST") sticky = [{ id: 10, body: body.body, user: { type: "Bot" } }];
-    if (url.pathname.endsWith("/reviews")) reviews = [{ id: 20, body: body.comments[0].body, user: { type: "Bot" } }];
-    if (request.method === "DELETE") { reviews = []; return new Response(null, { status: 204 }); }
+    if (url.pathname.endsWith("/reviews")) threads.push(...body.comments.map((comment: any, index: number) => ({
+      id: `thread-${threads.length + index}`,
+      isResolved: false,
+      viewerCanResolve: true,
+      path: comment.path,
+      comments: { nodes: [{ body: comment.body, author: { __typename: "Bot" } }] },
+    })));
     return Response.json({ id: 1 });
   } });
   t.after(() => server.stop(true));
@@ -246,13 +273,38 @@ test("PR reporting creates, updates, cleans reviews, counts deletions, and publi
   assert.ok(requests.some(r => r.path.endsWith("/reviews") && r.body.comments[0].line === 3));
   assert.ok(requests.some(r => r.path.includes("/statuses/") && r.body.state === "failure"));
   requests.length = 0;
+  result = await runWithApi(root, base, server.url.toString());
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(requests.filter(r => r.path.endsWith("/reviews")).length, 0);
+  assert.equal(threads.filter(thread => !thread.isResolved).length, 1);
+  requests.length = 0;
+
+  git(root, "add", "Component.luau");
+  git(root, "commit", "-m", "first issue");
+  const previousHead = git(root, "rev-parse", "HEAD");
+  fs.writeFileSync(path.join(root, "Second.luau"), INVALID_COMPONENT);
+  git(root, "add", "Second.luau");
+  git(root, "commit", "-m", "second issue");
+  result = await runWithApi(root, base, server.url.toString(), "error", { action: "synchronize", before: previousHead });
+  assert.equal(result.status, 1, result.stderr);
+  const incrementalReview = requests.find(r => r.path.endsWith("/reviews"));
+  assert.equal(incrementalReview?.body.comments.length, 1);
+  assert.equal(incrementalReview?.body.comments[0].path, "Second.luau");
+  assert.equal(threads.filter(thread => !thread.isResolved).length, 2);
+  requests.length = 0;
+
   fs.writeFileSync(path.join(root, "Component.luau"), VALID_COMPONENT);
+  fs.unlinkSync(path.join(root, "Second.luau"));
   result = await runWithApi(root, base, server.url.toString());
   assert.equal(result.status, 0, result.stderr);
   assert.ok(requests.some(r => r.method === "PATCH" && r.path.endsWith("/issues/comments/10")));
-  assert.ok(requests.some(r => r.method === "DELETE" && r.path.endsWith("/pulls/comments/20")));
+  assert.ok(requests.some(r => r.path === "/graphql" && r.body.query.includes("ResolveDoctorThreads")));
+  assert.equal(requests.some(r => r.method === "DELETE"), false);
+  assert.equal(threads.every(thread => thread.isResolved), true);
   assert.ok(requests.some(r => r.path.includes("/statuses/") && r.body.state === "success"));
 
+  git(root, "add", "-A");
+  git(root, "commit", "-m", "fix issues");
   fs.writeFileSync(path.join(root, "Component.luau"), INVALID_COMPONENT);
   git(root, "add", "Component.luau"); git(root, "commit", "-m", "existing issue");
   const brokenBase = git(root, "rev-parse", "HEAD");
@@ -278,6 +330,46 @@ test("read-only fork token failures preserve diagnostics and the blocking gate",
   assert.match(result.stderr, /could not update inline review comments/);
   assert.match(result.stderr, /could not publish the commit status/);
   assert.match(fs.readFileSync(path.join(root, "outputs.txt"), "utf8"), /error-count=1/);
+});
+
+test("GitHub reporting retries rate limits using Retry-After", async (t) => {
+  const root = createRepo(VALID_COMPONENT);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const base = git(root, "rev-parse", "HEAD");
+  let summaryRequests = 0;
+  let graphqlRequests = 0;
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(request) {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname.endsWith("/issues/7/comments")) {
+      summaryRequests += 1;
+      if (summaryRequests === 1) {
+        return Response.json({ message: "secondary rate limit" }, { status: 429, headers: { "Retry-After": "0" } });
+      }
+      return Response.json([]);
+    }
+    if (url.pathname === "/graphql") {
+      graphqlRequests += 1;
+      if (graphqlRequests === 1) {
+        return Response.json({ errors: [{ message: "API rate limit exceeded" }] }, { headers: { "Retry-After": "0" } });
+      }
+      const body: any = await request.json();
+      if (body.query.includes("DoctorReviewThreads")) {
+        return Response.json({ data: { repository: { pullRequest: { reviewThreads: {
+          nodes: [],
+          pageInfo: { hasNextPage: false, endCursor: null },
+        } } } } });
+      }
+    }
+    return Response.json({ id: 1 });
+  } });
+  t.after(() => server.stop(true));
+
+  const result = await runWithApi(root, base, server.url.toString());
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(summaryRequests, 2);
+  assert.equal(graphqlRequests, 2);
+  assert.match(result.stderr, /GitHub API 429; retrying in 0 seconds/);
+  assert.match(result.stderr, /GitHub API 200; retrying in 0 seconds/);
 });
 
 test("generated workflow passes directory values as data, including shell metacharacters", (t) => {

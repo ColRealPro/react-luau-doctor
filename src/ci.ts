@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline/promises";
@@ -33,6 +34,8 @@ interface CiManageOptions extends Partial<CiSettings> {
 }
 
 interface GitHubEvent {
+  action?: string;
+  before?: string;
   pull_request?: {
     number: number;
     base: { sha: string; ref: string };
@@ -57,6 +60,9 @@ const GITLAB_WORKFLOW = ".gitlab-ci.yml";
 const SUMMARY_MARKER = "<!-- react-luau-doctor:summary -->";
 const REVIEW_MARKER = "<!-- react-luau-doctor:review -->";
 const MAX_REVIEW_COMMENTS = 20;
+const MAX_RESOLVE_THREADS_PER_REQUEST = 100;
+const MAX_GITHUB_RETRIES = 2;
+const MAX_RATE_LIMIT_WAIT_MS = 60_000;
 const PACKAGE_SPEC = `${packageJson.name}@${packageJson.version}`;
 function yamlString(value: string): string {
   return JSON.stringify(value);
@@ -366,6 +372,25 @@ async function scanForCi(settings: CiSettings, eventName: string, base?: string)
   return roots.length === 1 && roots[0] === directory ? reports[0].report : aggregateReports(directory, reports);
 }
 
+interface ReviewChanges {
+  diagnostics: Diagnostic[];
+  base?: string;
+}
+
+async function findNewReviewDiagnostics(
+  settings: CiSettings,
+  eventName: string,
+  event: GitHubEvent,
+  currentReport: ScanReport,
+): Promise<ReviewChanges> {
+  if (event.action === "synchronize" && event.before) {
+    const report = await scanForCi({ ...settings, scope: "changed" }, eventName, event.before);
+    return { diagnostics: report.diagnostics, base: event.before };
+  }
+  if (event.action && event.action !== "opened") return { diagnostics: [] };
+  return { diagnostics: currentReport.diagnostics };
+}
+
 function shouldBlock(report: ScanReport, level: BlockingLevel): boolean {
   if (level === "none") return false;
   if (level === "warning") return report.counts.error > 0 || report.counts.warning > 0;
@@ -399,24 +424,90 @@ function githubRunUrl(): string | null {
   return server && repository && runId ? `${server}/${repository}/actions/runs/${runId}` : null;
 }
 
-async function githubApi<T>(repo: string, endpoint: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function githubRetryDelay(response: Response, responseText: string, attempt: number): number | null {
+  const remaining = response.headers.get("x-ratelimit-remaining");
+  const rateLimited = response.status === 429
+    || (response.status === 403 && (remaining === "0" || /rate limit|rate_limit|abuse detection/i.test(responseText)))
+    || (response.status === 200 && /"errors"\s*:/.test(responseText) && /rate limit|rate_limit/i.test(responseText));
+  if (!rateLimited) return null;
+
+  const retryAfter = response.headers.get("retry-after");
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    const date = Date.parse(retryAfter);
+    if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+  }
+
+  if (remaining === "0") {
+    const reset = Number(response.headers.get("x-ratelimit-reset"));
+    if (Number.isFinite(reset)) return Math.max(0, reset * 1000 - Date.now() + 1000);
+  }
+
+  return 60_000 * (2 ** attempt);
+}
+
+async function githubRequest<T>(url: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
   const token = process.env.GITHUB_TOKEN;
   if (!token) throw new Error("GITHUB_TOKEN is unavailable");
-  const apiBase = process.env.GITHUB_API_URL ?? "https://api.github.com";
-  const response = await fetch(`${apiBase}/repos/${repo}${endpoint}`, {
-    method: options.method ?? "GET",
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${token}`,
-      "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "react-luau-doctor",
-      "Content-Type": "application/json",
-    },
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  for (let attempt = 0; ; attempt += 1) {
+    const response = await fetch(url, {
+      method: options.method ?? "GET",
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "react-luau-doctor",
+        "Content-Type": "application/json",
+      },
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    });
+    const responseText = response.status === 204 ? "" : await response.text();
+    const delay = githubRetryDelay(response, responseText, attempt);
+    if (response.ok && delay === null) return responseText ? JSON.parse(responseText) as T : undefined as T;
+    if (delay === null || attempt >= MAX_GITHUB_RETRIES || delay > MAX_RATE_LIMIT_WAIT_MS) {
+      const retryDetail = delay !== null && delay > MAX_RATE_LIMIT_WAIT_MS
+        ? ` Retry after ${Math.ceil(delay / 1000)} seconds.`
+        : "";
+      throw new Error(`GitHub API ${response.status}: ${responseText}${retryDetail}`);
+    }
+    process.stderr.write(`react-luau-doctor: GitHub API ${response.status}; retrying in ${Math.ceil(delay / 1000)} seconds\n`);
+    await wait(delay);
+  }
+}
+
+async function githubApi<T>(repo: string, endpoint: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
+  const apiBase = (process.env.GITHUB_API_URL ?? "https://api.github.com").replace(/\/$/, "");
+  return githubRequest<T>(`${apiBase}/repos/${repo}${endpoint}`, options);
+}
+
+function githubGraphQLUrl(): string {
+  if (process.env.GITHUB_GRAPHQL_URL) return process.env.GITHUB_GRAPHQL_URL;
+  const apiBase = (process.env.GITHUB_API_URL ?? "https://api.github.com").replace(/\/$/, "");
+  return apiBase.endsWith("/api/v3") ? `${apiBase.slice(0, -3)}graphql` : `${apiBase}/graphql`;
+}
+
+interface GraphQLResponse<T> {
+  data?: T;
+  errors?: Array<{ message?: string }>;
+}
+
+async function githubGraphQL<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+  const response = await githubRequest<GraphQLResponse<T>>(githubGraphQLUrl(), {
+    method: "POST",
+    body: { query, variables },
   });
-  if (!response.ok) throw new Error(`GitHub API ${response.status}: ${await response.text()}`);
-  if (response.status === 204) return undefined as T;
-  return await response.json() as T;
+  if (response.errors?.length) throw new Error(`GitHub GraphQL: ${response.errors.map((error) => error.message ?? "unknown error").join("; ")}`);
+  if (!response.data) throw new Error("GitHub GraphQL returned no data");
+  return response.data;
 }
 
 function repoRelativeDiagnosticPath(directory: string, diagnosticFile: string): string {
@@ -508,32 +599,179 @@ function touchesChangedLine(diagnostic: Diagnostic, ranges: LineRange[]): boolea
   return ranges.some((range) => diagnostic.location.line >= range.start && diagnostic.location.line <= range.end);
 }
 
-async function replaceReviewComments(repo: string, pullNumber: number, report: ScanReport, directory: string, base: string): Promise<void> {
-  const lineMap = changedLineMap(directory, base);
-  const comments = report.diagnostics
+function reviewFingerprint(pathname: string, rule: string, severity: string, message: string): string {
+  // Line numbers move as a PR changes. Keep the original thread when the finding itself is unchanged.
+  return createHash("sha256").update(`${pathname}\0${rule}\0${severity}\0${message}`).digest("hex").slice(0, 32);
+}
+
+function diagnosticReviewFingerprint(directory: string, diagnostic: Diagnostic): string {
+  return reviewFingerprint(
+    repoRelativeDiagnosticPath(directory, diagnostic.file),
+    diagnostic.rule,
+    diagnostic.severity,
+    diagnostic.message,
+  );
+}
+
+function fingerprintFromReviewBody(body: string, pathname: string): string | null {
+  const marker = body.match(/<!-- react-luau-doctor:fingerprint:([a-f0-9]{32}) -->/i);
+  if (marker) return marker[1].toLowerCase();
+
+  const legacy = body.match(/\*\*React-Luau Doctor\*\* · `([^`]+)` \((error|warning|suggestion)\)\n\n([^\n]+)/);
+  return legacy ? reviewFingerprint(pathname, legacy[1], legacy[2], legacy[3]) : null;
+}
+
+function reviewCommentBody(directory: string, diagnostic: Diagnostic): string {
+  const fingerprint = diagnosticReviewFingerprint(directory, diagnostic);
+  return `${REVIEW_MARKER}\n<!-- react-luau-doctor:fingerprint:${fingerprint} -->\n**React-Luau Doctor** · \`${diagnostic.rule}\` (${diagnostic.severity})\n\n${diagnostic.message}${diagnostic.help ? `\n\n${diagnostic.help}` : ""}`;
+}
+
+interface GitHubReviewThread {
+  id: string;
+  isResolved: boolean;
+  viewerCanResolve: boolean;
+  path: string;
+  comments: {
+    nodes: Array<{
+      body: string;
+      author: { __typename?: string } | null;
+    }>;
+  };
+}
+
+async function listReviewThreads(repo: string, pullNumber: number): Promise<GitHubReviewThread[]> {
+  const separator = repo.indexOf("/");
+  if (separator < 1 || separator === repo.length - 1) throw new Error(`Invalid GitHub repository name: ${repo}`);
+  const owner = repo.slice(0, separator);
+  const name = repo.slice(separator + 1);
+  const threads: GitHubReviewThread[] = [];
+  let cursor: string | null = null;
+
+  for (;;) {
+    const data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            nodes: GitHubReviewThread[];
+            pageInfo: { hasNextPage: boolean; endCursor: string | null };
+          };
+        } | null;
+      } | null;
+    } = await githubGraphQL(`
+      query DoctorReviewThreads($owner: String!, $name: String!, $pull: Int!, $cursor: String) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $pull) {
+            reviewThreads(first: 100, after: $cursor) {
+              nodes {
+                id
+                isResolved
+                viewerCanResolve
+                path
+                comments(first: 1) {
+                  nodes {
+                    body
+                    author { __typename }
+                  }
+                }
+              }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        }
+      }
+    `, { owner, name, pull: pullNumber, cursor });
+    const connection = data.repository?.pullRequest?.reviewThreads;
+    if (!connection) throw new Error(`Could not load review threads for pull request ${pullNumber}`);
+    threads.push(...connection.nodes);
+    if (!connection.pageInfo.hasNextPage) return threads;
+    cursor = connection.pageInfo.endCursor;
+    if (!cursor) throw new Error("GitHub review thread pagination returned no cursor");
+  }
+}
+
+function doctorThreadFingerprint(thread: GitHubReviewThread): string | null {
+  const comment = thread.comments.nodes[0];
+  if (comment?.author?.__typename !== "Bot" || !comment.body.startsWith(REVIEW_MARKER)) return null;
+  return fingerprintFromReviewBody(comment.body, thread.path);
+}
+
+function takeCount(counts: Map<string, number>, key: string): boolean {
+  const count = counts.get(key) ?? 0;
+  if (count === 0) return false;
+  counts.set(key, count - 1);
+  return true;
+}
+
+async function resolveReviewThreads(threadIds: string[]): Promise<void> {
+  for (let offset = 0; offset < threadIds.length; offset += MAX_RESOLVE_THREADS_PER_REQUEST) {
+    const batch = threadIds.slice(offset, offset + MAX_RESOLVE_THREADS_PER_REQUEST);
+    const declarations = batch.map((_, index) => `$thread${index}: ID!`).join(", ");
+    const mutations = batch.map((_, index) => `thread${index}: resolveReviewThread(input: { threadId: $thread${index} }) { thread { id isResolved } }`).join("\n");
+    const variables = Object.fromEntries(batch.map((id, index) => [`thread${index}`, id]));
+    await githubGraphQL(`mutation ResolveDoctorThreads(${declarations}) { ${mutations} }`, variables);
+    if (offset + batch.length < threadIds.length) await wait(1000);
+  }
+}
+
+async function manageReviewComments(
+  repo: string,
+  pullNumber: number,
+  currentReport: ScanReport,
+  newDiagnostics: Diagnostic[],
+  directory: string,
+  newBase: string,
+): Promise<void> {
+  const threads = await listReviewThreads(repo, pullNumber);
+  const activeCounts = new Map<string, number>();
+  for (const diagnostic of currentReport.diagnostics) {
+    const fingerprint = diagnosticReviewFingerprint(directory, diagnostic);
+    activeCounts.set(fingerprint, (activeCounts.get(fingerprint) ?? 0) + 1);
+  }
+
+  const resolvedThreadIds: string[] = [];
+  for (const thread of threads) {
+    if (thread.isResolved) continue;
+    const fingerprint = doctorThreadFingerprint(thread);
+    if (!fingerprint) continue;
+    if (!takeCount(activeCounts, fingerprint) && thread.viewerCanResolve) {
+      resolvedThreadIds.push(thread.id);
+    }
+  }
+
+  const lineMap = changedLineMap(directory, newBase);
+  const comments = newDiagnostics
     .filter((diagnostic) => touchesChangedLine(diagnostic, lineMap.get(diagnostic.file) ?? []))
+    .filter((diagnostic) => {
+      const fingerprint = diagnosticReviewFingerprint(directory, diagnostic);
+      return takeCount(activeCounts, fingerprint);
+    })
     .slice(0, MAX_REVIEW_COMMENTS)
     .map((diagnostic) => ({
       path: repoRelativeDiagnosticPath(directory, diagnostic.file),
       line: diagnostic.location.line,
       side: "RIGHT",
-      body: `${REVIEW_MARKER}\n**React-Luau Doctor** · \`${diagnostic.rule}\` (${diagnostic.severity})\n\n${diagnostic.message}${diagnostic.help ? `\n\n${diagnostic.help}` : ""}`,
+      body: reviewCommentBody(directory, diagnostic),
     }));
 
-  const previous = await listComments(repo, `/pulls/${pullNumber}/comments`);
+  const failures: string[] = [];
   if (comments.length > 0) {
-    await githubApi(repo, `/pulls/${pullNumber}/reviews`, {
-      method: "POST",
-      body: { event: "COMMENT", body: "React-Luau Doctor review", comments },
-    });
-  }
-  for (const comment of previous.filter((entry) => isDoctorComment(entry, REVIEW_MARKER))) {
     try {
-      await githubApi(repo, `/pulls/comments/${comment.id}`, { method: "DELETE" });
+      await githubApi(repo, `/pulls/${pullNumber}/reviews`, {
+        method: "POST",
+        body: { event: "COMMENT", body: "React-Luau Doctor found new issues", comments },
+      });
     } catch (error) {
-      process.stderr.write(`react-luau-doctor: could not remove an earlier review comment: ${error instanceof Error ? error.message : String(error)}\n`);
+      failures.push(`could not create new review comments: ${errorMessage(error)}`);
     }
   }
+  if (resolvedThreadIds.length > 0) {
+    try {
+      await resolveReviewThreads(resolvedThreadIds);
+    } catch (error) {
+      failures.push(`could not resolve fixed review threads: ${errorMessage(error)}`);
+    }
+  }
+  if (failures.length > 0) throw new Error(failures.join("; "));
 }
 
 async function publishCommitStatus(repo: string, sha: string, report: ScanReport, blocking: BlockingLevel): Promise<void> {
@@ -590,6 +828,9 @@ async function runCiJob(argv: string[]): Promise<void> {
   const base = isPullRequest ? event.pull_request!.base.sha : undefined;
   const head = isPullRequest ? event.pull_request!.head.sha : process.env.GITHUB_SHA ?? "HEAD";
   const report = await scanForCi(settings, eventName, base);
+  const reviewChanges: ReviewChanges = isPullRequest
+    ? await findNewReviewDiagnostics(settings, eventName, event, report)
+    : { diagnostics: [] };
   const fixed = isPullRequest && base
     ? (await Promise.all(resolveCiProjectRoots(path.resolve(settings.directory), settings.project).map(root => fixedIssueCount(root, base)))).reduce((sum, count) => sum + count, 0)
     : 0;
@@ -614,14 +855,21 @@ async function runCiJob(argv: string[]): Promise<void> {
       try {
         await updateStickyComment(repo, pullNumber, renderSummaryComment(report, repo, head, fixed, skipped, settings.directory), !skipped);
       } catch (error) {
-        process.stderr.write(`react-luau-doctor: could not update the sticky PR comment: ${error instanceof Error ? error.message : String(error)}\n`);
+        process.stderr.write(`react-luau-doctor: could not update the sticky PR comment: ${errorMessage(error)}\n`);
       }
     }
     if (settings.reviewComments && base) {
       try {
-        await replaceReviewComments(repo, pullNumber, report, path.resolve(settings.directory), base);
+        await manageReviewComments(
+          repo,
+          pullNumber,
+          report,
+          reviewChanges.diagnostics,
+          path.resolve(settings.directory),
+          reviewChanges.base ?? base,
+        );
       } catch (error) {
-        process.stderr.write(`react-luau-doctor: could not update inline review comments: ${error instanceof Error ? error.message : String(error)}\n`);
+        process.stderr.write(`react-luau-doctor: could not update inline review comments: ${errorMessage(error)}\n`);
       }
     }
   }
@@ -630,7 +878,7 @@ async function runCiJob(argv: string[]): Promise<void> {
     try {
       await publishCommitStatus(repo, head, report, effectiveBlocking);
     } catch (error) {
-      process.stderr.write(`react-luau-doctor: could not publish the commit status: ${error instanceof Error ? error.message : String(error)}\n`);
+      process.stderr.write(`react-luau-doctor: could not publish the commit status: ${errorMessage(error)}\n`);
     }
   }
 

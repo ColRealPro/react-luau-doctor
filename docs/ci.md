@@ -23,9 +23,11 @@ react-luau-doctor ci config --no-comment --no-review-comments --no-commit-status
 
 The default gate is `none`. `error` fails a PR check for errors; `warning` fails for warnings or errors. Push scans remain advisory regardless of this setting.
 
-The generated workflow requests `contents: read`, `pull-requests: write`, `issues: write`, and `statuses: write`. Reporting can create or update a summary, replace up to 20 inline comments per run, and publish a commit status. Only bot-authored comments carrying Doctor's markers are managed. Summary details are capped; the workflow log contains the report.
+The generated workflow requests `contents: read`, `pull-requests: write`, `issues: write`, and `statuses: write`. Reporting can create or update a summary, add up to 20 inline comments for findings introduced by a new commit, resolve threads after their findings are fixed, and publish a commit status. Unchanged findings keep their original threads and do not create new notifications. Only bot-authored comments carrying Doctor's markers are managed. Summary details are capped; the workflow log contains the report.
 
 Inline comments use primary diagnostic lines present in the diff. A finding included through a secondary evidence highlight can appear in the report without an inline comment. Fixed-issue counts include findings removed by deleting files and respect project selection and configuration.
+
+GitHub API requests retry rate-limit responses. Retries honor `Retry-After` and primary rate-limit reset headers. Doctor stops instead of waiting when GitHub asks it to pause for more than 60 seconds, leaving the scan result and gate intact.
 
 Fork PR tokens commonly lack write permissions. Reporting failures are logged while scan results, outputs, and the configured gate remain available. Disabling reporting avoids those API calls. Keep the `pull_request` trigger; do not switch to `pull_request_target` to obtain write access while executing PR-controlled files.
 
@@ -64,6 +66,6 @@ Commit `.gitlab-ci.yml`. The generated job uses a pinned Bun image and runs the 
 
 ## Verification
 
-The test suite simulates GitHub API requests for summary creation and updates, review replacement, commit statuses, forbidden responses, generated workflow behavior, and shell input handling. Package verification also checks that `ci install` from the packed distribution generates a version-pinned npm workflow without vendoring Doctor into the target repository.
+The test suite simulates GitHub API requests for summary creation and updates, new review findings, resolved review threads, rate-limit retries, commit statuses, forbidden responses, generated workflow behavior, and shell input handling. Package verification also checks that `ci install` from the packed distribution generates a version-pinned npm workflow without vendoring Doctor into the target repository.
 
 Before enabling a required check, run real PRs in your repository that introduce an error, repair it, delete an affected component, and originate from a fork. Confirm the gate, outputs, comments, and status behavior. Local simulation does not validate GitHub account permissions or hosted-runner behavior.
