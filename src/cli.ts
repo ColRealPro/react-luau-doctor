@@ -12,6 +12,8 @@ import {
   writeConfig,
 } from "./config";
 import { runCiCommand } from "./ci";
+import { checkForUpdatesNow, getCachedUpdateNotice, refreshUpdateCache, startBackgroundUpdateRefresh } from "./update-check";
+import { currentUpdateInstallCommand, installLatestVersion } from "./update-install";
 import { fixExampleForRule } from "./fix-examples";
 import { createProgressRenderer } from "./progress";
 import { createInlineSuppressionChecker } from "./inline-disables";
@@ -56,6 +58,7 @@ interface CliOptions {
   noColor: boolean;
   noCache: boolean;
   noParallel: boolean;
+  noUpdateCheck: boolean;
   annotations: boolean;
   minSeverity?: Severity;
   help: boolean;
@@ -79,6 +82,7 @@ Usage:
   react-luau-doctor [directory] [options]
   react-luau-doctor ci <install|config|upgrade>
   react-luau-doctor why <file:line>
+  react-luau-doctor update [--check]
   react-luau-doctor rules <command>
 
 Scan options:
@@ -107,6 +111,7 @@ Scan options:
   --no-color                             Disable automatic ANSI colors
   --no-cache                             Disable the persistent OS-level analysis cache
   --no-parallel                          Disable parallel file analysis
+  --no-update-check                      Disable the automatic update notice
 
 React-Luau Doctor options:
   --min-severity <level>                 suggestion, warning, or error
@@ -119,6 +124,10 @@ CI commands:
   ci upgrade [--provider github|gitlab] [--pr] [-y] [--cwd <cwd>]
   Reporting toggles: --comment/--no-comment, --review-comments/--no-review-comments, --commit-status/--no-commit-status
 
+Update commands:
+  update                                 Update the global installation to the latest release
+  update --check                         Check npm for a newer release without updating
+
 Rules commands:
   rules list [--category <name>] [--configured] [--json]
   rules explain <rule> [--json]
@@ -130,6 +139,59 @@ Rules commands:
 Config:
   react-luau-doctor.config.json
 `;
+}
+
+
+function automaticUpdateNoticeEnabled(options: CliOptions, machineReadable: boolean): boolean {
+  return !options.noUpdateCheck
+    && !machineReadable
+    && Boolean(process.stdout.isTTY)
+    && !process.env.CI
+    && process.env.NO_UPDATE_NOTIFIER === undefined
+    && process.env.REACT_LUAU_DOCTOR_NO_UPDATE_CHECK === undefined;
+}
+
+function renderUpdateNotice(current: string, latest: string, colorized: boolean): string {
+  const label = whyPaint(colorized, "Update available:", WHY_ANSI.bold, WHY_ANSI.yellow);
+  const oldVersion = whyPaint(colorized, `v${current}`, WHY_ANSI.dim);
+  const newVersion = whyPaint(colorized, `v${latest}`, WHY_ANSI.bold);
+  return `${label} ${oldVersion} → ${newVersion}\nRun \`react-luau-doctor update\` to update.`;
+}
+
+async function runUpdateCommand(argv: string[]): Promise<void> {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    process.stdout.write("Usage: react-luau-doctor update [--check]\n");
+    return;
+  }
+  if (argv.length > 1 || (argv.length === 1 && argv[0] !== "--check")) {
+    throw new Error("Usage: react-luau-doctor update [--check]");
+  }
+
+  const result = await checkForUpdatesNow(VERSION);
+  if (!result.updateAvailable) {
+    process.stdout.write(`React-Luau Doctor v${VERSION} is up to date.\n`);
+    return;
+  }
+
+  const colorized = shouldUseColor(false, false);
+  if (argv[0] === "--check") {
+    process.stdout.write(`${renderUpdateNotice(VERSION, result.latest, colorized)}\n`);
+    return;
+  }
+
+  const command = currentUpdateInstallCommand();
+  if (!command) {
+    throw new Error(
+      `Could not determine the global package manager for this installation. Run \`npm install -g ${packageJson.name}@latest\` manually.`,
+    );
+  }
+
+  const label = whyPaint(colorized, "Updating React-Luau Doctor:", WHY_ANSI.bold, WHY_ANSI.yellow);
+  const oldVersion = whyPaint(colorized, `v${VERSION}`, WHY_ANSI.dim);
+  const newVersion = whyPaint(colorized, `v${result.latest}`, WHY_ANSI.bold);
+  process.stdout.write(`${label} ${oldVersion} → ${newVersion}\nUsing \`${command.display}\`\n\n`);
+  installLatestVersion(command);
+  process.stdout.write(`\nUpdated React-Luau Doctor to v${result.latest}.\n`);
 }
 
 function splitLongOption(arg: string): { name: string; inlineValue?: string } {
@@ -583,6 +645,7 @@ function parseArgs(argv: string[]): CliOptions {
     noColor: false,
     noCache: false,
     noParallel: false,
+    noUpdateCheck: false,
     help: false,
     version: false,
   };
@@ -607,6 +670,7 @@ function parseArgs(argv: string[]): CliOptions {
     else if (arg === "--no-color") options.noColor = true;
     else if (arg === "--no-cache") options.noCache = true;
     else if (arg === "--no-parallel") options.noParallel = true;
+    else if (arg === "--no-update-check") options.noUpdateCheck = true;
     else if (arg === "--annotations") options.annotations = true;
     else if (arg === "--help" || arg === "-h") options.help = true;
     else if (arg === "--version" || arg === "-v") options.version = true;
@@ -1313,6 +1377,16 @@ async function main(): Promise<void> {
   try {
     const argv = process.argv.slice(2);
 
+    if (argv[0] === "__update-cache") {
+      await refreshUpdateCache({ silent: true });
+      return;
+    }
+
+    if (argv[0] === "update") {
+      await runUpdateCommand(argv.slice(1));
+      return;
+    }
+
     if (argv[0] === "ci") {
       await runCiCommand(argv.slice(1));
       return;
@@ -1367,6 +1441,8 @@ async function main(): Promise<void> {
     }
     const machineReadable = options.scoreOnly || options.json || options.annotations;
     const colorized = shouldUseColor(options.noColor, machineReadable);
+    const updateNoticeEnabled = automaticUpdateNoticeEnabled(options, machineReadable);
+    if (updateNoticeEnabled) startBackgroundUpdateRefresh();
     const progress = createProgressRenderer({
       enabled: Boolean(process.stdout.isTTY && !process.env.CI && !machineReadable),
       colorized,
@@ -1399,6 +1475,11 @@ async function main(): Promise<void> {
       const annotations = renderAnnotations(report);
       if (annotations) process.stdout.write(`${annotations}\n`);
     } else process.stdout.write(`${renderTextReport(report, showScore, colorized, verbose, process.stdout.columns ?? 120)}\n`);
+
+    if (updateNoticeEnabled) {
+      const update = getCachedUpdateNotice(VERSION);
+      if (update) process.stdout.write(`\n${renderUpdateNotice(update.current, update.latest, colorized)}\n`);
+    }
 
     const blocking = options.blocking ?? config.blocking ?? "error";
     if (shouldBlock(report, blocking)) process.exitCode = 1;
