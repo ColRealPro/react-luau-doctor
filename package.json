@@ -15,8 +15,7 @@
     "vendor",
     "README.md",
     "LICENSE",
-    "THIRD_PARTY_NOTICES.md",
-    "docs"
+    "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
     "build": "bun run scripts/build.ts",
