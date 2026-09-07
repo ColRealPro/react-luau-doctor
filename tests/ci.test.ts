@@ -286,7 +286,7 @@ test("PR reporting creates only new comments, resolves fixed threads, counts fix
     if (url.pathname.endsWith("/reviews")) threads.push(...body.comments.map((comment: any, index: number) => ({
       id: `thread-${threads.length + index}`,
       isResolved: false,
-      viewerCanResolve: true,
+      isOutdated: false,
       path: comment.path,
       comments: { nodes: [{ body: comment.body, author: { __typename: "Bot" } }] },
     })));
@@ -340,6 +340,67 @@ test("PR reporting creates only new comments, resolves fixed threads, counts fix
   assert.equal(result.status, 0, result.stderr);
   assert.ok(requests.some(r => r.method === "PATCH" && r.body.body.includes("1 fixed")));
   assert.match(fs.readFileSync(path.join(root, "outputs.txt"), "utf8"), /fixed-issues=1/);
+});
+
+test("reintroduced findings replace stale outdated Doctor threads", async (t) => {
+  const root = createRepo(VALID_COMPONENT);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const base = git(root, "rev-parse", "HEAD");
+  const requests: Array<{ method: string; path: string; body: any }> = [];
+  let threads: any[] = [];
+  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(request) {
+    const url = new URL(request.url);
+    const body: any = request.method === "GET" ? null : await request.json().catch(() => null);
+    requests.push({ method: request.method, path: url.pathname, body });
+    if (request.method === "GET") return Response.json([]);
+    if (url.pathname === "/graphql" && body.query.includes("DoctorReviewThreads")) {
+      return Response.json({ data: { repository: { pullRequest: { reviewThreads: {
+        nodes: threads,
+        pageInfo: { hasNextPage: false, endCursor: null },
+      } } } } });
+    }
+    if (url.pathname === "/graphql" && body.query.includes("ResolveDoctorThreads")) {
+      for (const id of Object.values(body.variables)) {
+        const thread = threads.find((entry) => entry.id === id);
+        if (thread) thread.isResolved = true;
+      }
+      return Response.json({ data: { thread0: { thread: { id: body.variables.thread0, isResolved: true } } } });
+    }
+    if (url.pathname.endsWith("/reviews")) threads.push(...body.comments.map((comment: any, index: number) => ({
+      id: `thread-${threads.length + index}`,
+      isResolved: false,
+      isOutdated: false,
+      path: comment.path,
+      comments: { nodes: [{ body: comment.body, author: { __typename: "Bot" } }] },
+    })));
+    return Response.json({ id: 1 });
+  } });
+  t.after(() => server.stop(true));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), INVALID_COMPONENT);
+  let result = await runWithApi(root, base, server.url.toString());
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(threads.length, 1);
+
+  git(root, "add", "Component.luau");
+  git(root, "commit", "-m", "introduce issue");
+  fs.writeFileSync(path.join(root, "Component.luau"), VALID_COMPONENT);
+  git(root, "add", "Component.luau");
+  git(root, "commit", "-m", "fix issue");
+  const fixedHead = git(root, "rev-parse", "HEAD");
+  threads[0].isOutdated = true;
+
+  fs.writeFileSync(path.join(root, "Component.luau"), INVALID_COMPONENT);
+  git(root, "add", "Component.luau");
+  git(root, "commit", "-m", "reintroduce issue");
+  requests.length = 0;
+  result = await runWithApi(root, base, server.url.toString(), "error", { action: "synchronize", before: fixedHead });
+  assert.equal(result.status, 1, result.stderr);
+  assert.ok(requests.some(r => r.path === "/graphql" && r.body.query.includes("ResolveDoctorThreads")));
+  const review = requests.find(r => r.path.endsWith("/reviews"));
+  assert.equal(review?.body.comments.length, 1);
+  assert.equal(threads.filter(thread => !thread.isResolved).length, 1);
+  assert.equal(threads.length, 2);
 });
 
 test("GitHub Enterprise derives the GraphQL endpoint from the REST API URL", async (t) => {

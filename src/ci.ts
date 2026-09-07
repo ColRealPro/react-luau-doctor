@@ -632,7 +632,7 @@ function reviewCommentBody(directory: string, diagnostic: Diagnostic): string {
 interface GitHubReviewThread {
   id: string;
   isResolved: boolean;
-  viewerCanResolve: boolean;
+  isOutdated: boolean;
   path: string;
   comments: {
     nodes: Array<{
@@ -668,7 +668,7 @@ async function listReviewThreads(repo: string, pullNumber: number): Promise<GitH
               nodes {
                 id
                 isResolved
-                viewerCanResolve
+                isOutdated
                 path
                 comments(first: 1) {
                   nodes {
@@ -730,15 +730,29 @@ async function manageReviewComments(
     const fingerprint = diagnosticReviewFingerprint(directory, diagnostic);
     activeCounts.set(fingerprint, (activeCounts.get(fingerprint) ?? 0) + 1);
   }
+  const newCounts = new Map<string, number>();
+  for (const diagnostic of newDiagnostics) {
+    const fingerprint = diagnosticReviewFingerprint(directory, diagnostic);
+    newCounts.set(fingerprint, (newCounts.get(fingerprint) ?? 0) + 1);
+  }
 
   const resolvedThreadIds: string[] = [];
   for (const thread of threads) {
     if (thread.isResolved) continue;
     const fingerprint = doctorThreadFingerprint(thread);
     if (!fingerprint) continue;
-    if (!takeCount(activeCounts, fingerprint) && thread.viewerCanResolve) {
+
+    if (thread.isOutdated && (newCounts.get(fingerprint) ?? 0) > 0) {
       resolvedThreadIds.push(thread.id);
+      continue;
     }
+
+    if (takeCount(activeCounts, fingerprint)) {
+      takeCount(newCounts, fingerprint);
+      continue;
+    }
+
+    resolvedThreadIds.push(thread.id);
   }
 
   const lineMap = changedLineMap(directory, newBase);
@@ -746,7 +760,7 @@ async function manageReviewComments(
     .filter((diagnostic) => touchesChangedLine(diagnostic, lineMap.get(diagnostic.file) ?? []))
     .filter((diagnostic) => {
       const fingerprint = diagnosticReviewFingerprint(directory, diagnostic);
-      return takeCount(activeCounts, fingerprint);
+      return takeCount(newCounts, fingerprint);
     })
     .slice(0, MAX_REVIEW_COMMENTS)
     .map((diagnostic) => ({
