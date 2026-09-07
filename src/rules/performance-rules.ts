@@ -1,5 +1,5 @@
 import { normalizeRequireTarget, resolveModuleReference } from "../module-resolution";
-import type { Node as SyntaxNode } from "web-tree-sitter";
+import type { SyntaxNode } from "../syntax";
 import type { DiagnosticInput, FunctionInfo, RuleContext, RuleDefinition, StateBinding } from "../types";
 import { normalizeExpressionText, sameNode } from "../ast/walk";
 import { isHighFrequencyRunServiceCall } from "../roblox-semantics";

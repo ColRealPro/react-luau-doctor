@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { Tree } from "web-tree-sitter";
+import type { SyntaxTree } from "./syntax";
 import { createRuleContext } from "./ast/context";
 import { buildReactModel } from "./ast/react-model";
 import { effectiveSeverity } from "./config";
@@ -77,7 +77,7 @@ function toDiagnostic(
   };
 }
 
-export async function analyzeReactFile(input: ReactFileAnalysisInput, tree?: Tree): Promise<ReactFileAnalysisResult> {
+export async function analyzeReactFile(input: ReactFileAnalysisInput, tree?: SyntaxTree): Promise<ReactFileAnalysisResult> {
   const parsedTree = tree ?? await parseLuau(input.source);
   const model = buildReactModel(parsedTree.rootNode);
   if (!input.forceScan && !model.isReactFile) {

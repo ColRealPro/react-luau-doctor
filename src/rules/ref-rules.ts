@@ -1,4 +1,4 @@
-import type { Node as SyntaxNode } from "web-tree-sitter";
+import type { SyntaxNode } from "../syntax";
 import type { DiagnosticInput, FunctionInfo, RuleContext, RuleDefinition } from "../types";
 import { normalizeExpressionText, sameNode } from "../ast/walk";
 import { assignmentLeft, assignmentTargetNode, declarationNames, isBindingShadowedBetween } from "./helpers";

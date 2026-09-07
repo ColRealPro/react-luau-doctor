@@ -1,4 +1,4 @@
-import type { Node as SyntaxNode } from "web-tree-sitter";
+import type { SyntaxNode } from "../syntax";
 import type { RuleContext, RuleDefinition, SourceEffectModuleSummary } from "../types";
 import { normalizeRequireTarget, resolveModuleReference } from "../module-resolution";
 import { knownYieldReason } from "../roblox-semantics";

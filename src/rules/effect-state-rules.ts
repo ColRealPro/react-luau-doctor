@@ -1,4 +1,4 @@
-import type { Node as SyntaxNode } from "web-tree-sitter";
+import type { SyntaxNode } from "../syntax";
 import type { FunctionInfo, RuleContext, RuleDefinition } from "../types";
 import { nodeKey, rootIdentifier } from "../ast/walk";
 import {

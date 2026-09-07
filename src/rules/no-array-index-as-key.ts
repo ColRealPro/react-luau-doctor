@@ -1,4 +1,4 @@
-import type { Node as SyntaxNode } from "web-tree-sitter";
+import type { SyntaxNode } from "../syntax";
 import type { RuleContext, RuleDefinition } from "../types";
 import { assignmentLeft, fieldName, fieldValue } from "./helpers";
 

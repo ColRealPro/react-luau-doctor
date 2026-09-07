@@ -6,12 +6,12 @@ import {
   type EffectWorkerState,
 } from "./project-effects";
 import type { AnalysisWorkerRequest, AnalysisWorkerResponse } from "./parallel";
-import type { Tree } from "web-tree-sitter";
+import type { SyntaxTree } from "./syntax";
 
 if (!parentPort) throw new Error("Analysis worker requires a parent port");
 
 const effectStates = new Map<string, EffectWorkerState>();
-const treeCache = new Map<string, { source: string; tree: Tree }>();
+const treeCache = new Map<string, { source: string; tree: SyntaxTree }>();
 
 parentPort.on("message", async (request: AnalysisWorkerRequest) => {
   try {

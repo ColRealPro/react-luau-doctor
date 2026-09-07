@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { Node as SyntaxNode, Tree } from "web-tree-sitter";
+import type { SyntaxNode, SyntaxTree } from "./syntax";
 import {
   buildUniqueFeatureAliases,
   moduleKeys,
@@ -15,7 +15,7 @@ import type { ScanFileInput, SourceEffectModuleSummary } from "./types";
 
 export interface ProjectEffectParseCacheEntry {
   source: string;
-  tree: Tree;
+  tree: SyntaxTree;
 }
 
 export type CachedMutationOrigin =
@@ -93,7 +93,7 @@ export interface ProjectEffectsProgress {
 
 interface ParsedRecord extends ModuleIdentity {
   source: string;
-  tree: Tree;
+  tree: SyntaxTree;
   exportName: string | null;
   imports: Map<string, string>;
 }
@@ -648,7 +648,7 @@ function propagateMutationEffects(functions: CachedSourceEffectFunction[]): void
 export async function indexEffectModuleForWorker(
   input: EffectWorkerIndexInput,
   moduleAliases: Map<string, string>,
-): Promise<{ indexed: IndexedEffectWorkerModule; state: EffectWorkerState; tree: Tree }> {
+): Promise<{ indexed: IndexedEffectWorkerModule; state: EffectWorkerState; tree: SyntaxTree }> {
   const tree = await parseLuau(input.source);
   const imports = topLevelImports(tree.rootNode, moduleAliases);
 

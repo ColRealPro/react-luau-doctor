@@ -1,4 +1,4 @@
-import type { Node as SyntaxNode, Tree } from "web-tree-sitter";
+import type { SyntaxNode, SyntaxTree } from "./syntax";
 
 export type Severity = "error" | "warning" | "suggestion";
 export type Category =
@@ -154,7 +154,7 @@ export interface SourceFile {
   absolutePath: string;
   relativePath: string;
   source: string;
-  tree: Tree;
+  tree: SyntaxTree;
   root: SyntaxNode;
   model: ReactModel;
   project: ProjectModel;

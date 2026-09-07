@@ -1,4 +1,4 @@
-import type { Node as SyntaxNode } from "web-tree-sitter";
+import type { SyntaxNode } from "../syntax";
 import { moduleKeys, normalizeRequireTarget, resolveModuleReference } from "../module-resolution";
 import { normalizeExpressionText, rootIdentifier, sameNode } from "../ast/walk";
 import type { FunctionInfo, RuleContext, SourceEffectModuleSummary, StateBinding } from "../types";

@@ -1,4 +1,4 @@
-import type { Node as SyntaxNode } from "web-tree-sitter";
+import type { SyntaxNode } from "../syntax";
 import type { FunctionInfo, ReactModel, StateBinding } from "../types";
 import { nodeKey, normalizeExpressionText, sameNode, walk } from "./walk";
 

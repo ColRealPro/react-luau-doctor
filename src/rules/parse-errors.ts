@@ -1,4 +1,4 @@
-import type { Node as SyntaxNode } from "web-tree-sitter";
+import type { SyntaxNode } from "../syntax";
 import type { RuleDefinition } from "../types";
 
 const REQUIRED_CLOSERS = new Map<string, string>([

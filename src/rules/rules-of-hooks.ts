@@ -3,7 +3,7 @@ import {
   normalizeRequireTarget,
   resolveModuleReference,
 } from "../module-resolution";
-import type { Node as SyntaxNode } from "web-tree-sitter";
+import type { SyntaxNode } from "../syntax";
 import type {
   ConditionalHookModeSummary,
   DiagnosticInput,

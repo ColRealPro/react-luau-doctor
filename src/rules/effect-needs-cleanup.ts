@@ -1,4 +1,4 @@
-import type { Node as SyntaxNode } from "web-tree-sitter";
+import type { SyntaxNode } from "../syntax";
 import type { FixPreview, FunctionInfo, RuleContext, RuleDefinition, Severity } from "../types";
 import { sameNode } from "../ast/walk";
 import { functionYieldPoint } from "../roblox-semantics";

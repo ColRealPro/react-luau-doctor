@@ -1,4 +1,4 @@
-import type { Node as SyntaxNode } from "web-tree-sitter";
+import type { SyntaxNode } from "../syntax";
 import type { DiagnosticInput, FunctionInfo, RuleContext, RuleDefinition } from "../types";
 import { nodeKey, normalizeExpressionText, rootIdentifier, sameNode } from "../ast/walk";
 import { mutableDependencyBase } from "../roblox-semantics";
