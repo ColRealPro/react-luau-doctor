@@ -196,12 +196,13 @@ test("why preserves full-project context for project-aware diagnostics and expla
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
   fs.writeFileSync(path.join(root, "useObservedValue.luau"), `local React = require(script.Parent.React)
-local function useObservedValue(signal)
+local RunService = game:GetService("RunService")
+local function useObservedValue()
   local value, setValue = React.useState(0)
   React.useEffect(function()
-    local connection = signal:Connect(setValue)
+    local connection = RunService.RenderStepped:Connect(setValue)
     return function() connection:Disconnect() end
-  end, { signal })
+  end, {})
   return value
 end
 return useObservedValue
@@ -219,8 +220,8 @@ return StructuralThing
   fs.writeFileSync(path.join(root, "Consumer.luau"), `local React = require(script.Parent.React)
 local useObservedValue = require(script.Parent.useObservedValue)
 local StructuralThing = require(script.Parent.StructuralThing)
-local function Consumer(props)
-  local value = useObservedValue(props.changed)
+local function Consumer()
+  local value = useObservedValue()
   return React.createElement(StructuralThing, { rotation = value })
 end
 return Consumer

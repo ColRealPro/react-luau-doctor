@@ -11,7 +11,7 @@ import type {
   SourceEffectModuleSummary,
 } from "./types";
 
-const CACHE_SCHEMA_VERSION = 1;
+const CACHE_SCHEMA_VERSION = 2;
 const MAX_CACHED_REPORTS = 8;
 
 interface CachedFileState {

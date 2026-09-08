@@ -7,7 +7,7 @@ import {
   resolveModuleReference,
   type ModuleIdentity,
 } from "./module-resolution";
-import { sourceHasHighFrequencyRunService } from "./roblox-semantics";
+import { sourceHasHighFrequencyRobloxEvent } from "./roblox-semantics";
 import type {
   BindingCandidateHookSummary,
   ConditionalHookModeSummary,
@@ -17,7 +17,15 @@ import type {
 } from "./types";
 
 const EXTERNAL_UPDATE_SOURCE =
-  /(?::|\.)(?:Connect|Once|Subscribe|Observe|Listen|Watch)\s*\(|\b(?:subscribe|observe|listen|watch)[A-Za-z0-9_]*\s*\(|GetPropertyChangedSignal\s*\(|\.Changed\b/i;
+  /(?::|\.)(?:Connect|Once|Subscribe|Observe|Listen|Watch|onStep|onUpdate|onChange|onChanged)\s*\(|\b(?:subscribe|observe|listen|watch|onStep|onUpdate|onChange|onChanged)[A-Za-z0-9_]*\s*\(|GetPropertyChangedSignal\s*\(|GetAttributeChangedSignal\s*\(|\.Changed\b/i;
+const SEMANTIC_SNAPSHOT_EXPRESSION =
+  /\b(?:getState|getSnapshot|snapshot|selector|select|table\s*\.\s*(?:clone|freeze|move))\b|(?:\.|\[\s*["'])State(?:\b|["']\s*\])/i;
+const PURE_MIRROR_EXPRESSION_ROOTS = new Set([
+  "math", "string", "utf8", "bit32", "UDim", "UDim2", "Vector2", "Vector3",
+  "Color3", "CFrame", "Rect", "NumberRange", "NumberSequence", "ColorSequence",
+  "BrickColor", "Font", "Enum", "tostring", "tonumber", "type", "typeof",
+  "true", "false", "nil",
+]);
 const CALLBACK_PARAMETER_NAME =
   /^(?:callback|handler|listener|subscriber|observer|effect|fn)$/i;
 
@@ -481,8 +489,76 @@ function findExternalCallbackFunction(
   return {
     name,
     callbackParameterIndexes,
-    highFrequency: sourceHasHighFrequencyRunService(source),
+    highFrequency: sourceHasHighFrequencyRobloxEvent(source) || sourceHasLikelyContinuousSubscription(source),
   };
+}
+
+function sourceHasLikelyContinuousSubscription(source: string): boolean {
+  return /(?::|\.)onStep\s*\(/i.test(source);
+}
+
+function expressionReferencesName(expression: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${escaped}\\b`).test(expression);
+}
+
+function isLiteralStateTransitionExpression(expression: string): boolean {
+  const text = expression.trim();
+  return /^(?:true|false|nil|[-+]?\d+(?:\.\d+)?|["'][^"']*["'])$/.test(text);
+}
+
+function expressionHasLikelyExternalInput(expression: string): boolean {
+  const withoutMembers = expression.replace(/\.\s*[A-Za-z_][A-Za-z0-9_]*/g, "");
+  for (const match of withoutMembers.matchAll(/\b[A-Za-z_][A-Za-z0-9_]*\b/g)) {
+    if (!PURE_MIRROR_EXPRESSION_ROOTS.has(match[0])) return true;
+  }
+  return false;
+}
+
+function subscriptionMirrorConfidence(
+  source: string,
+  setterName: string,
+): "strong" | "possible" | "none" {
+  const escapedSetter = setterName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  // Passing the React setter directly to a persistent subscription is the
+  // clearest possible "external value -> React state" mirror shape.
+  const directSetter = new RegExp(
+    `(?::|\\.)(Connect|Subscribe|Observe|Listen|Watch|onStep|onUpdate|onChange|onChanged)\\s*\\(\\s*${escapedSetter}\\b`,
+    "i",
+  );
+  if (directSetter.test(source)) return "strong";
+
+  const callbackPattern = new RegExp(
+    `(?::|\\.)(Connect|Subscribe|Observe|Listen|Watch|onStep|onUpdate|onChange|onChanged)\\s*\\(\\s*function\\s*\\(([^)]*)\\)[\\s\\S]{0,2400}?\\b${escapedSetter}\\s*\\(`,
+    "gi",
+  );
+
+  let possible = false;
+  for (const match of source.matchAll(callbackPattern)) {
+    if (match.index === undefined) continue;
+    const callbackParameters = splitTopLevelParameters(match[2] ?? "")
+      .map(parameterName)
+      .filter((name): name is string => Boolean(name));
+    const setterOffset = match[0].lastIndexOf(setterName);
+    if (setterOffset < 0) continue;
+    const setterStart = match.index + setterOffset;
+    const open = source.indexOf("(", setterStart + setterName.length);
+    const argumentsText = extractCallArguments(source, open);
+    if (argumentsText === null) continue;
+    const setterArgs = splitTopLevelParameters(argumentsText);
+    const expression = setterArgs[0]?.trim() ?? "";
+    if (!expression || /^function\b/.test(expression) || isLiteralStateTransitionExpression(expression)) continue;
+    if (SEMANTIC_SNAPSHOT_EXPRESSION.test(expression)) continue;
+
+    if (callbackParameters.some((name) => expressionReferencesName(expression, name))) {
+      return "strong";
+    }
+    if (!expressionHasLikelyExternalInput(expression)) continue;
+    possible = true;
+  }
+
+  return possible ? "possible" : "none";
 }
 
 function findBindingCandidateHook(
@@ -520,26 +596,59 @@ function findBindingCandidateHook(
   ).test(source);
   if (!setterCalled && !setterPassedToSubscription) return null;
 
-  const highFrequency = sourceHasHighFrequencyRunService(source);
+  const highFrequency = sourceHasHighFrequencyRobloxEvent(source) || sourceHasLikelyContinuousSubscription(source);
   const external = highFrequency || EXTERNAL_UPDATE_SOURCE.test(source);
   if (!external) return null;
 
-  const propertySignal = source.match(
-    /GetPropertyChangedSignal\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)/,
+  const literalPropertySignal = source.match(
+    /GetPropertyChangedSignal\s*\(\s*["']([^"']+)["']\s*\)/,
   );
-  const observedPropertyName = propertySignal?.[1] ?? null;
-  const measurement = Boolean(
-    observedPropertyName &&
-      new RegExp(
-        `\\[\\s*${observedPropertyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\]`,
-      ).test(source),
-  );
+  const dynamicPropertySignal = literalPropertySignal
+    ? null
+    : source.match(
+        /GetPropertyChangedSignal\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)/,
+      );
+  const literalPropertyName = literalPropertySignal?.[1] ?? null;
+  const dynamicPropertyName = dynamicPropertySignal?.[1] ?? null;
+  const readsObservedProperty = literalPropertyName
+    ? new RegExp(
+        `(?:\\.\\s*${literalPropertyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b|\\[\\s*["']${literalPropertyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']\\s*\\])`,
+      ).test(source)
+    : Boolean(
+        dynamicPropertyName &&
+          new RegExp(
+            `\\[\\s*${dynamicPropertyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\]`,
+          ).test(source),
+      );
+  const instanceProperty = Boolean((literalPropertyName || dynamicPropertyName) && readsObservedProperty);
+  const mirrorConfidence = instanceProperty
+    ? "strong"
+    : subscriptionMirrorConfidence(source, setterName);
+
+  let observedPropertyParameterIndex: number | undefined;
+  if (instanceProperty && dynamicPropertyName) {
+    const parameters = findFunctionParameters(source, exported);
+    if (parameters !== null) {
+      const parameterNames = splitTopLevelParameters(parameters).map(
+        (parameter) => parameter.match(/^([A-Za-z_][A-Za-z0-9_]*)/)?.[1] ?? "",
+      );
+      const index = parameterNames.indexOf(dynamicPropertyName);
+      if (index >= 0) observedPropertyParameterIndex = index;
+    }
+  }
 
   return {
     name: exported,
     highFrequency,
     external,
-    sourceKind: measurement ? "measurement" : "external-state",
+    sourceKind: instanceProperty ? "instance-property" : "external-state",
+    mirrorConfidence,
+    ...(instanceProperty && literalPropertyName
+      ? { observedPropertyName: literalPropertyName }
+      : {}),
+    ...(observedPropertyParameterIndex !== undefined
+      ? { observedPropertyParameterIndex }
+      : {}),
     ...(dualMode
       ? {
           bindingModeParameterIndex: dualMode.bindingModeParameterIndex,
@@ -588,6 +697,7 @@ function findDerivedBindingCandidateHook(
       highFrequency: summary.highFrequency,
       external: true,
       sourceKind: "derived-external-state",
+      mirrorConfidence: summary.mirrorConfidence,
     };
   }
 
@@ -978,7 +1088,15 @@ function findBindingCompatibleComponentProps(
     if (
       offsets.length > 0 &&
       offsets.every((offset) =>
-        ranges.some((range) => offset >= range.start && offset < range.end),
+        ranges.some((range) => {
+          if (offset < range.start || offset >= range.end) return false;
+          // A prop read captured inside a callback nested in a host-property
+          // expression is not directly Binding-compatible. Turning the prop
+          // itself into a Binding would require restructuring that callback
+          // (usually with map/joinBindings), so keep the cross-component proof
+          // conservative instead of treating textual containment as enough.
+          return !/\bfunction\b/.test(source.slice(range.start, offset));
+        }),
       )
     ) {
       compatible.add(property);

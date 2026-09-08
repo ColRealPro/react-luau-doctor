@@ -94,10 +94,12 @@ end, {})`,
   },
   "react-luau/prefer-binding-over-state-candidate": {
     before: `local value, setValue = React.useState(0)
--- value drives both visual and structural work`,
-    after: `local visualValue, setVisualValue = React.useBinding(0)
-local structuralValue, setStructuralValue = React.useState(0)`,
-    note: "A common fix is to split high-frequency visual updates from the smaller value that truly needs reconciliation.",
+signal:Connect(setValue)
+-- value is used for presentation`,
+    after: `local value, setValue = React.useBinding(0)
+signal:Connect(setValue)
+-- keep separate React state too if structure depends on it`,
+    note: "Use a Binding when this is really an external presentation stream. Keep or split React state when the event represents semantic UI state or needs reconciliation.",
   },
   "react-luau/rerender-unstable-memo-props": {
     before: `return React.createElement(MemoizedButton, {

@@ -1115,7 +1115,7 @@ function whySeverityMeaning(severity: Severity): string {
 
 function whyRuleSpecificContext(diagnostic: Diagnostic): string | null {
   if (diagnostic.rule === "react-luau/prefer-binding-over-state-candidate") {
-    return "A Binding can update visual values without rerendering the component. Here, at least one use may be structural or otherwise depend on a rerender, so replacing all of the state with a Binding is not automatically safe.";
+    return "A Binding can update visual values without rerendering the component. Doctor found an external reactive mirror or presentation branch, but it cannot fully prove the source's update pressure, conversion safety, or that every consumer can leave React state.";
   }
   if (diagnostic.rule === "react-luau/prefer-binding-over-state") {
     return "A Binding can update these values without rerendering the component, and every use of the value only needs that kind of update. React state is therefore doing extra reconciliation work here.";
@@ -1134,7 +1134,7 @@ function whyRuleSpecificContext(diagnostic: Diagnostic): string | null {
 
 function whyRuleCaveat(diagnostic: Diagnostic): string | null {
   if (diagnostic.rule === "react-luau/prefer-binding-over-state-candidate") {
-    return "Keep React state when the value genuinely changes component structure, conditional children, hook inputs, or other behavior that must go through React reconciliation. Mixed cases often benefit from splitting visual Binding updates from a smaller structural state value.";
+    return "Keep React state when the external event represents semantic UI state, changes component structure, drives hook/effect behavior, or is infrequent enough that a Binding would only make the code harder to follow. Mixed cases can split visual Binding updates from the smaller value that truly needs reconciliation.";
   }
   if (diagnostic.rule === "react-luau/prefer-binding-over-state") {
     return "Keep React state if changing the value must rebuild component structure rather than only update Roblox Instance properties or other Binding-aware consumers.";

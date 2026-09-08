@@ -197,6 +197,8 @@ function hasRobloxReceiver(path: string, call: SyntaxNode, context: RuleContext)
 
 const runServiceCallCache = new WeakMap<RuleContext, Map<number, boolean>>();
 const runServiceExpressionCache = new WeakMap<RuleContext, Map<number, boolean>>();
+const highFrequencyRobloxCallCache = new WeakMap<RuleContext, Map<number, boolean>>();
+const highFrequencyRobloxExpressionCache = new WeakMap<RuleContext, Map<number, boolean>>();
 
 function cachedNodeBoolean(
   cache: WeakMap<RuleContext, Map<number, boolean>>,
@@ -273,6 +275,32 @@ export function isHighFrequencyRunServiceCall(call: SyntaxNode, context: RuleCon
   });
 }
 
+const HIGH_FREQUENCY_ROBLOX_EVENTS = new Set([
+  "InputChanged",
+  "TouchMoved",
+  "Move",
+]);
+
+export function isHighFrequencyRobloxExpression(node: SyntaxNode, context: RuleContext): boolean {
+  return cachedNodeBoolean(highFrequencyRobloxExpressionCache, context, node, () => {
+    if (isHighFrequencyRunServiceExpression(node, context)) return true;
+    const normalized = node.text.replace(/\s+/g, "");
+    const match = normalized.match(/^(.+)\.(InputChanged|TouchMoved|Move)$/);
+    if (!match || !HIGH_FREQUENCY_ROBLOX_EVENTS.has(match[2])) return false;
+    return hasRobloxReceiver(match[1], node, context);
+  });
+}
+
+export function isHighFrequencyRobloxCall(call: SyntaxNode, context: RuleContext): boolean {
+  return cachedNodeBoolean(highFrequencyRobloxCallCache, context, call, () => {
+    if (isHighFrequencyRunServiceCall(call, context)) return true;
+    const normalized = (context.getCallPath(call) ?? "").replace(/\s+/g, "");
+    const event = normalized.match(/^(.+)\.(InputChanged|TouchMoved|Move):Connect$/);
+    if (!event || !HIGH_FREQUENCY_ROBLOX_EVENTS.has(event[2])) return false;
+    return hasRobloxReceiver(event[1], call, context);
+  });
+}
+
 export function sourceHasHighFrequencyRunService(source: string): boolean {
   if (/game\s*:\s*GetService\s*\(\s*["']RunService["']\s*\)\s*(?:\.\s*(?:RenderStepped|Heartbeat|Stepped|PreRender|PreSimulation|PostSimulation)\s*:\s*Connect|:\s*(?:BindToRenderStep|BindToSimulation))/.test(source)) {
     return true;
@@ -287,6 +315,45 @@ export function sourceHasHighFrequencyRunService(source: string): boolean {
     const pattern = new RegExp(`\\b${escaped}\\s*(?:\\.\\s*(?:RenderStepped|Heartbeat|Stepped|PreRender|PreSimulation|PostSimulation)\\s*:\\s*Connect|:\\s*(?:BindToRenderStep|BindToSimulation))`);
     if (pattern.test(source)) return true;
   }
+  return false;
+}
+
+export function sourceHasHighFrequencyRobloxEvent(source: string): boolean {
+  if (sourceHasHighFrequencyRunService(source)) return true;
+
+  if (/game\s*:\s*GetService\s*\(\s*["']UserInputService["']\s*\)\s*\.\s*(?:InputChanged|TouchMoved)\s*:\s*Connect/.test(source)) {
+    return true;
+  }
+
+  const serviceAliases = new Set<string>();
+  for (const match of source.matchAll(
+    /\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*game\s*:\s*GetService\s*\(\s*["']UserInputService["']\s*\)/g,
+  )) {
+    serviceAliases.add(match[1]);
+  }
+  for (const alias of serviceAliases) {
+    const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`\\b${escaped}\\s*\\.\\s*(?:InputChanged|TouchMoved)\\s*:\\s*Connect`).test(source)) {
+      return true;
+    }
+  }
+
+  const playersAliases = new Set<string>();
+  for (const match of source.matchAll(
+    /\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*game\s*:\s*GetService\s*\(\s*["']Players["']\s*\)/g,
+  )) {
+    playersAliases.add(match[1]);
+  }
+  for (const players of playersAliases) {
+    const escapedPlayers = players.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    for (const match of source.matchAll(
+      new RegExp(`\\blocal\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*${escapedPlayers}\\s*\\.\\s*LocalPlayer\\s*:\\s*GetMouse\\s*\\(\\s*\\)`, "g"),
+    )) {
+      const mouse = match[1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (new RegExp(`\\b${mouse}\\s*\\.\\s*Move\\s*:\\s*Connect`).test(source)) return true;
+    }
+  }
+
   return false;
 }
 

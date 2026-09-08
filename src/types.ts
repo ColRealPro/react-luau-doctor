@@ -95,15 +95,20 @@ export interface ReactModel {
 }
 
 export type BindingCandidateSourceKind =
-  | "measurement"
+  | "instance-property"
   | "external-state"
   | "derived-external-state";
+
+export type BindingCandidateMirrorConfidence = "strong" | "possible" | "none";
 
 export interface BindingCandidateHookSummary {
   name: string;
   highFrequency: boolean;
   external: boolean;
   sourceKind: BindingCandidateSourceKind;
+  mirrorConfidence: BindingCandidateMirrorConfidence;
+  observedPropertyName?: string;
+  observedPropertyParameterIndex?: number;
   bindingModeParameterIndex?: number;
   bindingModeParameterName?: string;
   bindingWhenTruthy?: boolean;

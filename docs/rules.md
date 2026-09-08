@@ -12,8 +12,8 @@ Doctor currently includes 35 rules. This table lists their default severities; i
 | `react-luau/no-self-updating-effect` | warning | Effects | Effects should not unconditionally update state that is also one of their dependencies. |
 | `react-luau/no-effect-with-fresh-deps` | error | Hooks | Dependency tables should not contain tables or functions recreated on every render. |
 | `react-luau/no-mutable-in-deps` | error | Hooks | Mutable ref.current values do not belong in hook dependency tables. |
-| `react-luau/prefer-binding-over-state` | warning | Performance | Prefer React.useBinding when externally updated values do not need React reconciliation on every change. |
-| `react-luau/prefer-binding-over-state-candidate` | suggestion | Performance | Surface lower-confidence state-to-Binding opportunities that need developer review. |
+| `react-luau/prefer-binding-over-state` | warning | Performance | Prefer React.useBinding for proven external presentation streams whose updates do not need React reconciliation. |
+| `react-luau/prefer-binding-over-state-candidate` | suggestion | Performance | Surface lower-confidence external-mirror and mixed state-to-Binding opportunities that need developer review. |
 | `react-luau/rerender-unstable-memo-props` | warning | Performance | Warn when fresh table or function props defeat shallow React.memo comparisons. |
 | `react-luau/rerender-high-frequency-state` | warning | Performance | Find state updates from frame callbacks that can rerender expensive component trees continuously. |
 | `react-luau/rerender-unnecessary-usememo` | warning | Performance | Find trivial derived values that cost more to memoize than to compute directly. |

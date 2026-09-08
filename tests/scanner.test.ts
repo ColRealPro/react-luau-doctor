@@ -512,7 +512,7 @@ return Consumer
 });
 
 
-test("binding-over-state reports inferred measurement hooks even when migration needs a binding-aware effect", async (t) => {
+test("binding candidate surfaces measurement effects that only derive presentation state", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-measurement-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -551,10 +551,59 @@ return Consumer
 `);
 
   const report = await scanPath(root);
-  const diagnostic = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state" && entry.file === "Consumer.luau");
-  assert.ok(diagnostic);
-  assert.match(diagnostic.message, /externally changing GUI measurement/);
-  assert.match(diagnostic.help ?? "", /binding-aware effect/);
+  assert.equal(
+    report.diagnostics.some((entry) => entry.file === "Consumer.luau" && entry.rule === "react-luau/prefer-binding-over-state"),
+    false,
+  );
+  const candidate = report.diagnostics.find(
+    (entry) => entry.file === "Consumer.luau" && entry.rule === "react-luau/prefer-binding-over-state-candidate",
+  );
+  assert.ok(candidate);
+  assert.match(candidate.message, /effect only derives presentation state or Bindings/);
+});
+
+test("binding-over-state keeps measurement state when an effect performs behavioral work", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-measurement-behavior-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "useObservedGuiMetric.luau"), `local React = require(script.Parent.React)
+local function useObservedGuiMetric(targetRef, observedKey)
+  local value, setValue = React.useState(nil)
+  React.useEffect(function()
+    local instance = targetRef.current
+    if not instance then return end
+    local function update()
+      setValue(instance[observedKey])
+    end
+    local connection = instance:GetPropertyChangedSignal(observedKey):Connect(update)
+    update()
+    return function() connection:Disconnect() end
+  end, { targetRef, observedKey })
+  return value
+end
+return useObservedGuiMetric
+`);
+
+  fs.writeFileSync(path.join(root, "Consumer.luau"), `local React = require(script.Parent.React)
+local useObservedGuiMetric = require(script.Parent.useObservedGuiMetric)
+local function Consumer(props)
+  local ref = React.useRef(nil)
+  local measuredSize = useObservedGuiMetric(ref, "AbsoluteSize")
+  React.useEffect(function()
+    if measuredSize then
+      props.onMeasured(measuredSize)
+    end
+  end, { measuredSize, props.onMeasured })
+  return React.createElement("Frame", { ref = ref })
+end
+return Consumer
+`);
+
+  const report = await scanPath(root);
+  assert.equal(
+    report.diagnostics.some((entry) => entry.file === "Consumer.luau" && entry.rule.startsWith("react-luau/prefer-binding-over-state")),
+    false,
+  );
 });
 
 test("binding-over-state infers dual-mode measurement hooks and skips calls already using binding mode", async (t) => {
@@ -608,10 +657,10 @@ return BindingConsumer
   const diagnostics = report.diagnostics.filter((entry) => entry.rule === "react-luau/prefer-binding-over-state");
   assert.equal(diagnostics.length, 1);
   assert.equal(diagnostics[0].file, "StateConsumer.luau");
-  assert.match(diagnostics[0].message, /externally changing GUI measurement/);
+  assert.match(diagnostics[0].message, /AbsoluteSize/);
 });
 
-test("binding-over-state follows derived presentation locals from external snapshots", async (t) => {
+test("binding-over-state keeps semantic external snapshots in React state", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-snapshot-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -641,12 +690,13 @@ return Consumer
 `);
 
   const report = await scanPath(root);
-  const diagnostic = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state" && entry.file === "Consumer.luau");
-  assert.ok(diagnostic);
-  assert.match(diagnostic.message, /external callback/);
+  assert.equal(
+    report.diagnostics.some((entry) => entry.file === "Consumer.luau" && entry.rule.startsWith("react-luau/prefer-binding-over-state")),
+    false,
+  );
 });
 
-test("binding-over-state infers state-to-binding API alternatives without configuration", async (t) => {
+test("binding candidate recognizes explicit state-to-binding API alternatives without upgrading semantic state to a warning", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-client-state-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -669,20 +719,27 @@ local function Consumer()
 	local enabled = VisualState:GetReactState(function(state)
 		return state.enabled
 	end)
+	local mixed = VisualState:GetReactState(function(state)
+		return state.mixed
+	end)
 	return React.createElement("Frame", {
 		BackgroundTransparency = transparency,
+		Rotation = mixed,
 	}, {
 		child = enabled and React.createElement("Frame") or nil,
+		mixedChild = mixed > 0 and React.createElement("Frame") or nil,
 	})
 end
 return Consumer
 `);
 
   const report = await scanPath(root);
-  const diagnostics = report.diagnostics.filter((entry) => entry.rule === "react-luau/prefer-binding-over-state");
-  assert.equal(diagnostics.length, 1);
-  assert.match(diagnostics[0].message, /GetReactBinding/);
-  assert.match(diagnostics[0].message, /transparency/);
+  assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
+  const candidates = report.diagnostics.filter((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate");
+  assert.equal(candidates.length, 1);
+  assert.match(candidates[0].message, /GetReactBinding/);
+  assert.match(candidates[0].message, /transparency/);
+  assert.doesNotMatch(candidates[0].message, /mixed/);
 });
 
 test("binding-over-state does not invent a binding alternative from a method name alone", async (t) => {
@@ -708,7 +765,7 @@ return Consumer
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
 });
 
-test("binding-over-state infers custom external callback wrappers from their implementation", async (t) => {
+test("binding candidate surfaces arbitrary external mirrors without calling them high-frequency", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-callback-wrapper-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -734,9 +791,10 @@ return Consumer
 `);
 
   const report = await scanPath(root);
-  const diagnostic = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state");
-  assert.ok(diagnostic);
-  assert.match(diagnostic.message, /position/);
+  assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
+  const candidate = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate");
+  assert.ok(candidate);
+  assert.match(candidate.message, /external reactive value/);
 });
 
 test("React namespace detection supports aliased relative-string requires", async (t) => {
@@ -757,7 +815,7 @@ return Consumer
   assert.ok(report.diagnostics.some((entry) => entry.rule === "react-luau/no-set-state-in-render"));
 });
 
-test("binding-over-state follows named signal callbacks but ignores non-visual finite interaction state", async (t) => {
+test("binding-over-state keeps arbitrary named signal state and structural high-frequency state", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-named-callback-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -790,9 +848,10 @@ return Consumer
 `);
 
   const report = await scanPath(root);
-  const diagnostics = report.diagnostics.filter((entry) => entry.rule === "react-luau/prefer-binding-over-state");
-  assert.equal(diagnostics.length, 1);
-  assert.match(diagnostics[0].message, /position/);
+  assert.equal(
+    report.diagnostics.some((entry) => entry.rule.startsWith("react-luau/prefer-binding-over-state")),
+    false,
+  );
 });
 
 test("binding-over-state follows proven bindable props through custom components", async (t) => {
@@ -800,12 +859,13 @@ test("binding-over-state follows proven bindable props through custom components
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
   fs.writeFileSync(path.join(root, "useObservedValue.luau"), `local React = require(script.Parent.React)
-local function useObservedValue(signal)
+local RunService = game:GetService("RunService")
+local function useObservedValue()
   local value, setValue = React.useState(0)
   React.useEffect(function()
-    local connection = signal:Connect(setValue)
+    local connection = RunService.RenderStepped:Connect(setValue)
     return function() connection:Disconnect() end
-  end, { signal })
+  end, {})
   return value
 end
 return useObservedValue
@@ -821,8 +881,8 @@ return VisualFrame
   fs.writeFileSync(path.join(root, "Consumer.luau"), `local React = require(script.Parent.React)
 local useObservedValue = require(script.Parent.useObservedValue)
 local VisualFrame = require(script.Parent.VisualFrame)
-local function Consumer(props)
-  local rotation = useObservedValue(props.changed)
+local function Consumer()
+  local rotation = useObservedValue()
   return React.createElement(VisualFrame, { rotation = rotation })
 end
 return Consumer
@@ -836,17 +896,57 @@ return Consumer
   assert.equal(candidates.length, 0);
 });
 
+test("binding-over-state does not prove custom props binding-compatible through nested callbacks", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-nested-prop-callback-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Child.luau"), `local React = require(script.Parent.React)
+local function Child(props)
+  local base = React.useBinding(0)
+  return React.createElement("Frame", { Size = props.Size }, {
+    inner = React.createElement("Frame", {
+      Position = base:map(function()
+        return UDim2.fromOffset(props.Size.X.Offset, 0)
+      end),
+    }),
+  })
+end
+return Child
+`);
+
+  fs.writeFileSync(path.join(root, "Consumer.luau"), `local React = require(script.Parent.React)
+local RunService = game:GetService("RunService")
+local Child = require(script.Parent.Child)
+local function Consumer()
+  local size, setSize = React.useState(UDim2.fromOffset(0, 0))
+  React.useEffect(function()
+    local connection = RunService.RenderStepped:Connect(function(dt)
+      setSize(UDim2.fromOffset(dt, 0))
+    end)
+    return function() connection:Disconnect() end
+  end, {})
+  return React.createElement(Child, { Size = size })
+end
+return Consumer
+`);
+
+  const report = await scanPath(root);
+  assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
+  assert.ok(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate"));
+});
+
 test("binding candidate rule surfaces unknown custom-component consumers without upgrading them to warnings", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-candidate-component-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
   fs.writeFileSync(path.join(root, "useObservedValue.luau"), `local React = require(script.Parent.React)
-local function useObservedValue(signal)
+local RunService = game:GetService("RunService")
+local function useObservedValue()
   local value, setValue = React.useState(0)
   React.useEffect(function()
-    local connection = signal:Connect(setValue)
+    local connection = RunService.RenderStepped:Connect(setValue)
     return function() connection:Disconnect() end
-  end, { signal })
+  end, {})
   return value
 end
 return useObservedValue
@@ -864,8 +964,8 @@ return StructuralThing
   fs.writeFileSync(path.join(root, "Consumer.luau"), `local React = require(script.Parent.React)
 local useObservedValue = require(script.Parent.useObservedValue)
 local StructuralThing = require(script.Parent.StructuralThing)
-local function Consumer(props)
-  local value = useObservedValue(props.changed)
+local function Consumer()
+  local value = useObservedValue()
   return React.createElement(StructuralThing, { rotation = value })
 end
 return Consumer
@@ -883,16 +983,17 @@ test("binding candidate rule surfaces mixed visual and structural state but igno
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
   fs.writeFileSync(path.join(root, "Consumer.luau"), `local React = require(script.Parent.React)
-local function Consumer(props)
+local RunService = game:GetService("RunService")
+local function Consumer()
   local position, setPosition = React.useState(UDim2.fromOffset(0, 0))
   local selected, setSelected = React.useState(false)
   React.useEffect(function()
-    local connection = props.changed:Connect(function(nextPosition, nextSelected)
-      setPosition(nextPosition)
-      setSelected(nextSelected)
+    local connection = RunService.RenderStepped:Connect(function(dt)
+      setPosition(UDim2.fromOffset(dt, 0))
+      setSelected(dt > 0)
     end)
     return function() connection:Disconnect() end
-  end, { props.changed })
+  end, {})
   return React.createElement("Frame", { Position = position }, {
     mixedChild = position.X.Offset > 0 and React.createElement("Frame") or nil,
     selectedChild = selected and React.createElement("Frame") or nil,
@@ -908,7 +1009,7 @@ return Consumer
   assert.doesNotMatch(candidates[0].message, /selected/);
 });
 
-test("binding candidate rule uses project-proven binding API siblings for structural consumers", async (t) => {
+test("binding candidate rule ignores project-proven binding API siblings for structural-only consumers", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-candidate-api-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -930,9 +1031,472 @@ return Consumer
 
   const report = await scanPath(root);
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
+  assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate"), false);
+});
+
+test("binding-over-state warns for proven high-frequency input presentation state", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-input-changed-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local UserInputService = game:GetService("UserInputService")
+
+local function Component()
+  local position, setPosition = React.useState(Vector2.zero)
+  React.useEffect(function()
+    local connection = UserInputService.InputChanged:Connect(function(input)
+      setPosition(input.Position)
+    end)
+    return function() connection:Disconnect() end
+  end, {})
+  return React.createElement("Frame", {
+    Position = UDim2.fromOffset(position.X, position.Y),
+  })
+end
+
+return Component
+`);
+
+  const report = await scanPath(root);
+  const diagnostic = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state");
+  assert.ok(diagnostic);
+  assert.match(diagnostic.message, /high-frequency/);
+});
+
+test("binding-over-state propagates mouse movement pressure through imported hooks", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-mouse-hook-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "useMousePosition.luau"), `local React = require(script.Parent.React)
+local Players = game:GetService("Players")
+local mouse = Players.LocalPlayer:GetMouse()
+
+local function useMousePosition()
+  local position, setPosition = React.useState(Vector2.zero)
+  React.useEffect(function()
+    local connection = mouse.Move:Connect(function()
+      setPosition(Vector2.new(mouse.X, mouse.Y))
+    end)
+    return function() connection:Disconnect() end
+  end, {})
+  return position
+end
+
+return useMousePosition
+`);
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local useMousePosition = require(script.Parent.useMousePosition)
+
+local function Component()
+  local position = useMousePosition()
+  return React.createElement("Frame", {
+    Position = UDim2.fromOffset(position.X, position.Y),
+  })
+end
+
+return Component
+`);
+
+  const report = await scanPath(root);
+  const diagnostic = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state");
+  assert.ok(diagnostic);
+  assert.match(diagnostic.message, /high-frequency/);
+});
+
+test("binding-over-state recognizes React.Change host feedback without requiring a frame-rate source", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-react-change-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+
+local function Component()
+  local absoluteSize, setAbsoluteSize = React.useState(Vector2.zero)
+  return React.createElement("Frame", {
+    [React.Change.AbsoluteSize] = function(instance)
+      setAbsoluteSize(instance.AbsoluteSize)
+    end,
+    Size = UDim2.fromOffset(math.max(absoluteSize.X - 8, 0), absoluteSize.Y),
+  })
+end
+
+return Component
+`);
+
+  const report = await scanPath(root);
+  const diagnostic = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state");
+  assert.ok(diagnostic);
+  assert.match(diagnostic.message, /AbsoluteSize/);
+  assert.match(diagnostic.message, /feedback/);
+  assert.equal(diagnostic.fixPreview, undefined);
+});
+
+test("binding-over-state keeps host measurements in state when they determine React structure", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-structural-measurement-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+
+local function Component()
+  local absoluteSize, setAbsoluteSize = React.useState(Vector2.zero)
+  local children = {}
+  if absoluteSize.X > 300 then
+    children.sidebar = React.createElement("Frame")
+  end
+  return React.createElement("Frame", {
+    [React.Change.AbsoluteSize] = function(instance)
+      setAbsoluteSize(instance.AbsoluteSize)
+    end,
+  }, children)
+end
+
+return Component
+`);
+
+  const report = await scanPath(root);
+  assert.equal(
+    report.diagnostics.some((entry) => entry.rule.startsWith("react-luau/prefer-binding-over-state")),
+    false,
+  );
+});
+
+test("binding candidate keeps opaque helpers out of strong high-frequency warnings", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-opaque-helper-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local RunService = game:GetService("RunService")
+
+local function Component(props)
+  local value, setValue = React.useState(0)
+  React.useEffect(function()
+    local connection = RunService.RenderStepped:Connect(function(dt)
+      setValue(dt)
+    end)
+    return function() connection:Disconnect() end
+  end, {})
+  local rotation = props.transform(value)
+  return React.createElement("Frame", { Rotation = rotation })
+end
+
+return Component
+`);
+
+  const report = await scanPath(root);
+  assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
   const candidate = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate");
   assert.ok(candidate);
-  assert.match(candidate.message, /GetReactBinding/);
+});
+
+test("binding candidate treats non-measurement instance properties as optional even when a Binding mode exists", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-semantic-property-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "useObservedProperty.luau"), `local React = require(script.Parent.React)
+local function useObservedProperty(targetRef, property, preferBinding: boolean?)
+  local value, updateValue
+  if preferBinding then
+    value, updateValue = React.useBinding(nil)
+  else
+    value, updateValue = React.useState(nil)
+  end
+  React.useEffect(function()
+    local instance = targetRef.current
+    if not instance then return end
+    local function update()
+      updateValue(instance[property])
+    end
+    local connection = instance:GetPropertyChangedSignal(property):Connect(update)
+    update()
+    return function() connection:Disconnect() end
+  end, { targetRef, property })
+  return value
+end
+return useObservedProperty
+`);
+
+  fs.writeFileSync(path.join(root, "Consumer.luau"), `local React = require(script.Parent.React)
+local useObservedProperty = require(script.Parent.useObservedProperty)
+local function Consumer()
+  local ref = React.useRef(nil)
+  local health = useObservedProperty(ref, "Health")
+  return React.createElement("TextLabel", { ref = ref, Text = tostring(health or 0) })
+end
+return Consumer
+`);
+
+  const report = await scanPath(root);
+  assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
+  const candidate = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate");
+  assert.ok(candidate);
+  assert.match(candidate.message, /Binding-returning mode/);
+});
+
+test("binding candidate follows generic signal mirrors through imported hooks", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-generic-hook-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "useSignalValue.luau"), `local React = require(script.Parent.React)
+local function useSignalValue(signal)
+  local value, setValue = React.useState(0)
+  React.useEffect(function()
+    local connection = signal:Connect(setValue)
+    return function() connection:Disconnect() end
+  end, { signal })
+  return value
+end
+return useSignalValue
+`);
+
+  fs.writeFileSync(path.join(root, "Consumer.luau"), `local React = require(script.Parent.React)
+local useSignalValue = require(script.Parent.useSignalValue)
+local function Consumer(props)
+  local rotation = useSignalValue(props.changed)
+  return React.createElement("Frame", { Rotation = rotation })
+end
+return Consumer
+`);
+
+  const report = await scanPath(root);
+  assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
+  const candidate = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate");
+  assert.ok(candidate);
+  assert.match(candidate.message, /external reactive value/);
+});
+
+test("binding-over-state keeps imported constant event transitions in React state", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-generic-hook-constant-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "useOpenedState.luau"), `local React = require(script.Parent.React)
+local function useOpenedState(signal)
+  local visible, setVisible = React.useState(false)
+  React.useEffect(function()
+    local connection = signal:Connect(function()
+      setVisible(true)
+    end)
+    return function() connection:Disconnect() end
+  end, { signal })
+  return visible
+end
+return useOpenedState
+`);
+
+  fs.writeFileSync(path.join(root, "Consumer.luau"), `local React = require(script.Parent.React)
+local useOpenedState = require(script.Parent.useOpenedState)
+local function Consumer(props)
+  local visible = useOpenedState(props.opened)
+  return React.createElement("Frame", { Visible = visible })
+end
+return Consumer
+`);
+
+  const report = await scanPath(root);
+  assert.equal(
+    report.diagnostics.some((entry) => entry.rule.startsWith("react-luau/prefer-binding-over-state")),
+    false,
+  );
+});
+
+test("binding-over-state keeps event-driven constant state transitions in React state", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-event-transition-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local function Component(props)
+  local visible, setVisible = React.useState(false)
+  React.useEffect(function()
+    local connection = props.opened:Connect(function()
+      setVisible(true)
+    end)
+    return function() connection:Disconnect() end
+  end, { props.opened })
+  return React.createElement("Frame", { Visible = visible })
+end
+return Component
+`);
+
+  const report = await scanPath(root);
+  assert.equal(
+    report.diagnostics.some((entry) => entry.rule.startsWith("react-luau/prefer-binding-over-state")),
+    false,
+  );
+});
+
+test("binding-over-state keeps reducer-style external updates in React state", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-reducer-transition-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local function Component(props)
+  local count, setCount = React.useState(0)
+  React.useEffect(function()
+    local connection = props.incremented:Connect(function()
+      setCount(function(previous)
+        return previous + 1
+      end)
+    end)
+    return function() connection:Disconnect() end
+  end, { props.incremented })
+  return React.createElement("TextLabel", { Text = tostring(count) })
+end
+return Component
+`);
+
+  const report = await scanPath(root);
+  assert.equal(
+    report.diagnostics.some((entry) => entry.rule.startsWith("react-luau/prefer-binding-over-state")),
+    false,
+  );
+});
+
+test("binding-over-state ignores one-shot external callbacks", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-once-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local function Component(props)
+  local rotation, setRotation = React.useState(0)
+  React.useEffect(function()
+    return props.ready:Once(function(value)
+      setRotation(value)
+    end)
+  end, { props.ready })
+  return React.createElement("Frame", { Rotation = rotation })
+end
+return Component
+`);
+
+  const report = await scanPath(root);
+  assert.equal(
+    report.diagnostics.some((entry) => entry.rule.startsWith("react-luau/prefer-binding-over-state")),
+    false,
+  );
+});
+
+test("binding-over-state treats motion-style onStep mirrors as strong presentation streams", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-onstep-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local function Component(props)
+  local scale, setScale = React.useState(1)
+  React.useEffect(function()
+    return props.motor:onStep(function(value)
+      setScale(value)
+    end)
+  end, { props.motor })
+  return React.createElement("Frame", { Size = UDim2.fromScale(scale, scale) })
+end
+return Component
+`);
+
+  const report = await scanPath(root);
+  const warning = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state");
+  assert.ok(warning);
+  assert.match(warning.message, /high-frequency/);
+});
+
+test("binding-over-state recognizes continuously mutable instance-property mirrors", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-cframe-property-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local function Component(props)
+  local cameraCFrame, setCameraCFrame = React.useState(CFrame.new())
+  React.useEffect(function()
+    local connection = props.camera:GetPropertyChangedSignal("CFrame"):Connect(function()
+      setCameraCFrame(props.camera.CFrame)
+    end)
+    return function() connection:Disconnect() end
+  end, { props.camera })
+  return React.createElement("Frame", { Rotation = cameraCFrame.LookVector.X * 30 })
+end
+return Component
+`);
+
+  const report = await scanPath(root);
+  const warning = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state");
+  assert.ok(warning);
+  assert.match(warning.message, /CFrame/);
+});
+
+test("binding candidate keeps unknown instance-property mirrors optional", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-unknown-property-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local function Component(props)
+  local alpha, setAlpha = React.useState(0)
+  React.useEffect(function()
+    local connection = props.source:GetPropertyChangedSignal("VisualAlpha"):Connect(function()
+      setAlpha(props.source.VisualAlpha)
+    end)
+    return function() connection:Disconnect() end
+  end, { props.source })
+  return React.createElement("Frame", { BackgroundTransparency = alpha })
+end
+return Component
+`);
+
+  const report = await scanPath(root);
+  assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
+  assert.ok(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate"));
+});
+
+test("binding candidate recognizes derived observable payload mirrors", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-observable-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local function Component(props)
+  local alpha, setAlpha = React.useState(0)
+  React.useEffect(function()
+    return props.observable:Subscribe(function(value)
+      setAlpha(math.clamp(value * props.scale, 0, 1))
+    end)
+  end, { props.observable, props.scale })
+  return React.createElement("Frame", { BackgroundTransparency = alpha })
+end
+return Component
+`);
+
+  const report = await scanPath(root);
+  assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
+  assert.ok(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate"));
+});
+
+test("binding-over-state keeps store snapshot subscriptions semantic", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-store-snapshot-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "useStoreState.luau"), `local React = require(script.Parent.React)
+local function useStoreState(store)
+  local state, setState = React.useState(store:getState())
+  React.useEffect(function()
+    return store:subscribe(function()
+      setState(store:getState())
+    end)
+  end, { store })
+  return state
+end
+return useStoreState
+`);
+
+  fs.writeFileSync(path.join(root, "Consumer.luau"), `local React = require(script.Parent.React)
+local useStoreState = require(script.Parent.useStoreState)
+local function Consumer(props)
+  local state = useStoreState(props.store)
+  return React.createElement("TextLabel", { Text = tostring(state.count) })
+end
+return Consumer
+`);
+
+  const report = await scanPath(root);
+  assert.equal(
+    report.diagnostics.some((entry) => entry.rule.startsWith("react-luau/prefer-binding-over-state")),
+    false,
+  );
 });
 
 test("rules of hooks accepts iteration over a directly exported static module table", async (t) => {
@@ -1065,9 +1629,8 @@ return Component
 
   const report = await scanPath(root);
   assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rerender-high-frequency-state"), false);
-  const binding = report.diagnostics.find((diagnostic) => diagnostic.rule === "react-luau/prefer-binding-over-state");
-  assert.match(binding?.message ?? "", /external callback/);
-  assert.doesNotMatch(binding?.message ?? "", /high-frequency/);
+  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/prefer-binding-over-state"), false);
+  assert.ok(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/prefer-binding-over-state-candidate"));
 });
 
 test("high-frequency state ignores a provable one-shot guard", async (t) => {
