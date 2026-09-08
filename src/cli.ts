@@ -1108,7 +1108,7 @@ function renderWhyCodeFrame(filename: string, diagnostic: Diagnostic, colorized:
 }
 
 function whySeverityMeaning(severity: Severity): string {
-  if (severity === "error") return "This can violate React or Luau correctness rules and should normally be fixed.";
+  if (severity === "error") return "This can cause incorrect behavior or violate React's rules and should normally be fixed.";
   if (severity === "warning") return "This pattern is very likely to be a real issue in the code shown and is normally worth fixing.";
   return "This may be intentional. Doctor found a plausible improvement, but the right choice depends on how this value or pattern is meant to affect rendering.";
 }
