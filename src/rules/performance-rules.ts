@@ -210,7 +210,7 @@ export const rerenderHighFrequencyState: RuleDefinition = {
 
       const renderCost = componentRenderCost(context, component);
       diagnostics.push({
-        node: callNameNode(call),
+        node: callNameNode(binding.call),
         severity: "warning",
         message: `${binding.valueName} has a state setter called from a per-frame callback and may cause frequent rerenders when its value changes.`,
         help: renderCost.length > 0

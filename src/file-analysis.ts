@@ -54,6 +54,25 @@ function nodeLocation(node: DiagnosticInput["node"]): Diagnostic["location"] {
   };
 }
 
+function sameLocation(left: Diagnostic["location"], right: Diagnostic["location"]): boolean {
+  return left.line === right.line
+    && left.column === right.column
+    && left.endLine === right.endLine
+    && left.endColumn === right.endColumn;
+}
+
+function removeSupersededDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
+  return diagnostics.filter((diagnostic) => {
+    if (diagnostic.rule !== "react-luau/rerender-high-frequency-state") return true;
+
+    return !diagnostics.some((candidate) =>
+      candidate.rule === "react-luau/prefer-binding-over-state"
+      && sameLocation(candidate.location, diagnostic.location)
+      && SEVERITY_RANK[candidate.severity] >= SEVERITY_RANK[diagnostic.severity]
+    );
+  });
+}
+
 function toDiagnostic(
   file: SourceFile,
   ruleId: string,
@@ -116,10 +135,12 @@ export async function analyzeReactFile(input: ReactFileAnalysisInput, tree?: Syn
     if (rule.id === "react-luau/parse-error" && findings.length > 0) break;
   }
 
+  const filteredDiagnostics = removeSupersededDiagnostics(diagnostics);
+
   return {
     relativePath: input.relativePath,
     isReactFile: model.isReactFile,
     scanned: true,
-    diagnostics,
+    diagnostics: filteredDiagnostics,
   };
 }
