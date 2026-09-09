@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import packageJson from "../package.json";
+import { fileURLToPath } from "node:url";
 import type { CachedSourceEffectModule } from "./project-effects";
 import type {
   Diagnostic,
@@ -11,7 +11,6 @@ import type {
   SourceEffectModuleSummary,
 } from "./types";
 
-const CACHE_SCHEMA_VERSION = 2;
 const MAX_CACHED_REPORTS = 8;
 
 interface CachedFileState {
@@ -54,8 +53,7 @@ interface CachedReportEntry extends CachedReportData {
 }
 
 interface ProjectCachePayload {
-  schemaVersion: number;
-  analyzerVersion: string;
+  analyzerHash: string;
   root: string;
   fingerprint: string;
   files: Record<string, CachedFileState>;
@@ -83,6 +81,59 @@ function normalizeRelative(value: string): string {
 
 function hashText(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+let analyzerHash: string | null = null;
+
+function hashAnalyzerFile(hash: crypto.Hash, root: string, filename: string): void {
+  if (!fs.existsSync(filename)) return;
+  hash.update(normalizeRelative(path.relative(root, filename)));
+  hash.update("\0");
+  hash.update(fs.readFileSync(filename));
+  hash.update("\0");
+}
+
+function sourceFiles(directory: string): string[] {
+  if (!fs.existsSync(directory)) return [];
+  const files: string[] = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const filename = path.join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...sourceFiles(filename));
+    else if (entry.isFile() && entry.name.endsWith(".ts")) files.push(filename);
+  }
+  return files;
+}
+
+function currentAnalyzerHash(): string {
+  if (analyzerHash) return analyzerHash;
+
+  const hash = crypto.createHash("sha256");
+  let packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  let bundledCli: string | null = null;
+
+  try {
+    const entrypoint = process.argv[1] ? fs.realpathSync(process.argv[1]) : null;
+    if (entrypoint && path.basename(entrypoint) === "cli.js" && path.basename(path.dirname(entrypoint)) === "dist") {
+      bundledCli = entrypoint;
+      packageRoot = path.dirname(path.dirname(entrypoint));
+    }
+  } catch {
+    // Source execution and tests may not have a filesystem-backed CLI entrypoint.
+  }
+
+  if (bundledCli) {
+    hashAnalyzerFile(hash, packageRoot, bundledCli);
+    hashAnalyzerFile(hash, packageRoot, path.join(path.dirname(bundledCli), "scan-worker.js"));
+  } else {
+    for (const filename of sourceFiles(path.join(packageRoot, "src")).sort()) {
+      hashAnalyzerFile(hash, packageRoot, filename);
+    }
+  }
+
+  hashAnalyzerFile(hash, packageRoot, path.join(packageRoot, "package.json"));
+  hashAnalyzerFile(hash, packageRoot, path.join(packageRoot, "vendor", "tree-sitter-luau.wasm"));
+  analyzerHash = hash.digest("hex");
+  return analyzerHash;
 }
 
 function stableValue(value: unknown): unknown {
@@ -120,8 +171,7 @@ function readPayload(filename: string, root: string): ProjectCachePayload | null
   try {
     const parsed = JSON.parse(fs.readFileSync(filename, "utf8")) as ProjectCachePayload;
     if (
-      parsed.schemaVersion !== CACHE_SCHEMA_VERSION ||
-      parsed.analyzerVersion !== packageJson.version ||
+      parsed.analyzerHash !== currentAnalyzerHash() ||
       path.resolve(parsed.root) !== path.resolve(root) ||
       !parsed.files ||
       typeof parsed.fingerprint !== "string"
@@ -387,8 +437,7 @@ export function saveProjectCache(
       .slice(0, MAX_CACHED_REPORTS),
   );
   writePayload(session.filename, {
-    schemaVersion: CACHE_SCHEMA_VERSION,
-    analyzerVersion: packageJson.version,
+    analyzerHash: currentAnalyzerHash(),
     root: path.resolve(session.root),
     fingerprint: session.fingerprint,
     files: session.files,

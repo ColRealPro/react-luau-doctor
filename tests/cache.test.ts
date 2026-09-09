@@ -121,3 +121,37 @@ test("incremental cache invalidates transitive importers when source effects cha
     );
   });
 });
+
+test("persistent cache invalidates when the analyzer hash changes", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-cache-analyzer-"));
+  const cacheDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-cache-store-"));
+  writeReactFile(
+    path.join(root, "Component.luau"),
+    `local function Component(props)\n  props.value = 1\n  return React.createElement("Frame")\nend\nreturn Component`,
+  );
+
+  await withCacheDirectory(cacheDirectory, async () => {
+    const first = await scanPath(root);
+    assert.ok(first.diagnostics.length > 0);
+
+    const filename = projectCachePath(root);
+    const payload = JSON.parse(fs.readFileSync(filename, "utf8")) as {
+      analyzerHash?: string;
+      reports?: Record<string, { diagnostics?: Array<{ message?: string }> }>;
+    };
+    assert.equal(typeof payload.analyzerHash, "string");
+
+    payload.analyzerHash = "stale-analyzer";
+    for (const report of Object.values(payload.reports ?? {})) {
+      if (report.diagnostics?.[0]) report.diagnostics[0].message = "stale cached diagnostic";
+    }
+    fs.writeFileSync(filename, JSON.stringify(payload));
+
+    const second = await scanPath(root);
+    assert.equal(second.diagnostics.some((diagnostic) => diagnostic.message === "stale cached diagnostic"), false);
+
+    const refreshed = JSON.parse(fs.readFileSync(filename, "utf8")) as { analyzerHash?: string };
+    assert.equal(typeof refreshed.analyzerHash, "string");
+    assert.notEqual(refreshed.analyzerHash, "stale-analyzer");
+  });
+});
