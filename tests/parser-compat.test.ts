@@ -48,3 +48,75 @@ end
   const tree = await parseLuau(source);
   assert.equal(tree.rootNode.hasError, false);
 });
+
+test("typeof local annotations parse without changing executable initializers", async () => {
+  const source = `local useReduxContext: typeof(useDefaultReduxContext) = if context == ReactReduxContext
+	then useDefaultReduxContext
+	else function()
+		return React.useContext(context)
+	end
+`;
+  const compatible = parserCompatibleSource(source);
+
+  assert.match(compatible, /local useReduxContext: any\s+= if context == ReactReduxContext/);
+  assert.match(compatible, /return React\.useContext\(context\)/);
+  assert.equal(Buffer.byteLength(compatible, "utf8"), Buffer.byteLength(source, "utf8"));
+  assert.equal(compatible.split("\n").length, source.split("\n").length);
+
+  const tree = await parseLuau(source);
+  assert.equal(tree.rootNode.hasError, false);
+});
+
+test("generic function return types parse without masking the function body", async () => {
+  const source = `local createSelectorHook = function(context: React.Context?): <TState, Selected>(
+	selector: (state: TState) -> Selected,
+	equalityFn: EqualityFn<Selected>?
+) -> Selected
+	local value = React.useMemo(function()
+		return context
+	end, { context })
+	return value
+end
+`;
+  const compatible = parserCompatibleSource(source);
+
+  assert.doesNotMatch(compatible, /<TState, Selected>/);
+  assert.match(compatible, /Selected\n\tlocal value = React\.useMemo/);
+  assert.equal(Buffer.byteLength(compatible, "utf8"), Buffer.byteLength(source, "utf8"));
+  assert.equal(compatible.split("\n").length, source.split("\n").length);
+
+  const tree = await parseLuau(source);
+  assert.equal(tree.rootNode.hasError, false);
+});
+
+test("react-redux typed hook syntax parses without cascading errors", async () => {
+  const source = `local useReduxContext: typeof(useDefaultReduxContext) = if context == ReactReduxContext
+	then useDefaultReduxContext
+	else function()
+		return React.useContext(context)
+	end
+
+local createStoreHook = function(context: React.Context?): <State, Action>() -> Store<State, Action>
+	return function<State, Action>()
+		local instRef = React.useRef(nil :: {
+			hasValue: true,
+			value: State,
+		} | {
+			hasValue: false,
+		} | nil)
+		return instRef
+	end
+end
+`;
+
+  const tree = await parseLuau(source);
+  assert.equal(tree.rootNode.hasError, false);
+});
+
+test("react-redux compatibility leaves runtime typeof and ordinary return annotations unchanged", () => {
+  const source = `local kind = typeof(value)
+local getValue = function(): number return value end
+`;
+
+  assert.equal(parserCompatibleSource(source), source);
+});

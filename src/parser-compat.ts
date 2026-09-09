@@ -144,6 +144,27 @@ function isCode(mask: Uint8Array, start: number, end = start + 1): boolean {
   return true;
 }
 
+function matchingCodeDelimiterEnd(
+  source: string,
+  mask: Uint8Array,
+  start: number,
+  opener: string,
+  closer: string,
+): number | null {
+  if (source[start] !== opener || !isCode(mask, start)) return null;
+
+  let depth = 0;
+  for (let cursor = start; cursor < source.length; cursor += 1) {
+    if (!isCode(mask, cursor)) continue;
+    if (source[cursor] === opener) depth += 1;
+    else if (source[cursor] === closer) {
+      depth -= 1;
+      if (depth === 0) return cursor + 1;
+    }
+  }
+  return null;
+}
+
 function maskTypeAliases(source: string, mask: Uint8Array): Range[] {
   const { lines, offsets } = lineData(source);
   const ranges: Range[] = [];
@@ -355,6 +376,86 @@ function genericFunctionParameterRanges(source: string, mask: Uint8Array): Range
   return ranges;
 }
 
+function genericFunctionReturnPrefixRanges(source: string, mask: Uint8Array): Range[] {
+  const ranges: Range[] = [];
+  const functionPattern = /\bfunction\b/g;
+
+  for (const match of source.matchAll(functionPattern)) {
+    const start = match.index;
+    if (!isCode(mask, start, start + match[0].length)) continue;
+
+    let cursor = start + match[0].length;
+    let genericDepth = 0;
+    while (cursor < source.length) {
+      if (!isCode(mask, cursor)) {
+        cursor += 1;
+        continue;
+      }
+      if (source[cursor] === "<") genericDepth += 1;
+      else if (source[cursor] === ">" && genericDepth > 0) genericDepth -= 1;
+      else if (source[cursor] === "(" && genericDepth === 0) break;
+      cursor += 1;
+    }
+    if (source[cursor] !== "(") continue;
+
+    const parameterEnd = matchingCodeDelimiterEnd(source, mask, cursor, "(", ")");
+    if (parameterEnd === null) continue;
+    cursor = parameterEnd;
+
+    while (cursor < source.length && /\s/.test(source[cursor])) cursor += 1;
+    if (source[cursor] !== ":" || !isCode(mask, cursor)) continue;
+    cursor += 1;
+    while (cursor < source.length && /\s/.test(source[cursor])) cursor += 1;
+    if (source[cursor] !== "<") continue;
+
+    const rangeStart = cursor;
+    const genericEnd = matchingCodeDelimiterEnd(source, mask, cursor, "<", ">");
+    if (genericEnd === null) continue;
+    cursor = genericEnd;
+
+    while (cursor < source.length && /\s/.test(source[cursor])) cursor += 1;
+    const typeParametersEnd = matchingCodeDelimiterEnd(source, mask, cursor, "(", ")");
+    if (typeParametersEnd === null) continue;
+    cursor = typeParametersEnd;
+
+    while (cursor < source.length && /\s/.test(source[cursor])) cursor += 1;
+    if (source.slice(cursor, cursor + 2) !== "->" || !isCode(mask, cursor, cursor + 2)) continue;
+    cursor += 2;
+    while (cursor < source.length && /[ \t]/.test(source[cursor])) cursor += 1;
+
+    ranges.push({ start: rangeStart, end: cursor });
+  }
+
+  return ranges;
+}
+
+function normalizeLocalTypeofAnnotations(source: string, mask: Uint8Array): string {
+  const replacements: Array<{ start: number; end: number; value: string }> = [];
+  const pattern = /\blocal\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*typeof\s*\(/g;
+
+  for (const match of source.matchAll(pattern)) {
+    const matchStart = match.index;
+    if (!isCode(mask, matchStart, matchStart + match[0].length)) continue;
+
+    const typeofStart = matchStart + match[0].lastIndexOf("typeof");
+    const open = source.indexOf("(", typeofStart + 6);
+    if (open < 0) continue;
+
+    const end = matchingCodeDelimiterEnd(source, mask, open, "(", ")");
+    if (end === null) continue;
+
+    const original = source.slice(typeofStart, end);
+    const padding = blankPreservingUtf8Bytes(original).slice(3);
+    replacements.push({ start: typeofStart, end, value: `any${padding}` });
+  }
+
+  let output = source;
+  for (const replacement of replacements.sort((a, b) => b.start - a.start)) {
+    output = `${output.slice(0, replacement.start)}${replacement.value}${output.slice(replacement.end)}`;
+  }
+  return output;
+}
+
 // The bundled grammar understands variadic types (`...T`) but not generic
 // type-pack references (`T...`). Reorder only pack uses outside a function's
 // generic declaration so Tree-sitter sees an equal-width type node.
@@ -430,13 +531,15 @@ export function parserCompatibleSource(source: string): string {
   const keywordCompatible = replaceContextualKeywords(source, mask);
   const literalCompatible = normalizeIntegerLiteralSuffixes(keywordCompatible, mask);
   const packCompatible = normalizeGenericTypePackUses(literalCompatible, mask);
+  const typeofCompatible = normalizeLocalTypeofAnnotations(packCompatible, mask);
   const ranges = [
     ...maskTypeAliases(source, mask),
     ...maskTypeLevelBlocks(source, mask),
     ...attributeRanges(source, mask),
     ...explicitTypeArgumentRanges(source, mask),
+    ...genericFunctionReturnPrefixRanges(source, mask),
   ];
-  const masked = applyMasks(packCompatible, ranges);
+  const masked = applyMasks(typeofCompatible, ranges);
 
   // tree-sitter-luau 1.2.0 treats a statement-level assignment to the valid
   // Luau identifier `type` as a malformed type alias. Replace only that token
