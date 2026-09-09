@@ -7,6 +7,7 @@ import { cacheBaseDirectory } from "./cache";
 export const UPDATE_CHECK_INTERVAL_MS = 2 * 60 * 60 * 1000;
 const UPDATE_REQUEST_TIMEOUT_MS = 5_000;
 const UPDATE_CACHE_FILENAME = "update-check.json";
+const CHANGELOG_URL = "https://raw.githubusercontent.com/ColRealPro/react-luau-doctor/refs/heads/main/CHANGELOG.md";
 
 interface UpdateCache {
   checkedAt: number;
@@ -23,6 +24,11 @@ interface ParsedVersion {
 export interface UpdateNotice {
   current: string;
   latest: string;
+}
+
+export interface ChangelogRelease {
+  version: string;
+  notes: string;
 }
 
 function updateCacheFilename(): string {
@@ -107,6 +113,10 @@ function updateRegistryUrl(): string {
   return new URL(`${encodeURIComponent(packageJson.name)}/latest`, base).toString();
 }
 
+function changelogUrl(): string {
+  return process.env.REACT_LUAU_DOCTOR_CHANGELOG_URL ?? CHANGELOG_URL;
+}
+
 async function fetchLatestVersion(): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), UPDATE_REQUEST_TIMEOUT_MS);
@@ -122,6 +132,51 @@ async function fetchLatestVersion(): Promise<string> {
       throw new Error("npm registry returned an invalid package version");
     }
     return body.version;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function changelogReleasesBetween(markdown: string, currentVersion: string, latestVersion: string): ChangelogRelease[] {
+  const releases: ChangelogRelease[] = [];
+  let active: { version: string; lines: string[] } | null = null;
+
+  const flush = () => {
+    if (!active) return;
+    const afterCurrent = compareVersions(active.version, currentVersion);
+    const atOrBeforeLatest = compareVersions(active.version, latestVersion);
+    if (afterCurrent !== null && atOrBeforeLatest !== null && afterCurrent > 0 && atOrBeforeLatest <= 0) {
+      releases.push({ version: active.version, notes: active.lines.join("\n").trim() });
+    }
+    active = null;
+  };
+
+  for (const line of markdown.split(/\r?\n/)) {
+    if (/^##\s+/.test(line.trim())) {
+      flush();
+      const match = /^##\s+\[?v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\]?(?:\s+-.*)?\s*$/.exec(line.trim());
+      if (match) active = { version: match[1], lines: [] };
+      continue;
+    }
+    active?.lines.push(line);
+  }
+  flush();
+
+  releases.sort((left, right) => compareVersions(right.version, left.version) ?? 0);
+  return releases;
+}
+
+export async function fetchChangelogReleases(currentVersion: string, latestVersion: string): Promise<ChangelogRelease[]> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), UPDATE_REQUEST_TIMEOUT_MS);
+  timer.unref?.();
+  try {
+    const response = await fetch(changelogUrl(), {
+      headers: { accept: "text/markdown, text/plain;q=0.9, */*;q=0.1" },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`changelog returned HTTP ${response.status}`);
+    return changelogReleasesBetween(await response.text(), currentVersion, latestVersion);
   } finally {
     clearTimeout(timer);
   }

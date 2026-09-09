@@ -12,7 +12,14 @@ import {
   writeConfig,
 } from "./config";
 import { runCiCommand } from "./ci";
-import { checkForUpdatesNow, getCachedUpdateNotice, refreshUpdateCache, startBackgroundUpdateRefresh } from "./update-check";
+import {
+  checkForUpdatesNow,
+  fetchChangelogReleases,
+  getCachedUpdateNotice,
+  refreshUpdateCache,
+  startBackgroundUpdateRefresh,
+  type ChangelogRelease,
+} from "./update-check";
 import { currentUpdateInstallCommand, installLatestVersion } from "./update-install";
 import { fixExampleForRule } from "./fix-examples";
 import { createProgressRenderer } from "./progress";
@@ -126,7 +133,7 @@ CI commands:
 
 Update commands:
   update                                 Update the global installation to the latest release
-  update --check                         Check npm for a newer release without updating
+  update --check                         Check npm and show release notes without updating
 
 Rules commands:
   rules list [--category <name>] [--configured] [--json]
@@ -151,11 +158,69 @@ function automaticUpdateNoticeEnabled(options: CliOptions, machineReadable: bool
     && process.env.REACT_LUAU_DOCTOR_NO_UPDATE_CHECK === undefined;
 }
 
-function renderUpdateNotice(current: string, latest: string, colorized: boolean): string {
+function renderUpdateHeader(current: string, latest: string, colorized: boolean): string {
   const label = whyPaint(colorized, "Update available:", WHY_ANSI.bold, WHY_ANSI.yellow);
   const oldVersion = whyPaint(colorized, `v${current}`, WHY_ANSI.dim);
   const newVersion = whyPaint(colorized, `v${latest}`, WHY_ANSI.bold);
-  return `${label} ${oldVersion} → ${newVersion}\nRun \`react-luau-doctor update\` to update.`;
+  return `${label} ${oldVersion} → ${newVersion}`;
+}
+
+function renderUpdateNotice(current: string, latest: string, colorized: boolean): string {
+  return `${renderUpdateHeader(current, latest, colorized)}\nRun \`react-luau-doctor update --check\` to see what's new.`;
+}
+
+function renderChangelogInline(value: string, colorized: boolean, ...baseCodes: string[]): string {
+  if (!colorized) return value;
+
+  const parts: string[] = [];
+  let offset = 0;
+  for (const match of value.matchAll(/`([^`\n]+)`/g)) {
+    const index = match.index ?? 0;
+    if (index > offset) parts.push(whyPaint(true, value.slice(offset, index), ...baseCodes));
+    parts.push(whyPaint(true, match[1], WHY_THEME.variable));
+    offset = index + match[0].length;
+  }
+
+  if (parts.length === 0) return whyPaint(true, value, ...baseCodes);
+  if (offset < value.length) parts.push(whyPaint(true, value.slice(offset), ...baseCodes));
+  return parts.join("");
+}
+
+function renderChangelogNotes(notes: string, colorized: boolean): string {
+  return notes.split(/\r?\n/).map((line) => {
+    const heading = /^#{3,6}\s+(.+)$/.exec(line.trim());
+    if (heading) return renderChangelogInline(heading[1], colorized, WHY_ANSI.bold);
+    const bullet = /^(\s*)[-*]\s+(.+)$/.exec(line);
+    if (bullet) return `${bullet[1] || "  "}• ${renderChangelogInline(bullet[2], colorized)}`;
+    return renderChangelogInline(line, colorized);
+  }).join("\n").trim();
+}
+
+function renderUpdateCheck(
+  current: string,
+  latest: string,
+  releases: ChangelogRelease[],
+  releaseNotesUnavailable: boolean,
+  colorized: boolean,
+): string {
+  const lines = [
+    renderUpdateHeader(current, latest, colorized),
+    "",
+    whyPaint(colorized, "What's new", WHY_ANSI.bold),
+  ];
+  if (releaseNotesUnavailable) {
+    lines.push("  Release notes could not be loaded from GitHub.");
+  } else if (releases.length === 0) {
+    lines.push("  No changelog entries were found between these versions.");
+  } else {
+    for (const release of releases) {
+      lines.push("", whyPaint(colorized, `v${release.version}`, WHY_ANSI.bold));
+      const notes = renderChangelogNotes(release.notes, colorized);
+      if (notes) lines.push(notes);
+    }
+  }
+  lines.push("", "Run `react-luau-doctor update` to update.");
+  return lines.join("\n");
 }
 
 async function runUpdateCommand(argv: string[]): Promise<void> {
@@ -175,7 +240,14 @@ async function runUpdateCommand(argv: string[]): Promise<void> {
 
   const colorized = shouldUseColor(false, false);
   if (argv[0] === "--check") {
-    process.stdout.write(`${renderUpdateNotice(VERSION, result.latest, colorized)}\n`);
+    let releases: ChangelogRelease[] = [];
+    let releaseNotesUnavailable = false;
+    try {
+      releases = await fetchChangelogReleases(VERSION, result.latest);
+    } catch {
+      releaseNotesUnavailable = true;
+    }
+    process.stdout.write(`${renderUpdateCheck(VERSION, result.latest, releases, releaseNotesUnavailable, colorized)}\n`);
     return;
   }
 

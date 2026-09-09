@@ -5,8 +5,10 @@ import path from "node:path";
 import test from "node:test";
 import {
   UPDATE_CHECK_INTERVAL_MS,
+  changelogReleasesBetween,
   checkForUpdatesNow,
   compareVersions,
+  fetchChangelogReleases,
   refreshUpdateCache,
   getCachedUpdateNotice,
   updateCacheIsStale,
@@ -30,6 +32,61 @@ test("version comparison handles stable and prerelease releases", () => {
   assert.equal(compareVersions("0.18.0", "0.18.1"), -1);
   assert.equal(compareVersions("0.19.0-beta.2", "0.19.0-beta.1"), 1);
   assert.equal(compareVersions("0.19.0", "0.19.0-beta.2"), 1);
+});
+
+test("changelog parsing returns only published releases between installed and latest", () => {
+  const markdown = `# Changelog
+
+## Unreleased
+
+- This should not be shown yet.
+
+## [0.19.0] - 2026-09-10
+
+### Added
+- This should not be shown before npm publishes it.
+
+## 0.18.4
+
+### Fixed
+- Reduced binding false positives.
+
+## v0.18.3 - 2026-09-08
+
+### Performance
+- Faster project scans.
+
+## 0.18.2
+
+- Already installed.
+`;
+  assert.deepEqual(changelogReleasesBetween(markdown, "0.18.2", "0.18.4"), [
+    { version: "0.18.4", notes: "### Fixed\n- Reduced binding false positives." },
+    { version: "0.18.3", notes: "### Performance\n- Faster project scans." },
+  ]);
+});
+
+test("changelog fetch reads the configured remote changelog", async (t) => {
+  const previous = process.env.REACT_LUAU_DOCTOR_CHANGELOG_URL;
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch() {
+      return new Response("## 0.18.4\n\n### Added\n- Release notes in update checks.\n", {
+        headers: { "content-type": "text/markdown" },
+      });
+    },
+  });
+  process.env.REACT_LUAU_DOCTOR_CHANGELOG_URL = server.url.toString();
+  t.after(() => {
+    server.stop(true);
+    if (previous === undefined) delete process.env.REACT_LUAU_DOCTOR_CHANGELOG_URL;
+    else process.env.REACT_LUAU_DOCTOR_CHANGELOG_URL = previous;
+  });
+
+  assert.deepEqual(await fetchChangelogReleases("0.18.3", "0.18.4"), [
+    { version: "0.18.4", notes: "### Added\n- Release notes in update checks." },
+  ]);
 });
 
 test("update cache uses a two hour refresh interval", async (t) => {
