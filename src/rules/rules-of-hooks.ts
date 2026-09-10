@@ -22,6 +22,8 @@ import {
   isNestedInsideFunction,
 } from "./helpers";
 
+type HookModeStability = "stable" | "unknown" | "unstable";
+
 function staticIterationImports(
   context: RuleContext,
 ): Map<string, Set<string>> {
@@ -102,31 +104,6 @@ function controlledParameterIndex(
   return null;
 }
 
-function isStableModeArgument(
-  node: SyntaxNode | undefined,
-  context: RuleContext,
-): boolean {
-  if (!node) return true;
-  const text = node.text.trim();
-  if (["true", "false", "nil"].includes(text)) return true;
-  if (
-    [
-      "number",
-      "string",
-      "string_content",
-      "table_constructor",
-      "function_definition",
-    ].includes(node.type)
-  )
-    return true;
-  if (
-    /^[A-Za-z_][A-Za-z0-9_]*$/.test(text) &&
-    context.model.stableVariables.has(text)
-  )
-    return true;
-  return false;
-}
-
 function dynamicHookModeFixPreview(
   hookName: string,
   argumentText: string,
@@ -134,8 +111,8 @@ function dynamicHookModeFixPreview(
   return {
     kind: "pattern",
     before: `local value = ${hookName}(${argumentText})`,
-    after: `local value = ${hookName}(true) -- or false; keep this mode fixed for this call site`,
-    note: "A custom hook may choose different internal hooks only when this mode is stable for the lifetime of the component instance.",
+    after: `local value = ${hookName}(${argumentText}) -- keep the hook-topology mode stable for this instance`,
+    note: "A custom hook may choose different internal hooks only when the value controlling that choice stays stable for the lifetime of the component instance.",
   };
 }
 
@@ -163,6 +140,24 @@ function isEmptyTable(node: SyntaxNode | undefined): boolean {
     node?.type === "table_constructor" &&
       node.namedChildren.every((child) => child.type !== "field"),
   );
+}
+
+function tableConstructorHasStableArity(node: SyntaxNode): boolean {
+  if (node.type !== "table_constructor") return false;
+  const fields = node.namedChildren.filter((child) => child.type === "field");
+  if (fields.length === 0) return true;
+
+  // Luau varargs, and a function call in the final list field, can contribute a
+  // render-varying number of array entries. `{...}` is the real-world Jecs case
+  // that motivated this distinction.
+  if (
+    fields.some((field) =>
+      [...field.namedChildren].some((child) => child.type === "vararg_expression"),
+    )
+  )
+    return false;
+  const last = fields.at(-1);
+  return !last?.namedChildren.some((child) => child.type === "function_call");
 }
 
 function stableShapeVariablesByFunction(
@@ -197,7 +192,10 @@ function stableShapeVariablesByFunction(
     for (let index = 0; index < names.length; index += 1) {
       const expression = expressions[index] ?? expressions[0];
       if (!expression) continue;
-      if (expression.type === "table_constructor") {
+      if (
+        expression.type === "table_constructor" &&
+        tableConstructorHasStableArity(expression)
+      ) {
         namesFor(owner).add(names[index]);
         continue;
       }
@@ -224,7 +222,7 @@ function stableShapeVariablesByFunction(
     owner: FunctionInfo | null,
   ): boolean => {
     if (!expression) return false;
-    if (expression.type === "table_constructor") return true;
+    if (expression.type === "table_constructor") return tableConstructorHasStableArity(expression);
     const text = expression.text.trim();
     if (!owner || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) return false;
     return namesFor(owner).has(text);
@@ -278,6 +276,240 @@ function stableShapeVariablesByFunction(
   }
 
   return stable;
+}
+
+function moduleInvariantVariables(context: RuleContext): Set<string> {
+  const declarations = new Map<string, SyntaxNode>();
+  const reassigned = new Set<string>();
+
+  for (const node of context.walk(context.root)) {
+    if (node.type === "variable_declaration" && !context.nearestFunction(node)) {
+      for (const name of declarationNames(node)) declarations.set(name, node);
+      continue;
+    }
+    if (
+      node.type !== "assignment_statement" ||
+      node.parent?.type === "variable_declaration"
+    )
+      continue;
+    const variableList = node.namedChildren.find(
+      (child) => child.type === "variable_list",
+    );
+    for (const target of variableList?.namedChildren ?? []) {
+      if (target.type === "identifier") reassigned.add(target.text);
+    }
+  }
+
+  return new Set(
+    [...declarations.keys()].filter((name) => !reassigned.has(name)),
+  );
+}
+
+function simpleConditionRoot(controlFlow: SyntaxNode): string | null {
+  if (controlFlow.type !== "if_statement" && controlFlow.type !== "if_expression")
+    return null;
+  const condition = controlFlow.namedChildren[0];
+  if (!condition) return null;
+  const text = condition.text.trim();
+  const match = text.match(
+    /^(?:not\s+)?([A-Za-z_][A-Za-z0-9_]*)(?:\s*(?:==|~=)\s*(?:true|false|nil))?$/,
+  );
+  return match?.[1] ?? null;
+}
+
+function conditionIsProvablyInvariant(
+  controlFlow: SyntaxNode,
+  fn: FunctionInfo,
+  context: RuleContext,
+  moduleInvariants: Set<string>,
+): boolean {
+  const condition = controlFlow.namedChildren[0];
+  if (!condition) return false;
+  if (["true", "false", "nil", "number", "string"].includes(condition.type))
+    return true;
+
+  const root = simpleConditionRoot(controlFlow);
+  if (!root) return false;
+  if (moduleInvariants.has(root)) return true;
+  return Boolean(
+    context.model.stableVariablesByFunction.get(nodeKey(fn.node))?.has(root),
+  );
+}
+
+function branchHookSequence(
+  branch: SyntaxNode,
+  fn: FunctionInfo,
+  context: RuleContext,
+): string[] | null {
+  const hooks: string[] = [];
+  for (const node of context.walk(branch)) {
+    if (node.type !== "function_call") continue;
+    if (context.nearestFunction(node) !== fn) continue;
+    const rawPath = context.getCallPath(node);
+    if (!rawPath) continue;
+    const path = context.resolveCallPath(rawPath);
+    if (!isHookPath(path)) continue;
+
+    // Nested control flow inside a branch needs its own stability proof, so do
+    // not call the outer branches equivalent merely because their flattened
+    // hook names happen to match.
+    const nestedControl = findAncestorBetween(node, branch, (ancestor) =>
+      CONDITIONAL_TYPES.has(ancestor.type),
+    );
+    if (nestedControl) return null;
+    hooks.push(path);
+  }
+  return hooks;
+}
+
+function ifBranchesHaveEquivalentBuiltInTopology(
+  controlFlow: SyntaxNode,
+  fn: FunctionInfo,
+  context: RuleContext,
+): boolean {
+  if (controlFlow.type !== "if_statement") return false;
+  const thenBlock = controlFlow.namedChildren.find(
+    (child) => child.type === "block",
+  );
+  const elseStatement = controlFlow.namedChildren.find(
+    (child) => child.type === "else_statement",
+  );
+  const elseBlock = elseStatement?.namedChildren.find(
+    (child) => child.type === "block",
+  );
+  if (!thenBlock || !elseBlock) return false;
+
+  const thenHooks = branchHookSequence(thenBlock, fn, context);
+  const elseHooks = branchHookSequence(elseBlock, fn, context);
+  if (!thenHooks || !elseHooks || thenHooks.length !== elseHooks.length)
+    return false;
+  if (!thenHooks.every((path, index) => path === elseHooks[index])) return false;
+
+  // Built-in React hooks have topology that is independent of their arguments.
+  // For custom hooks, identical call names can still select different internal
+  // hooks based on different arguments, so keep those conservative.
+  return thenHooks.every((path) => path.startsWith("React."));
+}
+
+function stateModeStability(
+  name: string,
+  owner: FunctionInfo,
+  context: RuleContext,
+): HookModeStability | null {
+  const binding = context.model.stateBindings.find(
+    (candidate) => candidate.owner === owner && candidate.valueName === name,
+  );
+  if (!binding || !owner.body) return null;
+
+  const initializerText = binding.initializer?.text.trim() ?? "nil";
+  const stableLiteral = /^(?:true|false|nil|-?\d+(?:\.\d+)?|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')$/;
+  let sawIndirectSetterReference = false;
+  for (const node of context.walk(owner.body)) {
+    if (node.type === "function_call" && context.getCallPath(node) === binding.setterName) {
+      const argument = context.callArguments(node)[0];
+      if (
+        !argument ||
+        !stableLiteral.test(initializerText) ||
+        argument.text.trim() !== initializerText
+      )
+        return "unstable";
+      continue;
+    }
+    if (node.type !== "identifier" || node.text !== binding.setterName) continue;
+    if (node.startIndex >= binding.declaration.startIndex && node.endIndex <= binding.declaration.endIndex)
+      continue;
+    if (node.parent?.type === "function_call") continue;
+    sawIndirectSetterReference = true;
+  }
+
+  if (sawIndirectSetterReference) return "unknown";
+  return "stable";
+}
+
+function localAliasExpression(
+  name: string,
+  owner: FunctionInfo,
+  context: RuleContext,
+): SyntaxNode | null {
+  if (!owner.body) return null;
+  let result: SyntaxNode | null = null;
+  for (const node of context.walk(owner.body)) {
+    if (node.type !== "variable_declaration" || context.nearestFunction(node) !== owner)
+      continue;
+    const names = declarationNames(node);
+    const index = names.indexOf(name);
+    if (index < 0) continue;
+    const expressions = declarationExpressions(node);
+    const expression = expressions[index] ?? expressions[0] ?? null;
+    if (result) return null;
+    result = expression;
+  }
+  return result;
+}
+
+function modeValueStability(
+  node: SyntaxNode | undefined,
+  owner: FunctionInfo,
+  context: RuleContext,
+  moduleInvariants: Set<string>,
+  depth = 0,
+): HookModeStability {
+  if (!node) return "stable";
+  if (depth > 4) return "unknown";
+  const text = node.text.trim();
+  if (["true", "false", "nil"].includes(text)) return "stable";
+  if (["number", "string", "string_content", "function_definition"].includes(node.type))
+    return "stable";
+
+  const root = text.match(/^([A-Za-z_][A-Za-z0-9_]*)/)?.[1];
+  if (!root) return "unknown";
+  const stateStability = stateModeStability(root, owner, context);
+  if (stateStability) return stateStability;
+  if (moduleInvariants.has(root)) return "stable";
+  if (
+    context.model.stableVariablesByFunction.get(nodeKey(owner.node))?.has(root)
+  )
+    return "stable";
+
+  if (text === root) {
+    const alias = localAliasExpression(root, owner, context);
+    if (alias && alias.text.trim() !== root)
+      return modeValueStability(alias, owner, context, moduleInvariants, depth + 1);
+  }
+  return "unknown";
+}
+
+function tableFieldValue(
+  table: SyntaxNode | undefined,
+  accessPath: string,
+): SyntaxNode | undefined {
+  if (!table || accessPath === "") return table;
+  if (table.type !== "table_constructor") return undefined;
+  let current: SyntaxNode | undefined = table;
+  for (const part of accessPath.split(".")) {
+    if (!current || current.type !== "table_constructor") return undefined;
+    const field: SyntaxNode | undefined = current.namedChildren.find((child) => {
+      if (child.type !== "field") return false;
+      return child.namedChildren[0]?.type === "identifier" &&
+        child.namedChildren[0]?.text === part;
+    });
+    if (!field) return undefined;
+    current = field.namedChildren[1];
+  }
+  return current;
+}
+
+function controlledAccessPaths(
+  summary: ConditionalHookModeSummary,
+  parameterIndex: number,
+): string[] {
+  const paths = new Set<string>();
+  for (const [conditionName, index] of Object.entries(summary.conditionVariables)) {
+    if (index !== parameterIndex) continue;
+    paths.add(summary.conditionAccessPaths?.[conditionName] ?? "");
+  }
+  if (paths.size === 0) paths.add("");
+  return [...paths];
 }
 
 function loopIterationIsProvablyStable(
@@ -369,13 +601,13 @@ function impossibleNilGuardReturn(
   return false;
 }
 
-function hasReachableReturnBefore(
+function reachableReturnsBefore(
   call: SyntaxNode,
   fn: FunctionInfo,
   context: RuleContext,
   cache: Map<number, SyntaxNode[]>,
-): boolean {
-  if (!fn.body) return false;
+): SyntaxNode[] {
+  if (!fn.body) return [];
   const key = nodeKey(fn.node);
   let returns = cache.get(key);
   if (!returns) {
@@ -388,7 +620,31 @@ function hasReachableReturnBefore(
     );
     cache.set(key, returns);
   }
-  return returns.some((node) => node.endIndex <= call.startIndex);
+  return returns.filter((node) => node.endIndex <= call.startIndex);
+}
+
+function returnIsControlledByStableTopologyMode(
+  node: SyntaxNode,
+  fn: FunctionInfo,
+  summary: ConditionalHookModeSummary | null,
+  context: RuleContext,
+  moduleInvariants: Set<string>,
+): boolean {
+  let current = node.parent;
+  while (current && current !== fn.node) {
+    if (current.type === "if_statement" || current.type === "if_expression") {
+      if (
+        summary &&
+        controlledParameterIndex(current, fn, summary) !== null
+      )
+        return true;
+      if (conditionIsProvablyInvariant(current, fn, context, moduleInvariants))
+        return true;
+      return false;
+    }
+    current = current.parent;
+  }
+  return false;
 }
 
 function conditionalFixPreview(kind: string, hookName: string): FixPreview {
@@ -435,6 +691,7 @@ export const rulesOfHooks: RuleDefinition = {
     const diagnostics: DiagnosticInput[] = [];
     const staticImports = staticIterationImports(context);
     const stableShapes = stableShapeVariablesByFunction(context);
+    const moduleInvariants = moduleInvariantVariables(context);
     const modeImports = conditionalHookModeImports(context);
     const currentModeSummary = currentConditionalHookMode(context);
     const reachableReturns = new Map<number, SyntaxNode[]>();
@@ -464,25 +721,47 @@ export const rulesOfHooks: RuleDefinition = {
       const importedMode = modeImports.get(rawPath);
       if (importedMode) {
         const args = context.callArguments(call);
-        const dynamicIndexes = importedMode.parameterIndexes.filter(
-          (index) => !isStableModeArgument(args[index], context),
+        const unstableControls = importedMode.parameterIndexes.flatMap((index) =>
+          controlledAccessPaths(importedMode, index)
+            .map((accessPath) => {
+              const argument = args[index];
+              const value = tableFieldValue(argument, accessPath);
+              const stability = accessPath !== ""
+                ? argument?.type === "table_constructor"
+                  ? value
+                    ? modeValueStability(value, fn, context, moduleInvariants)
+                    : "stable"
+                  : "unknown"
+                : modeValueStability(
+                    argument,
+                    fn,
+                    context,
+                    moduleInvariants,
+                  );
+              return { index, accessPath, argument, value, stability };
+            })
+            .filter((control) => control.stability === "unstable"),
         );
-        if (dynamicIndexes.length > 0) {
-          const firstIndex = dynamicIndexes[0];
-          const argument = args[firstIndex];
+        if (unstableControls.length > 0) {
+          const first = unstableControls[0];
+          const firstIndex = first.index;
+          const argument = first.argument;
           const parameterOffset =
             importedMode.parameterIndexes.indexOf(firstIndex);
-          const parameterName =
+          const baseParameterName =
             importedMode.parameterNames[parameterOffset] ??
             `argument ${firstIndex + 1}`;
-          const argumentText = argument?.text.trim() || "<omitted>";
+          const parameterName = first.accessPath
+            ? `${baseParameterName}.${first.accessPath}`
+            : baseParameterName;
+          const argumentText = first.value?.text.trim() || argument?.text.trim() || "<omitted>";
           diagnostics.push({
-            node: argument ?? callNameNode(call),
-            highlights: dynamicIndexes
-              .map((index) => args[index])
+            node: first.value ?? argument ?? callNameNode(call),
+            highlights: unstableControls
+              .map((control) => control.value ?? control.argument)
               .filter((node): node is SyntaxNode => Boolean(node)),
-            message: `Hook ${rawPath} receives render-varying hook mode ${parameterName} from ${argumentText}; if it changes between renders, the custom hook can execute a different hook sequence.`,
-            help: `Pass a stable mode at this call site, or refactor ${rawPath} so it always calls the same hooks regardless of ${parameterName}.`,
+            message: `Hook ${rawPath} receives hook-topology mode ${parameterName} from ${argumentText}, which is updated between renders and can make the custom hook execute a different hook sequence.`,
+            help: `Keep ${parameterName} stable for this hook instance, or refactor ${rawPath} so it always calls the same hooks regardless of that mode.`,
             fixPreview: dynamicHookModeFixPreview(rawPath, argumentText),
           });
         }
@@ -494,9 +773,12 @@ export const rulesOfHooks: RuleDefinition = {
       if (controlFlow) {
         if (
           currentModeSummary &&
-          currentModeSummary.knownCallSites > 0 &&
           controlledParameterIndex(controlFlow, fn, currentModeSummary) !== null
         )
+          continue;
+        if (conditionIsProvablyInvariant(controlFlow, fn, context, moduleInvariants))
+          continue;
+        if (ifBranchesHaveEquivalentBuiltInTopology(controlFlow, fn, context))
           continue;
         if (
           controlFlow.type === "for_statement" &&
@@ -526,7 +808,24 @@ export const rulesOfHooks: RuleDefinition = {
         continue;
       }
 
-      if (hasReachableReturnBefore(call, fn, context, reachableReturns)) {
+      const earlierReturns = reachableReturnsBefore(
+        call,
+        fn,
+        context,
+        reachableReturns,
+      );
+      if (
+        earlierReturns.length > 0 &&
+        !earlierReturns.every((node) =>
+          returnIsControlledByStableTopologyMode(
+            node,
+            fn,
+            currentModeSummary,
+            context,
+            moduleInvariants,
+          ),
+        )
+      ) {
         diagnostics.push({
           node: callNameNode(call),
           message: `Hook ${path} may run after an earlier reachable return, so some renders can execute fewer hooks.`,

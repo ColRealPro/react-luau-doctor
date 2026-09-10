@@ -1549,6 +1549,36 @@ return Component`);
   assert.match(diagnostic.fixPreview?.note ?? "", /child component/);
 });
 
+test("rules of hooks reports custom hooks iterated over a vararg-built table", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-vararg-hook-loop-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "useEntity.luau"), `local React = require(script.Parent.React)
+
+local function useComponent(entity, component)
+  local value = React.useState(0)
+  return value
+end
+
+local function useEntity(entity, ...)
+  local components = {...}
+  local values = {}
+  for i, component in ipairs(components) do
+    values[i] = useComponent(entity, component)
+  end
+  return values
+end
+
+return useEntity`);
+
+  const report = await scanPath(root);
+  const diagnostic = report.diagnostics.find(
+    (entry) => entry.rule === "react-luau/rules-of-hooks",
+  );
+  assert.ok(diagnostic);
+  assert.match(diagnostic.message, /size or iteration order may change between renders/);
+});
+
 test("rules of hooks ignores an early return guarded only by an impossible nil check on a non-optional parameter", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-nonoptional-guard-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -1697,7 +1727,7 @@ return Component`);
   assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks"), false);
 });
 
-test("rules of hooks reports a render-varying custom-hook mode at the unsafe call site instead of the hook implementation", async (t) => {
+test("rules of hooks leaves an unknown prop-controlled custom-hook mode unreported", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-dynamic-hook-mode-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -1726,14 +1756,13 @@ end
 return Component`);
 
   const report = await scanPath(root);
-  const diagnostics = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks");
-  assert.equal(diagnostics.length, 1);
-  assert.equal(diagnostics[0].file, "Component.luau");
-  assert.equal(diagnostics[0].location.line, 5);
-  assert.match(diagnostics[0].message, /render-varying hook mode binding from props\.binding/);
+  assert.equal(
+    report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks"),
+    false,
+  );
 });
 
-test("rules of hooks keeps implementation diagnostics for an uncalled parameter-controlled hook", async (t) => {
+test("rules of hooks leaves an uncalled parameter-controlled hook unreported", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-uncalled-hook-mode-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -1749,7 +1778,235 @@ end
 return useObservedValue`);
 
   const report = await scanPath(root);
-  assert.ok(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks"));
+  assert.equal(
+    report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks"),
+    false,
+  );
+});
+
+test("rules of hooks reports a custom-hook mode that is proven to change through state", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-changing-hook-mode-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "useObservedValue.luau"), `local React = require(script.Parent.React)
+
+local function useObservedValue(binding: boolean?)
+  if binding then
+    return React.useBinding(0)
+  end
+  return React.useState(0)
+end
+
+return useObservedValue`);
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local useObservedValue = require(script.Parent.useObservedValue)
+
+local function Component()
+  local binding, setBinding = React.useState(true)
+  local value = useObservedValue(binding)
+  React.useEffect(function()
+    setBinding(false)
+  end, {})
+  return React.createElement("Frame", { Name = tostring(value) })
+end
+
+return Component`);
+
+  const report = await scanPath(root);
+  const diagnostic = report.diagnostics.find(
+    (entry) => entry.rule === "react-luau/rules-of-hooks" && entry.file === "Component.luau",
+  );
+  assert.ok(diagnostic);
+  assert.match(diagnostic.message, /updated between renders/);
+});
+
+test("rules of hooks tracks topology modes stored in options-table properties", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-options-hook-mode-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "useObservedValue.luau"), `local React = require(script.Parent.React)
+
+local function useObservedValue(options)
+  if options.binding then
+    return React.useBinding(0)
+  end
+  return React.useState(0)
+end
+
+return useObservedValue`);
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local useObservedValue = require(script.Parent.useObservedValue)
+
+local function Component()
+  local binding, setBinding = React.useState(true)
+  local value = useObservedValue({ binding = binding })
+  React.useEffect(function()
+    setBinding(false)
+  end, {})
+  return React.createElement("Frame", { Name = tostring(value) })
+end
+
+return Component`);
+
+  const report = await scanPath(root);
+  const diagnostic = report.diagnostics.find(
+    (entry) => entry.rule === "react-luau/rules-of-hooks" && entry.file === "Component.luau",
+  );
+  assert.ok(diagnostic);
+  assert.match(diagnostic.message, /options\.binding/);
+});
+
+test("rules of hooks does not assume an options-table prop changes without evidence", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-options-prop-hook-mode-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "useObservedValue.luau"), `local React = require(script.Parent.React)
+
+local function useObservedValue(options)
+  if options.binding then
+    return React.useBinding(0)
+  end
+  return React.useState(0)
+end
+
+return useObservedValue`);
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local useObservedValue = require(script.Parent.useObservedValue)
+
+local function Component(props)
+  local value = useObservedValue({ binding = props.binding })
+  return React.createElement("Frame", { Name = tostring(value) })
+end
+
+return Component`);
+
+  const report = await scanPath(root);
+  assert.equal(
+    report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks"),
+    false,
+  );
+});
+
+test("rules of hooks keeps unresolved options-table mode properties unknown", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-options-variable-hook-mode-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "useObservedValue.luau"), `local React = require(script.Parent.React)
+
+local function useObservedValue(options)
+  if options.binding then
+    return React.useBinding(0)
+  end
+  return React.useState(0)
+end
+
+return useObservedValue`);
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local useObservedValue = require(script.Parent.useObservedValue)
+
+local function Component(props)
+  local options = props.options
+  local value = useObservedValue(options)
+  return React.createElement("Frame", { Name = tostring(value) })
+end
+
+return Component`);
+
+  const report = await scanPath(root);
+  assert.equal(
+    report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks"),
+    false,
+  );
+});
+
+test("rules of hooks accepts module-invariant conditions", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-module-invariant-hook-mode-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "useThing.luau"), `local React = require(script.Parent.React)
+local isLegacy = getLegacyMode()
+
+local function useThing()
+  if isLegacy then
+    return React.useState(0)
+  else
+    return React.useBinding(0)
+  end
+end
+
+return useThing`);
+
+  const report = await scanPath(root);
+  assert.equal(
+    report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks"),
+    false,
+  );
+});
+
+test("rules of hooks accepts equivalent built-in hook topology across branches", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-equivalent-hook-branches-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+
+local function Component(props)
+  local value
+  if props.alternate then
+    value = React.useState(1)
+  else
+    value = React.useState(2)
+  end
+  return React.createElement("Frame", { Name = tostring(value) })
+end
+
+return Component`);
+
+  const report = await scanPath(root);
+  assert.equal(
+    report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks"),
+    false,
+  );
+});
+
+test("rules of hooks does not propagate topology sensitivity when both custom-hook branches use the same built-in hooks", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-equivalent-custom-hook-mode-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "useObservedValue.luau"), `local React = require(script.Parent.React)
+
+local function useObservedValue(binding: boolean?)
+  if binding then
+    return React.useState(1)
+  else
+    return React.useState(2)
+  end
+end
+
+return useObservedValue`);
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local useObservedValue = require(script.Parent.useObservedValue)
+
+local function Component()
+  local binding, setBinding = React.useState(true)
+  local value = useObservedValue(binding)
+  React.useEffect(function()
+    setBinding(false)
+  end, {})
+  return React.createElement("Frame", { Name = tostring(value) })
+end
+
+return Component`);
+
+  const report = await scanPath(root);
+  assert.equal(
+    report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks"),
+    false,
+  );
 });
 
 test("rules of hooks accepts stable modes for an anonymously exported custom hook", async (t) => {

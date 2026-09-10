@@ -230,44 +230,118 @@ function branchContainsHookCall(text: string): boolean {
   );
 }
 
+const BUILT_IN_REACT_HOOK_NAMES = new Set([
+  "useState",
+  "useEffect",
+  "useLayoutEffect",
+  "useMemo",
+  "useCallback",
+  "useContext",
+  "useReducer",
+  "useRef",
+  "useImperativeHandle",
+  "useBinding",
+]);
+
+function simpleBranchHookPaths(text: string): string[] | null {
+  // Do not use this textual shortcut when nested control flow could make the
+  // first `end` belong to an inner block. The AST rule still handles those
+  // implementations conservatively.
+  if (/\b(?:if|for|while|repeat|function)\b/.test(text)) return null;
+  return [...text.matchAll(/\b(React\.(use[A-Z0-9_][A-Za-z0-9_]*))\s*\(/g)]
+    .map((match) => match[2]);
+}
+
+function simpleIfHasEquivalentBuiltInTopology(
+  source: string,
+  ifStart: number | undefined,
+): boolean {
+  if (ifStart === undefined) return false;
+  const statement = source.slice(ifStart).match(
+    /^if\b[\s\S]*?\bthen\b([\s\S]*?)\belse\b([\s\S]*?)\bend\b/,
+  );
+  if (!statement) return false;
+  const left = simpleBranchHookPaths(statement[1] ?? "");
+  const right = simpleBranchHookPaths(statement[2] ?? "");
+  if (!left || !right || left.length === 0 || left.length !== right.length)
+    return false;
+  return left.every(
+    (name, index) => name === right[index] && BUILT_IN_REACT_HOOK_NAMES.has(name),
+  );
+}
+
 function conditionAliasesForParameter(
   source: string,
   parameter: string,
-): string[] {
-  const aliases = new Set<string>([parameter]);
+): Map<string, string> {
+  const aliases = new Map<string, string>([[parameter, ""]]);
   const escaped = parameter.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  // A mode is often carried in an options table in React-Luau hooks, e.g.
+  // `if options.binding then`. Track the property path so callers can be
+  // checked against the value of that field rather than the whole table.
+  for (const match of source.matchAll(
+    new RegExp(`\\b${escaped}((?:\\.[A-Za-z_][A-Za-z0-9_]*)+)`, "g"),
+  )) {
+    aliases.set(`${parameter}${match[1]}`, match[1].slice(1));
+  }
 
   const directPatterns = [
     new RegExp(
-      `^\\s*local\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*${escaped}\\s*$`,
+      `^\\s*local\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(${escaped}(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)\\s*$`,
       "gm",
     ),
     new RegExp(
-      `^\\s*local\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*not\\s+${escaped}\\s*$`,
+      `^\\s*local\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*not\\s+(${escaped}(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)\\s*$`,
       "gm",
     ),
     new RegExp(
-      `^\\s*local\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*${escaped}\\s*(?:==|~=)\\s*(?:true|false|nil)\\s*$`,
+      `^\\s*local\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(${escaped}(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)\\s*(?:==|~=)\\s*(?:true|false|nil)\\s*$`,
       "gm",
     ),
     new RegExp(
-      `^\\s*local\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(?:true|false|nil)\\s*(?:==|~=)\\s*${escaped}\\s*$`,
-      "gm",
-    ),
-    new RegExp(
-      `^\\s*local\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*if\\s+${escaped}\\s*(?:==|~=)\\s*nil\\s+then\\s+(?:true|false)\\s+else\\s+${escaped}\\s*$`,
-      "gm",
-    ),
-    new RegExp(
-      `^\\s*local\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*if\\s+${escaped}\\s+then\\s+(?:true|false)\\s+else\\s+(?:true|false)\\s*$`,
+      `^\\s*local\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(?:true|false|nil)\\s*(?:==|~=)\\s*(${escaped}(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)\\s*$`,
       "gm",
     ),
   ];
 
   for (const pattern of directPatterns) {
-    for (const match of source.matchAll(pattern)) aliases.add(match[1]);
+    for (const match of source.matchAll(pattern)) {
+      const sourcePath = match[2];
+      const accessPath = sourcePath === parameter
+        ? ""
+        : sourcePath.slice(parameter.length + 1);
+      aliases.set(match[1], accessPath);
+    }
   }
-  return [...aliases];
+
+  // Preserve the normalized boolean aliases that the old detector understood.
+  for (const match of source.matchAll(
+    new RegExp(
+      `^\\s*local\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*if\\s+(${escaped}(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)\\s*(?:==|~=)\\s*nil\\s+then\\s+(?:true|false)\\s+else\\s+\\2\\s*$`,
+      "gm",
+    ),
+  )) {
+    const sourcePath = match[2];
+    aliases.set(
+      match[1],
+      sourcePath === parameter ? "" : sourcePath.slice(parameter.length + 1),
+    );
+  }
+  for (const match of source.matchAll(
+    new RegExp(
+      `^\\s*local\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*if\\s+(${escaped}(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)\\s+then\\s+(?:true|false)\\s+else\\s+(?:true|false)\\s*$`,
+      "gm",
+    ),
+  )) {
+    const sourcePath = match[2];
+    aliases.set(
+      match[1],
+      sourcePath === parameter ? "" : sourcePath.slice(parameter.length + 1),
+    );
+  }
+
+  return aliases;
 }
 
 function findConditionalHookMode(
@@ -275,18 +349,20 @@ function findConditionalHookMode(
 ): ConditionalHookModeSummary | null {
   const exported = exportedFunctionParameters(source);
   if (!exported) return null;
+  if (exported.name && !/^use[A-Z0-9_]/.test(exported.name)) return null;
 
   const parameterNames = exported.parameters.map(parameterName);
   const controlledIndexes: number[] = [];
   const controlledNames: string[] = [];
   const conditionVariables: Record<string, number> = {};
+  const conditionAccessPaths: Record<string, string> = {};
 
   for (const [index, name] of parameterNames.entries()) {
     if (!name) continue;
     const aliases = conditionAliasesForParameter(source, name);
     let controlsHook = false;
 
-    for (const alias of aliases) {
+    for (const [alias, accessPath] of aliases) {
       const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const patterns = [
         new RegExp(
@@ -310,8 +386,10 @@ function findConditionalHookMode(
       for (const pattern of patterns) {
         for (const match of source.matchAll(pattern)) {
           if (!branchContainsHookCall(match[1] ?? "")) continue;
+          if (simpleIfHasEquivalentBuiltInTopology(source, match.index)) continue;
           controlsHook = true;
           conditionVariables[alias] = index;
+          conditionAccessPaths[alias] = accessPath;
           break;
         }
         if (controlsHook) break;
@@ -329,6 +407,7 @@ function findConditionalHookMode(
     parameterIndexes: controlledIndexes,
     parameterNames: controlledNames,
     conditionVariables,
+    conditionAccessPaths,
     knownCallSites: 0,
     dynamicCallSites: 0,
   };
@@ -1189,6 +1268,7 @@ export function buildProjectModel(
       parameterIndexes: [...analysis.conditionalHookMode.parameterIndexes],
       parameterNames: [...analysis.conditionalHookMode.parameterNames],
       conditionVariables: { ...analysis.conditionalHookMode.conditionVariables },
+      conditionAccessPaths: { ...analysis.conditionalHookMode.conditionAccessPaths },
       knownCallSites: 0,
       dynamicCallSites: 0,
     });

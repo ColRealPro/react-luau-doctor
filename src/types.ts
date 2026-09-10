@@ -119,6 +119,8 @@ export interface ConditionalHookModeSummary {
   parameterIndexes: number[];
   parameterNames: string[];
   conditionVariables: Record<string, number>;
+  /** Relative property path for a condition expression, e.g. `options.binding` -> `binding`. */
+  conditionAccessPaths: Record<string, string>;
   knownCallSites: number;
   dynamicCallSites: number;
 }
