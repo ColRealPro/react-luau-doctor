@@ -1,5 +1,6 @@
+import { normalizeRequireTarget, resolveModuleReference } from "../module-resolution";
 import type { SyntaxNode } from "../syntax";
-import type { FunctionInfo, ReactModel, StateBinding } from "../types";
+import type { FunctionInfo, ProjectModel, ReactModel, StateBinding } from "../types";
 import { nodeKey, normalizeExpressionText, parameterBindingNames, sameNode, walk } from "./walk";
 
 const REACT_HOOKS = new Set([
@@ -108,10 +109,14 @@ function hasDirectHookCall(
   aliases: Map<string, string>,
   reactNamespaces: Set<string>,
   reactRobloxNamespaces: Set<string>,
+  importedHookKinds: Map<string, boolean>,
 ): boolean {
   return directCalls(node).some((call) => {
     const name = call.childForFieldName("name")?.text ?? "";
     const path = resolvePath(name, aliases, reactNamespaces, reactRobloxNamespaces);
+    const normalizedName = normalizeExpressionText(name);
+    const importedKind = importedHookKinds.get(normalizedName);
+    if (importedKind !== undefined) return importedKind;
     const final = path.split(/[.:]/).at(-1) ?? "";
     return /^use[A-Z0-9_]/.test(final);
   });
@@ -257,7 +262,29 @@ function isEmptyDependencyTable(node: SyntaxNode | undefined): boolean {
   return Boolean(node?.type === "table_constructor" && node.namedChildren.every((child) => child.type !== "field"));
 }
 
-export function buildReactModel(root: SyntaxNode): ReactModel {
+
+function importedHookKinds(
+  declarations: SyntaxNode[],
+  project: ProjectModel | undefined,
+): Map<string, boolean> {
+  const result = new Map<string, boolean>();
+  if (!project) return result;
+
+  for (const declaration of declarations) {
+    const match = declaration.text.match(
+      /^\s*local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)\s*$/s,
+    );
+    if (!match || !/^use[A-Z0-9_]/.test(match[1])) continue;
+    const kind = resolveModuleReference(
+      normalizeRequireTarget(match[2]),
+      project.reactHookModules,
+    );
+    if (kind !== null) result.set(match[1], kind);
+  }
+  return result;
+}
+
+export function buildReactModel(root: SyntaxNode, project?: ProjectModel): ReactModel {
   const reactNamespaces = new Set<string>();
   const reactRobloxNamespaces = new Set<string>();
   const aliases = new Map<string, string>();
@@ -274,6 +301,7 @@ export function buildReactModel(root: SyntaxNode): ReactModel {
 
   const allNodes = [...walk(root)];
   const declarations = allNodes.filter((node) => node.type === "variable_declaration");
+  const projectHookKinds = importedHookKinds(declarations, project);
   let isReactFile = false;
 
   for (const declaration of declarations) {
@@ -347,7 +375,13 @@ export function buildReactModel(root: SyntaxNode): ReactModel {
   for (const info of functions) {
     if (!isReactFile || !info.body || info.isHook) continue;
     const simplePascalName = Boolean(info.name && /^[A-Z][A-Za-z0-9_]*$/.test(info.name));
-    const hasHooks = hasDirectHookCall(info.body, aliases, reactNamespaces, reactRobloxNamespaces);
+    const hasHooks = hasDirectHookCall(
+      info.body,
+      aliases,
+      reactNamespaces,
+      reactRobloxNamespaces,
+      projectHookKinds,
+    );
     const renders = hasDirectCreateElementCall(info.body, aliases, reactNamespaces, reactRobloxNamespaces);
     if (hasHooks || isMemoWrappedFunction(info.node, aliases, reactNamespaces) || (simplePascalName && renders)) {
       info.isComponent = true;

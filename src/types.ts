@@ -154,6 +154,8 @@ export interface ProjectModel {
   bindingCompatibleComponentProps: Map<string, Set<string>>;
   staticIterationTables: Map<string, Set<string>>;
   conditionalHookModes: Map<string, ConditionalHookModeSummary>;
+  /** Project modules exporting use* functions, classified by whether they currently execute React hook topology. */
+  reactHookModules: Map<string, boolean>;
   sourceEffects: Map<string, SourceEffectModuleSummary>;
 }
 

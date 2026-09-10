@@ -131,3 +131,36 @@ return React.memo(MemoVisualFrame)`),
   );
   assert.equal(memoVisual?.has("position") ?? false, true);
 });
+
+test("React hook module ownership is inferred from direct and transitive React hook usage", () => {
+  const model = buildProjectModel("/virtual", [
+    sourceFile("useMatterReact.luau", `local Matter = require(script.Parent.Matter)
+local function useMatterReact(discriminator)
+  return Matter.useHookState(discriminator)
+end
+return useMatterReact`),
+    sourceFile("useInner.luau", `local React = require(script.Parent.React)
+local function useInner()
+  return React.useState(0)
+end
+return useInner`),
+    sourceFile("useOuter.luau", `local useInner = require(script.Parent.useInner)
+local function useOuter()
+  return useInner()
+end
+return useOuter`),
+  ]);
+
+  assert.equal(
+    resolveModuleReference(normalizeRequireTarget("script.Parent.useMatterReact"), model.reactHookModules),
+    false,
+  );
+  assert.equal(
+    resolveModuleReference(normalizeRequireTarget("script.Parent.useInner"), model.reactHookModules),
+    true,
+  );
+  assert.equal(
+    resolveModuleReference(normalizeRequireTarget("script.Parent.useOuter"), model.reactHookModules),
+    true,
+  );
+});

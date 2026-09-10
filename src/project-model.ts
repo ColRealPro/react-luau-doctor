@@ -1184,6 +1184,67 @@ function findBindingCompatibleComponentProps(
   return compatible.size > 0 ? compatible : null;
 }
 
+
+function exportedUseFunctionName(source: string): string | null {
+  const name = exportedFunctionName(source);
+  return name && /^use[A-Z0-9_]/.test(name) ? name : null;
+}
+
+function directReactHookUsage(source: string): boolean {
+  const namespaces = new Set<string>(["React"]);
+  const requirePattern = /\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)/gs;
+  for (const match of source.matchAll(requirePattern)) {
+    const target = normalizeRequireTarget(match[2]);
+    if (target.split(".").includes("react")) namespaces.add(match[1]);
+  }
+
+  for (const namespace of namespaces) {
+    const escaped = namespace.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`\\b${escaped}\\.use[A-Z0-9_][A-Za-z0-9_]*\\b`).test(source)) return true;
+  }
+  return false;
+}
+
+function calledRequiredModules(source: string): Array<{ localName: string; target: string }> {
+  const result: Array<{ localName: string; target: string }> = [];
+  const requirePattern = /\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)/gs;
+  for (const match of source.matchAll(requirePattern)) {
+    const localName = match[1];
+    const escaped = localName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (!new RegExp(`\\b${escaped}\\s*\\(`).test(source.slice(match.index + match[0].length))) continue;
+    result.push({ localName, target: normalizeRequireTarget(match[2]) });
+  }
+  return result;
+}
+
+function findReactHookModules(records: SourceRecord[]): Map<string, boolean> {
+  const hookRecords = records.filter((record) => exportedUseFunctionName(record.source));
+  const provenReact = new Map<string, boolean>();
+
+  for (const record of hookRecords) {
+    if (directReactHookUsage(record.source)) provenReact.set(record.id, true);
+  }
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const aliases = buildUniqueFeatureAliases(records, provenReact);
+    for (const record of hookRecords) {
+      if (provenReact.has(record.id)) continue;
+      const callsReactHookModule = calledRequiredModules(record.source).some(({ target }) =>
+        resolveModuleReference(target, aliases) === true,
+      );
+      if (!callsReactHookModule) continue;
+      provenReact.set(record.id, true);
+      changed = true;
+    }
+  }
+
+  const result = new Map<string, boolean>();
+  for (const record of hookRecords) result.set(record.id, provenReact.has(record.id));
+  return result;
+}
+
 function findStaticIterationTables(source: string): Set<string> | null {
   const match = /^return\s*\{/m.exec(source);
   if (!match || match.index === undefined) return null;
@@ -1278,6 +1339,10 @@ export function buildProjectModel(
     records,
     conditionalHookModesByModule,
   );
+  const reactHookModules = buildUniqueFeatureAliases(
+    records,
+    findReactHookModules(records),
+  );
   collectConditionalHookModeCallSites(records, conditionalHookModes);
 
   let changed = true;
@@ -1309,6 +1374,7 @@ export function buildProjectModel(
       staticIterationTablesByModule,
     ),
     conditionalHookModes,
+    reactHookModules,
     sourceEffects: new Map(),
   };
 }

@@ -98,7 +98,7 @@ function toDiagnostic(
 
 export async function analyzeReactFile(input: ReactFileAnalysisInput, tree?: SyntaxTree): Promise<ReactFileAnalysisResult> {
   const parsedTree = tree ?? await parseLuau(input.source);
-  const model = buildReactModel(parsedTree.rootNode);
+  const model = buildReactModel(parsedTree.rootNode, input.project);
   if (!input.forceScan && !model.isReactFile) {
     return { relativePath: input.relativePath, isReactFile: false, scanned: false, diagnostics: [] };
   }

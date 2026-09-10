@@ -2862,3 +2862,88 @@ return Component
   assert.equal(diagnostics.length, 1);
   assert.match(diagnostics[0].message, /state is React state backed by a table and is mutated in place/);
 });
+
+test("rules of hooks ignores project-proven non-React use APIs without weakening imported React hooks", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-hook-ownership-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "useMatterReact.luau"), `local Matter = require(script.Parent.Matter)
+
+local function cleanup(storage)
+end
+
+local function useMatterReact(discriminator)
+  local storage = Matter.useHookState(discriminator, cleanup)
+  return storage
+end
+
+return useMatterReact
+`);
+
+  fs.writeFileSync(path.join(root, "MatterSystem.luau"), `local React = require(script.Parent.React)
+local useMatterReact = require(script.Parent.useMatterReact)
+
+local function Child()
+  return React.createElement("Frame")
+end
+
+local function mySystem(enabled)
+  if enabled then
+    useMatterReact({ Child = Child })
+  end
+end
+
+return mySystem
+`);
+
+  fs.writeFileSync(path.join(root, "useInner.luau"), `local React = require(script.Parent.React)
+
+local function useInner()
+  return React.useState(0)
+end
+
+return useInner
+`);
+
+  fs.writeFileSync(path.join(root, "useOuter.luau"), `local useInner = require(script.Parent.useInner)
+
+local function useOuter()
+  return useInner()
+end
+
+return useOuter
+`);
+
+  fs.writeFileSync(path.join(root, "BadReactComponent.luau"), `local React = require(script.Parent.React)
+local useOuter = require(script.Parent.useOuter)
+
+local function BadReactComponent(props)
+  if props.enabled then
+    useOuter()
+  end
+  return React.createElement("Frame")
+end
+
+return BadReactComponent
+`);
+
+  const report = await scanPath(root, { cache: false, parallel: false });
+  const hookDiagnostics = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks");
+
+  assert.equal(
+    hookDiagnostics.some((diagnostic) => diagnostic.file === "MatterSystem.luau"),
+    false,
+    "Matter use* APIs should not be inferred as React hooks merely from their names",
+  );
+  assert.ok(
+    hookDiagnostics.some((diagnostic) => diagnostic.file === "BadReactComponent.luau" && diagnostic.message.includes("useOuter")),
+    "transitively imported React custom hooks should still enforce hook ordering",
+  );
+
+  const forcedMatter = await scanPath(path.join(root, "useMatterReact.luau"), { cache: false, parallel: false });
+  assert.equal(
+    forcedMatter.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks"),
+    false,
+    "forcing analysis of a non-React framework hook module should not reinterpret its hooks as React hooks",
+  );
+});

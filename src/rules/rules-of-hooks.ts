@@ -43,6 +43,24 @@ function staticIterationImports(
   return result;
 }
 
+
+function nonReactHookImports(context: RuleContext): Set<string> {
+  const result = new Set<string>();
+  for (const node of context.walk(context.root)) {
+    if (node.type !== "variable_declaration") continue;
+    const match = node.text.match(
+      /^\s*local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)\s*$/s,
+    );
+    if (!match || !/^use[A-Z0-9_]/.test(match[1])) continue;
+    const kind = resolveModuleReference(
+      normalizeRequireTarget(match[2]),
+      context.project.reactHookModules,
+    );
+    if (kind === false) result.add(match[1]);
+  }
+  return result;
+}
+
 function conditionalHookModeImports(
   context: RuleContext,
 ): Map<string, ConditionalHookModeSummary> {
@@ -689,16 +707,19 @@ export const rulesOfHooks: RuleDefinition = {
     "Hooks must run in the same order on every render of a React component or custom hook.",
   run(context) {
     const diagnostics: DiagnosticInput[] = [];
+    if (!context.model.isReactFile) return diagnostics;
     const staticImports = staticIterationImports(context);
     const stableShapes = stableShapeVariablesByFunction(context);
     const moduleInvariants = moduleInvariantVariables(context);
     const modeImports = conditionalHookModeImports(context);
+    const ignoredHookImports = nonReactHookImports(context);
     const currentModeSummary = currentConditionalHookMode(context);
     const reachableReturns = new Map<number, SyntaxNode[]>();
 
     for (const call of context.findCalls()) {
       const rawPath = context.getCallPath(call);
       if (!rawPath) continue;
+      if (ignoredHookImports.has(rawPath)) continue;
       const path = context.resolveCallPath(rawPath);
       if (!isHookPath(path)) continue;
 

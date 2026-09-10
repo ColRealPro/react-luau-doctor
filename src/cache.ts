@@ -39,6 +39,7 @@ interface SerializedProjectModel {
   bindingCompatibleComponentProps: Array<[string, string[]]>;
   staticIterationTables: Array<[string, string[]]>;
   conditionalHookModes: Array<[string, ProjectModel["conditionalHookModes"] extends Map<string, infer V> ? V : never]>;
+  reactHookModules: Array<[string, boolean]>;
   sourceEffects: Array<[string, SerializedSourceEffectSummary]>;
 }
 
@@ -326,6 +327,7 @@ export function serializeProjectModel(project: ProjectModel): SerializedProjectM
     bindingCompatibleComponentProps: [...project.bindingCompatibleComponentProps].map(([key, value]) => [key, [...value].sort()]),
     staticIterationTables: [...project.staticIterationTables].map(([key, value]) => [key, [...value].sort()]),
     conditionalHookModes: [...project.conditionalHookModes],
+    reactHookModules: [...project.reactHookModules],
     sourceEffects: [...project.sourceEffects].map(([key, value]) => [key, serializeSourceEffect(value)]),
   };
 }
@@ -339,6 +341,7 @@ export function deserializeProjectModel(project: SerializedProjectModel): Projec
     bindingCompatibleComponentProps: new Map(project.bindingCompatibleComponentProps.map(([key, value]) => [key, new Set(value)])),
     staticIterationTables: new Map(project.staticIterationTables.map(([key, value]) => [key, new Set(value)])),
     conditionalHookModes: new Map(project.conditionalHookModes),
+    reactHookModules: new Map(project.reactHookModules ?? []),
     sourceEffects: new Map(project.sourceEffects.map(([key, value]) => [key, deserializeSourceEffect(value)])),
   };
 }
@@ -366,6 +369,7 @@ export function projectModelFeatureKey(project: ProjectModel): string {
     bindingCompatibleComponentProps: serialized.bindingCompatibleComponentProps,
     staticIterationTables: serialized.staticIterationTables,
     conditionalHookModes: serialized.conditionalHookModes,
+    reactHookModules: serialized.reactHookModules,
   });
 }
 
