@@ -215,6 +215,32 @@ test("dependency analysis respects nested shadowing and hook bindings are scoped
   assert.equal(ids.has("react-luau/no-mutable-in-deps"), false);
 });
 
+test("dependency analysis ignores generic and annotation-only type identifiers", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-deps-types-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "TypedHook.luau"), `local React = require(script.Parent.React)
+
+local function useTypedMemo<T>(value: T)
+	local callback = React.useCallback(function(nextValue: T): T
+		return nextValue
+	end, {})
+
+	return React.useMemo(function(): T
+		local copy = value :: T
+		callback(copy)
+		return copy
+	end, { value, callback })
+end
+
+return useTypedMemo
+`);
+
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/exhaustive-deps");
+  assert.equal(diagnostics.length, 0);
+});
+
 test("does not treat arbitrary Add methods as cleanup ownership", async () => {
   const ids = await ruleIds("cleanup-manager-invalid.luau");
   assert.ok(ids.has("react-luau/effect-needs-cleanup"));

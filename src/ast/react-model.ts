@@ -1,6 +1,6 @@
 import type { SyntaxNode } from "../syntax";
 import type { FunctionInfo, ReactModel, StateBinding } from "../types";
-import { nodeKey, normalizeExpressionText, sameNode, walk } from "./walk";
+import { nodeKey, normalizeExpressionText, parameterBindingNames, sameNode, walk } from "./walk";
 
 const REACT_HOOKS = new Set([
   "useState",
@@ -33,16 +33,7 @@ const INSTANCE_FACTORY_MEMBERS = new Set([
 const STABLE_ENGINE_FACTORY_MEMBERS = new Set(["GetMouse", "GetService"]);
 
 function identifiersFromParameters(node: SyntaxNode | null): string[] {
-  if (!node) return [];
-  const result: string[] = [];
-  for (const child of walk(node)) {
-    if (child.type !== "identifier") continue;
-    const parentType = child.parent?.type;
-    if (parentType === "parameters" || parentType === "parameter" || parentType === "typed_identifier") {
-      result.push(child.text);
-    }
-  }
-  return [...new Set(result)];
+  return parameterBindingNames(node);
 }
 
 function getFunctionName(node: SyntaxNode): string | null {

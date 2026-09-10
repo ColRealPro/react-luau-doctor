@@ -44,6 +44,18 @@ export function descendantsOfType(node: SyntaxNode, type: string): SyntaxNode[] 
   return result;
 }
 
+
+export function parameterBindingNames(parameters: SyntaxNode | null | undefined): string[] {
+  if (!parameters) return [];
+  const result: string[] = [];
+  for (const parameter of parameters.namedChildren) {
+    if (parameter.type !== "parameter") continue;
+    const identifier = parameter.namedChildren.find((child) => child.type === "identifier");
+    if (identifier) result.push(identifier.text);
+  }
+  return [...new Set(result)];
+}
+
 export function rootIdentifier(text: string): string | null {
   const match = text.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)/);
   return match?.[1] ?? null;

@@ -1,6 +1,6 @@
 import type { SyntaxNode } from "../syntax";
 import type { DiagnosticInput, FunctionInfo, RuleContext, RuleDefinition } from "../types";
-import { nodeKey, normalizeExpressionText, rootIdentifier, sameNode } from "../ast/walk";
+import { nodeKey, normalizeExpressionText, parameterBindingNames, rootIdentifier, sameNode } from "../ast/walk";
 import { mutableDependencyBase } from "../roblox-semantics";
 import { declarationNames, dependencyExpressions, tableStartNode } from "./helpers";
 
@@ -21,20 +21,64 @@ const HOOK_ARGUMENTS = new Map<string, { callbackIndex: number; depsIndex: numbe
 ]);
 
 function parameterNames(functionNode: SyntaxNode): Set<string> {
-  const names = new Set<string>();
-  const parameters = functionNode.childForFieldName("parameters");
-  if (!parameters) return names;
-  for (const node of parameters.namedChildren) {
-    for (const candidate of descendants(node)) {
-      if (candidate.type === "identifier") names.add(candidate.text);
-    }
-  }
-  return names;
+  return new Set(parameterBindingNames(functionNode.childForFieldName("parameters")));
 }
 
 function* descendants(node: SyntaxNode): Iterable<SyntaxNode> {
   yield node;
   for (const child of node.namedChildren) yield* descendants(child);
+}
+
+const TYPE_ONLY_NODES = new Set([
+  "type_definition",
+  "type_annotation",
+  "type_parameters",
+  "generic_type_list",
+  "generic_type",
+  "function_type",
+  "optional_type",
+  "object_type",
+  "union_type",
+  "intersection_type",
+  "tuple_type",
+  "singleton_type",
+  "variadic_type",
+  "variadic_type_pack",
+]);
+
+function isTypeOnlyChild(parent: SyntaxNode, child: SyntaxNode): boolean {
+  if (TYPE_ONLY_NODES.has(child.type)) return true;
+  if (TYPE_ONLY_NODES.has(parent.type)) return true;
+
+  if (parent.type === "parameter") {
+    return !sameNode(parent.namedChildren.find((candidate) => candidate.type === "identifier"), child);
+  }
+
+  if (parent.type === "cast_expression" || parent.type === "type_cast_expression") {
+    return !sameNode(parent.namedChildren[0], child);
+  }
+
+  if (parent.type === "function_definition" || parent.type === "function_declaration") {
+    const name = parent.childForFieldName("name");
+    const parameters = parent.childForFieldName("parameters");
+    const body = parent.childForFieldName("body");
+    if (sameNode(child, name) || sameNode(child, parameters) || sameNode(child, body)) return false;
+    return true;
+  }
+
+  if (parent.type === "variable_list" && parent.parent?.parent?.type === "variable_declaration") {
+    return true;
+  }
+
+  return false;
+}
+
+function* runtimeDescendants(node: SyntaxNode): Iterable<SyntaxNode> {
+  yield node;
+  for (const child of node.namedChildren) {
+    if (isTypeOnlyChild(node, child)) continue;
+    yield* runtimeDescendants(child);
+  }
 }
 
 function directBlockBindingNames(block: SyntaxNode, beforeIndex: number): Set<string> {
@@ -136,7 +180,7 @@ function capturedDependencyPaths(
 ): Set<string> {
   const captured = new Set<string>();
 
-  for (const node of descendants(callback)) {
+  for (const node of runtimeDescendants(callback)) {
     if (node.type === "dot_index_expression" && outermostDotPath(node)) {
       const root = rootIdentifier(node.text);
       if (!root || !available.has(root) || GLOBALS.has(root) || stableVariables.has(root)) continue;
