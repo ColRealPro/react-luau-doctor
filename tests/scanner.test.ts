@@ -62,6 +62,102 @@ test("finds state, effect, identity, and lifecycle issues", async () => {
   for (const rule of expected) assert.ok(ids.has(rule), `expected ${rule}`);
 });
 
+test("self-updating effects catch guaranteed no-deps render loops without flagging convergent updates", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-self-updating-no-deps-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "InfiniteTable.luau"), `local React = require(script.Parent.React)
+local function InfiniteTable()
+  local state, setState = React.useState({})
+  React.useEffect(function()
+    setState({})
+  end)
+  return React.createElement("Frame", { Name = tostring(state) })
+end
+return InfiniteTable
+`);
+
+  fs.writeFileSync(path.join(root, "InfiniteArithmetic.luau"), `local React = require(script.Parent.React)
+local function InfiniteArithmetic()
+  local count, setCount = React.useState(0)
+  React.useEffect(function()
+    setCount(count + 1)
+  end)
+  return React.createElement("Frame", { Name = tostring(count) })
+end
+return InfiniteArithmetic
+`);
+
+  fs.writeFileSync(path.join(root, "InfiniteUpdater.luau"), `local React = require(script.Parent.React)
+local function InfiniteUpdater()
+  local count, setCount = React.useState(0)
+  React.useEffect(function()
+    setCount(function(previous)
+      return previous + 1
+    end)
+  end)
+  return React.createElement("Frame", { Name = tostring(count) })
+end
+return InfiniteUpdater
+`);
+
+  fs.writeFileSync(path.join(root, "InfiniteExplicitNil.luau"), `local React = require(script.Parent.React)
+local function InfiniteExplicitNil()
+  local items, setItems = React.useState({})
+  React.useLayoutEffect(function()
+    setItems(table.clone(items))
+  end, nil)
+  return React.createElement("Frame", { Name = tostring(items) })
+end
+return InfiniteExplicitNil
+`);
+
+  fs.writeFileSync(path.join(root, "Convergent.luau"), `local React = require(script.Parent.React)
+local function Convergent(props)
+  local count, setCount = React.useState(0)
+  React.useEffect(function()
+    setCount(props.count)
+  end)
+  return React.createElement("Frame", { Name = tostring(count) })
+end
+return Convergent
+`);
+
+  fs.writeFileSync(path.join(root, "Guarded.luau"), `local React = require(script.Parent.React)
+local function Guarded()
+  local count, setCount = React.useState(0)
+  React.useEffect(function()
+    if count < 1 then
+      setCount(count + 1)
+    end
+  end)
+  return React.createElement("Frame", { Name = tostring(count) })
+end
+return Guarded
+`);
+
+  fs.writeFileSync(path.join(root, "MountOnly.luau"), `local React = require(script.Parent.React)
+local function MountOnly()
+  local state, setState = React.useState({})
+  React.useEffect(function()
+    setState({})
+  end, {})
+  return React.createElement("Frame", { Name = tostring(state) })
+end
+return MountOnly
+`);
+
+  const report = await scanPath(root);
+  const selfUpdates = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-self-updating-effect");
+  const files = new Set(selfUpdates.map((diagnostic) => diagnostic.file));
+  assert.deepEqual(files, new Set([
+    "InfiniteArithmetic.luau",
+    "InfiniteExplicitNil.luau",
+    "InfiniteTable.luau",
+    "InfiniteUpdater.luau",
+  ]));
+});
+
 test("accepts stable identities, functional updates, lazy state, bindings, and deterministic cleanup", async () => {
   const ids = await ruleIds("advanced-valid.luau");
   const forbidden = [

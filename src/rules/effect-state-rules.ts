@@ -24,6 +24,16 @@ function ownerForHook(context: RuleContext, call: SyntaxNode): FunctionInfo | nu
   return owner && (owner.isComponent || owner.isHook) ? owner : null;
 }
 
+function effectCallbackWithoutDeps(context: RuleContext, call: SyntaxNode): SyntaxNode | null {
+  const path = context.resolveCallPath(context.getCallPath(call) ?? "");
+  if (!isEffectPath(path)) return null;
+  const args = context.callArguments(call);
+  const callback = args[0];
+  if (callback?.type !== "function_definition") return null;
+  if (args.length < 2 || args[1]?.type === "nil") return callback;
+  return null;
+}
+
 function callbackAndDeps(context: RuleContext, call: SyntaxNode): { callback: SyntaxNode; deps: SyntaxNode } | null {
   const path = context.resolveCallPath(context.getCallPath(call) ?? "");
   const args = context.callArguments(call);
@@ -83,6 +93,32 @@ function setterCalledOutsideCallback(context: RuleContext, owner: FunctionInfo, 
     if (node.startIndex >= callback.startIndex && node.endIndex <= callback.endIndex) continue;
     return true;
   }
+  return false;
+}
+
+function guaranteedRepeatedStateChange(argument: SyntaxNode, stateName: string, context: RuleContext): boolean {
+  if (argument.type === "table_constructor") return true;
+
+  if (argument.type === "function_definition") {
+    const updater = functionInfoForNode(context, argument);
+    const previousName = updater?.parameters[0];
+    const returnStatement = updater?.body?.namedChildren.find((child) => child.type === "return_statement");
+    const returnValue = returnStatement?.namedChildren[0];
+    if (previousName && returnValue && guaranteedRepeatedStateChange(returnValue, previousName, context)) return true;
+    return false;
+  }
+
+  const text = argument.text.trim();
+  const escaped = stateName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (new RegExp(`^not\\s+${escaped}$`).test(text)) return true;
+  if (new RegExp(`^${escaped}\\s*[+-]\\s*(?:[1-9]\\d*(?:\\.\\d+)?|0?\\.\\d*[1-9]\\d*)$`).test(text)) return true;
+  if (new RegExp(`^(?:[1-9]\\d*(?:\\.\\d+)?|0?\\.\\d*[1-9]\\d*)\\s*\\+\\s*${escaped}$`).test(text)) return true;
+
+  if (argument.type === "function_call") {
+    const path = context.resolveCallPath(context.getCallPath(argument) ?? "");
+    if (path === "table.clone" || path === "table.create" || path === "table.pack") return true;
+  }
+
   return false;
 }
 
@@ -147,7 +183,7 @@ export const noSelfUpdatingEffect: RuleDefinition = {
   id: "react-luau/no-self-updating-effect",
   category: "Effects",
   severity: "warning",
-  description: "Effects should not unconditionally update state that is also one of their dependencies.",
+  description: "Effects should not unconditionally update state in a way that schedules themselves again.",
   run(context) {
     const diagnostics = [];
 
@@ -155,18 +191,36 @@ export const noSelfUpdatingEffect: RuleDefinition = {
       const path = context.resolveCallPath(context.getCallPath(call) ?? "");
       if (!isEffectPath(path)) continue;
       const owner = ownerForHook(context, call);
-      const parts = callbackAndDeps(context, call);
-      if (!owner || !parts) continue;
-      const deps = parseDependencyRoots(parts.deps);
+      if (!owner) continue;
 
+      const parts = callbackAndDeps(context, call);
+      if (parts) {
+        const deps = parseDependencyRoots(parts.deps);
+        for (const binding of stateBindingsFor(context, owner)) {
+          if (!deps.has(binding.valueName)) continue;
+          for (const setterCall of directTopLevelCalls(context, parts.callback)) {
+            if (context.getCallPath(setterCall) !== binding.setterName) continue;
+            diagnostics.push({
+              node: callNameNode(setterCall),
+              message: `${binding.setterName}() updates ${binding.valueName}, which is also in this effect's dependency table.`,
+              help: "Guard the update so it converges, move it to the originating event, or derive the value during render.",
+            });
+          }
+        }
+        continue;
+      }
+
+      const callback = effectCallbackWithoutDeps(context, call);
+      if (!callback) continue;
       for (const binding of stateBindingsFor(context, owner)) {
-        if (!deps.has(binding.valueName)) continue;
-        for (const setterCall of directTopLevelCalls(context, parts.callback)) {
+        for (const setterCall of directTopLevelCalls(context, callback)) {
           if (context.getCallPath(setterCall) !== binding.setterName) continue;
+          const argument = context.callArguments(setterCall)[0];
+          if (!argument || !guaranteedRepeatedStateChange(argument, binding.valueName, context)) continue;
           diagnostics.push({
             node: callNameNode(setterCall),
-            message: `${binding.setterName}() updates ${binding.valueName}, which is also in this effect's dependency table.`,
-            help: "Guard the update so it converges, move it to the originating event, or derive the value during render.",
+            message: `${binding.setterName}() unconditionally changes ${binding.valueName} in an effect that runs after every render.`,
+            help: "Add a dependency table or convergence guard, move the update to the event that owns it, or derive the value during render.",
           });
         }
       }
