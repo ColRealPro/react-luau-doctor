@@ -269,6 +269,67 @@ function dependencyPaths(node: SyntaxNode): Set<string> {
   return new Set(dependencyExpressions(node).map(dependencyCoveragePath));
 }
 
+function transparentAliasPath(node: SyntaxNode): string | null {
+  if (node.type === "cast_expression" || node.type === "type_cast_expression" || node.type === "parenthesized_expression") {
+    const expression = node.namedChildren[0];
+    return expression ? transparentAliasPath(expression) : null;
+  }
+
+  if (node.type !== "identifier" && node.type !== "dot_index_expression") return null;
+  return normalizeExpressionText(node.text);
+}
+
+function immutableTransparentAliases(owner: FunctionInfo, context: RuleContext): Map<string, string> {
+  const aliases = new Map<string, string>();
+  if (!owner.body) return aliases;
+  const mutated = mutatedOwnerLocals(owner, context);
+
+  for (const statement of owner.body.namedChildren) {
+    if (statement.type !== "variable_declaration") continue;
+    const names = declarationNames(statement);
+    const expressions = declarationExpressions(statement);
+
+    for (let index = 0; index < names.length; index += 1) {
+      const name = names[index];
+      const expression = expressions[index];
+      if (!expression || mutated.has(name)) continue;
+      const source = transparentAliasPath(expression);
+      if (!source || source === name) continue;
+      const sourceRoot = rootIdentifier(source);
+      if (!sourceRoot || mutated.has(sourceRoot)) continue;
+      aliases.set(name, source);
+    }
+  }
+
+  return aliases;
+}
+
+function resolveAliasPath(path: string, aliases: Map<string, string>): string {
+  let current = path;
+  const visiting = new Set<string>();
+
+  while (true) {
+    const root = rootIdentifier(current);
+    if (!root || visiting.has(root)) return current;
+    const source = aliases.get(root);
+    if (!source) return current;
+    visiting.add(root);
+    current = `${source}${current.slice(root.length)}`;
+  }
+}
+
+function dependencyPathsWithAliases(
+  node: SyntaxNode,
+  aliases: Map<string, string>,
+): Set<string> {
+  const dependencies = dependencyPaths(node);
+  for (const dependency of [...dependencies]) {
+    const resolved = resolveAliasPath(dependency, aliases);
+    if (resolved !== dependency) dependencies.add(resolved);
+  }
+  return dependencies;
+}
+
 const PURE_DERIVED_CALL = /^(?:math\.(?!random(?:seed)?$)[A-Za-z_][A-Za-z0-9_]*|string\.[A-Za-z_][A-Za-z0-9_]*|table\.(?:find|concat|clone|create|isfrozen)|(?:Color3|Vector2|Vector3|UDim|UDim2|CFrame|BrickColor|Rect|NumberRange|NumberSequence|ColorSequence|TweenInfo|Font|Ray|Region3|PhysicalProperties)\.[A-Za-z_][A-Za-z0-9_]*|[^:]+:(?:ToHSV|Lerp|Dot|Cross|FuzzyEq|Inverse|ToObjectSpace|ToWorldSpace))$/;
 
 function isPureDerivedExpression(node: SyntaxNode, context: RuleContext): boolean {
@@ -545,6 +606,7 @@ export const exhaustiveDeps: RuleDefinition = {
     const derivedDependenciesByOwner = new Map<number, Map<string, Set<string>>>();
     const dependencyHintsByOwner = new Map<number, CustomHookDependencyHints>();
     const memoizedProducersByOwner = new Map<number, Map<string, Set<string>>>();
+    const transparentAliasesByOwner = new Map<number, Map<string, string>>();
 
     for (const call of context.findCalls()) {
       const rawPath = context.getCallPath(call);
@@ -572,7 +634,12 @@ export const exhaustiveDeps: RuleDefinition = {
         externallyMutableRoots,
         context,
       );
-      const dependencies = dependencyPaths(deps);
+      let transparentAliases = transparentAliasesByOwner.get(ownerKey);
+      if (!transparentAliases) {
+        transparentAliases = immutableTransparentAliases(owner, context);
+        transparentAliasesByOwner.set(ownerKey, transparentAliases);
+      }
+      const dependencies = dependencyPathsWithAliases(deps, transparentAliases);
       let derivedDependencies = derivedDependenciesByOwner.get(ownerKey);
       if (!derivedDependencies) {
         derivedDependencies = derivedLocalDependencies(owner, available, stableVariables, externallyMutableRoots, context);

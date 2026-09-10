@@ -241,6 +241,72 @@ return useTypedMemo
   assert.equal(diagnostics.length, 0);
 });
 
+test("dependency tables recognize immutable transparent aliases", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-dependency-aliases-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Alias.luau"), `local React = require(script.Parent.React)
+
+local function Alias(props)
+	local store = props.store
+	React.useMemo(function()
+		return props.store:getState()
+	end, { store })
+end
+
+return Alias
+`);
+
+  fs.writeFileSync(path.join(root, "AliasChain.luau"), `local React = require(script.Parent.React)
+
+local function AliasChain(props)
+	local source = props
+	local store = source.store
+	React.useMemo(function()
+		return props.store:getState()
+	end, { store })
+end
+
+return AliasChain
+`);
+
+  fs.writeFileSync(path.join(root, "MutableAlias.luau"), `local React = require(script.Parent.React)
+
+local function MutableAlias(props)
+	local store = props.store
+	store = props.otherStore
+	React.useMemo(function()
+		return props.store:getState()
+	end, { store })
+end
+
+return MutableAlias
+`);
+
+  fs.writeFileSync(path.join(root, "DerivedValue.luau"), `local React = require(script.Parent.React)
+
+local function DerivedValue(props)
+	local hasStore = props.store ~= nil
+	React.useMemo(function()
+		return props.store
+	end, { hasStore })
+end
+
+return DerivedValue
+`);
+
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/exhaustive-deps");
+  assert.equal(diagnostics.some((diagnostic) => diagnostic.file === "Alias.luau"), false);
+  assert.equal(diagnostics.some((diagnostic) => diagnostic.file === "AliasChain.luau"), false);
+
+  const mutable = diagnostics.find((diagnostic) => diagnostic.file === "MutableAlias.luau");
+  assert.match(mutable?.message ?? "", /missing props\.store/);
+
+  const derived = diagnostics.find((diagnostic) => diagnostic.file === "DerivedValue.luau");
+  assert.match(derived?.message ?? "", /missing props\.store/);
+});
+
 test("dependency tables normalize transparent casts and optional false sentinels", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-dependency-normalization-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
