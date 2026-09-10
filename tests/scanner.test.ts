@@ -241,6 +241,40 @@ return useTypedMemo
   assert.equal(diagnostics.length, 0);
 });
 
+test("dependency tables normalize transparent casts and optional false sentinels", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-dependency-normalization-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Normalized.luau"), `local React = require(script.Parent.React)
+
+local function Normalized(plugin: Plugin, menu: PluginMenu?)
+	React.useEffect(function()
+		print(plugin, menu)
+	end, { (plugin :: any), menu or false })
+end
+
+return Normalized
+`);
+
+  fs.writeFileSync(path.join(root, "UnsafeFallback.luau"), `local React = require(script.Parent.React)
+
+local function UnsafeFallback(value, fallback)
+	React.useEffect(function()
+		print(value)
+	end, { value or fallback })
+end
+
+return UnsafeFallback
+`);
+
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/exhaustive-deps");
+  assert.equal(diagnostics.some((diagnostic) => diagnostic.file === "Normalized.luau"), false);
+
+  const unsafe = diagnostics.find((diagnostic) => diagnostic.file === "UnsafeFallback.luau");
+  assert.match(unsafe?.message ?? "", /missing value/);
+});
+
 test("does not treat arbitrary Add methods as cleanup ownership", async () => {
   const ids = await ruleIds("cleanup-manager-invalid.luau");
   assert.ok(ids.has("react-luau/effect-needs-cleanup"));

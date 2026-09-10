@@ -249,8 +249,24 @@ function expandLocalFunctionCaptures(
   return result;
 }
 
+function dependencyCoveragePath(node: SyntaxNode): string {
+  if (node.type === "cast_expression" || node.type === "type_cast_expression" || node.type === "parenthesized_expression") {
+    const expression = node.namedChildren[0];
+    if (expression) return dependencyCoveragePath(expression);
+  }
+
+  if (node.type === "binary_expression") {
+    const left = node.childForFieldName("left") ?? node.namedChildren[0];
+    const right = node.childForFieldName("right") ?? node.namedChildren[1];
+    const isOr = node.children.some((child) => child.type === "or");
+    if (isOr && left && right?.type === "false") return dependencyCoveragePath(left);
+  }
+
+  return normalizeExpressionText(node.text);
+}
+
 function dependencyPaths(node: SyntaxNode): Set<string> {
-  return new Set(dependencyExpressions(node).map((dependency) => normalizeExpressionText(dependency.text)));
+  return new Set(dependencyExpressions(node).map(dependencyCoveragePath));
 }
 
 const PURE_DERIVED_CALL = /^(?:math\.(?!random(?:seed)?$)[A-Za-z_][A-Za-z0-9_]*|string\.[A-Za-z_][A-Za-z0-9_]*|table\.(?:find|concat|clone|create|isfrozen)|(?:Color3|Vector2|Vector3|UDim|UDim2|CFrame|BrickColor|Rect|NumberRange|NumberSequence|ColorSequence|TweenInfo|Font|Ray|Region3|PhysicalProperties)\.[A-Za-z_][A-Za-z0-9_]*|[^:]+:(?:ToHSV|Lerp|Dot|Cross|FuzzyEq|Inverse|ToObjectSpace|ToWorldSpace))$/;
