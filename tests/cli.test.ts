@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { gitExecutable } from "../src/git";
 import type { ScanReport } from "../src/types";
 
 const cli = path.resolve(import.meta.dir, "../src/cli.ts");
@@ -29,15 +30,17 @@ function run(args: string[], cwd = process.cwd()): CliResult {
 }
 
 function git(cwd: string, ...args: string[]): void {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const result = spawnSync(gitExecutable, args, {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, GIT_AUTHOR_NAME: "React Luau Doctor Tests", GIT_AUTHOR_EMAIL: "doctor@example.invalid", GIT_COMMITTER_NAME: "React Luau Doctor Tests", GIT_COMMITTER_EMAIL: "doctor@example.invalid" },
+  });
   if (result.status !== 0) throw new Error(result.stderr || result.stdout || `git ${args.join(" ")} failed`);
 }
 
 function createGitRepo(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-cli-"));
   git(root, "init", "-b", "main");
-  git(root, "config", "user.email", "doctor@example.invalid");
-  git(root, "config", "user.name", "React Luau Doctor Tests");
   fs.writeFileSync(
     path.join(root, "Component.luau"),
     `local ReplicatedStorage = game:GetService("ReplicatedStorage")\nlocal React = require(ReplicatedStorage.Packages.React)\nlocal function Component(props)\n\treturn React.createElement("TextLabel", { Text = props.text })\nend\nreturn Component\n`,

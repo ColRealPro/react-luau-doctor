@@ -14,6 +14,8 @@ test("default rule severities follow the documented severity policy", () => {
     "react-luau/no-derived-state-effect": "warning",
     "react-luau/rerender-state-only-in-handlers": "warning",
     "react-luau/no-array-index-as-key": "suggestion",
+    "react-luau/prefer-binding-over-state-candidate": "suggestion",
+    "react-luau/prefer-use-ref-for-mutable-cell": "suggestion",
     "react-luau/unstable-context-value": "warning",
     "react-luau/no-effect-with-fresh-deps": "error",
     "react-luau/no-mutable-in-deps": "error",
@@ -24,16 +26,6 @@ test("default rule severities follow the documented severity policy", () => {
 
   for (const [ruleId, expectedSeverity] of Object.entries(expected)) {
     assert.equal(severity(ruleId), expectedSeverity, ruleId);
-  }
-});
-
-test("review-only and uncertain rules remain suggestions by default", () => {
-  for (const ruleId of [
-    "react-luau/no-array-index-as-key",
-    "react-luau/prefer-binding-over-state-candidate",
-    "react-luau/prefer-use-ref-for-mutable-cell",
-  ]) {
-    assert.equal(severity(ruleId), "suggestion", ruleId);
   }
 });
 

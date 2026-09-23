@@ -3,6 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import type { ScanFileInput, ScanScope } from "./types";
 
+export const gitExecutable = (() => {
+  const executable = Bun.which("git") ?? "git";
+  if (process.platform !== "win32" || !/[\\/](?:cmd|bin)[\\/]git\.exe$/i.test(executable)) return executable;
+  const direct = path.resolve(path.dirname(executable), "..", "mingw64", "bin", "git.exe");
+  return fs.existsSync(direct) ? direct : executable;
+})();
+
 export interface LineRange {
   start: number;
   end: number;
@@ -33,7 +40,7 @@ interface GitResult {
 }
 
 function runGit(cwd: string, args: string[], allowFailure = false): GitResult {
-  const result = spawnSync("git", args, {
+  const result = spawnSync(gitExecutable, args, {
     cwd,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
@@ -87,16 +94,6 @@ function verifyCommit(repoRoot: string, ref: string): string | null {
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
-function hasWorkingChanges(repoRoot: string): boolean {
-  return runGit(repoRoot, ["status", "--porcelain", "--untracked-files=no"], true).stdout.trim().length > 0;
-}
-
-function resolveOriginHead(repoRoot: string): string | null {
-  const result = runGit(repoRoot, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], true);
-  if (result.status !== 0) return null;
-  return result.stdout.trim().replace(/^refs\/remotes\//, "");
-}
-
 function mergeBase(repoRoot: string, left: string, right = "HEAD"): string | null {
   const result = runGit(repoRoot, ["merge-base", left, right], true);
   return result.status === 0 ? result.stdout.trim() : null;
@@ -104,16 +101,19 @@ function mergeBase(repoRoot: string, left: string, right = "HEAD"): string | nul
 
 export function resolveGitBase(repoRoot: string, requested?: string): string {
   if (requested) {
+    if (requested.startsWith("-")) throw new Error(`Invalid git ref: ${requested}`);
+    const base = mergeBase(repoRoot, requested);
+    if (base) return base;
     const commit = verifyCommit(repoRoot, requested);
     if (!commit) throw new Error(`Could not resolve git base ref: ${requested}`);
-    return mergeBase(repoRoot, commit) ?? commit;
+    return commit;
   }
 
   const environmentBase = process.env.GITHUB_BASE_REF?.trim();
   const candidates = [
     environmentBase ? `origin/${environmentBase}` : null,
     environmentBase ?? null,
-    resolveOriginHead(repoRoot),
+    "origin/HEAD",
     "origin/main",
     "origin/master",
     "main",
@@ -121,15 +121,24 @@ export function resolveGitBase(repoRoot: string, requested?: string): string {
   ].filter((candidate): candidate is string => Boolean(candidate));
 
   const head = verifyCommit(repoRoot, "HEAD");
+  // Read refs once. Probing each possible branch with a separate Git process is
+  // particularly expensive on Windows, including for repositories with no remote.
+  const refs = new Map<string, string>();
+  for (const line of lines(runGit(repoRoot, ["show-ref"], true).stdout)) {
+    const match = line.match(/^([0-9a-f]+) (refs\/\S+)$/i);
+    if (match) refs.set(match[2], match[1]);
+  }
   for (const candidate of [...new Set(candidates)]) {
-    const commit = verifyCommit(repoRoot, candidate);
+    const commit = refs.get(`refs/remotes/${candidate}`)
+      ?? refs.get(`refs/heads/${candidate}`)
+      ?? refs.get(`refs/tags/${candidate}`)
+      ?? refs.get(candidate);
     if (!commit || commit === head) continue;
     const base = mergeBase(repoRoot, commit);
     if (base) return base;
   }
 
-  if (hasWorkingChanges(repoRoot)) return verifyCommit(repoRoot, "HEAD") ?? "HEAD";
-  return verifyCommit(repoRoot, "HEAD") ?? "HEAD";
+  return head ?? "HEAD";
 }
 
 function readChangedFilesFile(filename: string, repoRoot: string): string[] {
@@ -216,7 +225,7 @@ function readGitObjects(repoRoot: string, objectSpecs: string[]): Map<string, st
   const values = new Map<string, string | null>();
   if (unique.length === 0) return values;
 
-  const result = spawnSync("git", ["cat-file", "--batch", "-z"], {
+  const result = spawnSync(gitExecutable, ["cat-file", "--batch", "-z"], {
     cwd: repoRoot,
     input: `${unique.join("\0")}\0`,
     encoding: null,

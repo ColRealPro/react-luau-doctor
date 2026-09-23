@@ -21,10 +21,10 @@
   "scripts": {
     "build": "bun run scripts/build.ts",
     "check": "bunx tsc -p tsconfig.json --noEmit",
-    "test": "bun run build && bun test",
+    "test": "bun run build && bun test --parallel=4",
     "doctor:example": "bun run src/cli.ts examples",
     "prepack": "bun run build && bun run check",
-    "ci": "bun run build && bun run check && bun test && bun run scripts/verify-package.ts",
+    "ci": "bun run build && bun run check && bun test --parallel=4 && bun run scripts/verify-package.ts",
     "verify:package": "bun run build && bun run scripts/verify-package.ts"
   },
   "engines": {
@@ -35,6 +35,7 @@
     "web-tree-sitter": "0.26.11"
   },
   "devDependencies": {
+    "@actions/workflow-parser": "0.3.61",
     "@types/bun": "1.4.0",
     "typescript": "5.8.3"
   },

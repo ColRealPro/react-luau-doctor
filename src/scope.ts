@@ -30,6 +30,7 @@ export interface ScopedScanOptions {
   cache?: boolean;
   parallel?: boolean;
   analysisSession?: ScanAnalysisSession;
+  onDelta?: (current: Diagnostic[], baseline: Diagnostic[]) => void;
 }
 
 function diagnosticFingerprint(diagnostic: Diagnostic): string {
@@ -134,6 +135,7 @@ export async function scanProjectWithScope(projectRoot: string, options: ScopedS
       ...sharedScanOptions(scanOptions, projectRoot, "baseline"),
       files: plan.baselineFiles,
     });
+    options.onDelta?.(current.diagnostics, baseline.diagnostics);
     const baselineSkipped = new Set(baseline.skippedFiles ?? []);
     const baselinePaths = new Set(plan.baselineFiles.map((file) => file.relativePath ?? ""));
     const comparableCurrent = current.diagnostics.filter(

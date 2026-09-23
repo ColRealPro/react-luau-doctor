@@ -350,7 +350,7 @@ function resolveCiProjectRoots(directory: string, project: string): string[] {
   });
 }
 
-async function scanForCi(settings: CiSettings, eventName: string, base?: string): Promise<ScanReport> {
+async function scanForCi(settings: CiSettings, eventName: string, base?: string, onFixed?: (count: number) => void): Promise<ScanReport> {
   const directory = path.resolve(process.cwd(), settings.directory);
   const isPullRequest = eventName === "pull_request";
   const scope: ScanScope = isPullRequest ? settings.scope : "full";
@@ -364,6 +364,7 @@ async function scanForCi(settings: CiSettings, eventName: string, base?: string)
       minSeverity: "suggestion",
       categories: config.categories,
       respectInlineDisables: config.respectInlineDisables ?? true,
+      onDelta: onFixed ? (current, baseline) => onFixed(countDifference(baseline, current)) : undefined,
     });
     reports.push({ projectRoot, report });
   }
@@ -714,8 +715,14 @@ async function manageReviewComments(
     staleComments.push({ comment, fingerprint, needsReplacement });
   }
 
-  const newLineMap = changedLineMap(directory, newBase);
-  const pullLineMap = newBase === pullBase ? newLineMap : changedLineMap(directory, pullBase);
+  const newLineMap = newCounts.size > 0 || (newBase === pullBase && replacementCounts.size > 0)
+    ? changedLineMap(directory, newBase)
+    : new Map<string, LineRange[]>();
+  const pullLineMap = newBase === pullBase
+    ? newLineMap
+    : replacementCounts.size > 0
+      ? changedLineMap(directory, pullBase)
+      : new Map<string, LineRange[]>();
   const candidates: Array<{ diagnostic: Diagnostic; replacement: boolean }> = [];
 
   for (const diagnostic of newDiagnostics) {
@@ -852,12 +859,15 @@ async function runCiJob(argv: string[]): Promise<void> {
   const isPullRequest = eventName === "pull_request" && event.pull_request !== undefined;
   const base = isPullRequest ? event.pull_request!.base.sha : undefined;
   const head = isPullRequest ? event.pull_request!.head.sha : process.env.GITHUB_SHA ?? "HEAD";
-  const report = await scanForCi(settings, eventName, base);
+  let fixedFromScan: number | undefined;
+  const report = await scanForCi(settings, eventName, base, (count) => {
+    fixedFromScan = (fixedFromScan ?? 0) + count;
+  });
   const reviewChanges: ReviewChanges = isPullRequest
     ? await findNewReviewDiagnostics(settings, eventName, event, report)
     : { diagnostics: [] };
   const fixed = isPullRequest && base
-    ? (await Promise.all(resolveCiProjectRoots(path.resolve(settings.directory), settings.project).map(root => fixedIssueCount(root, base)))).reduce((sum, count) => sum + count, 0)
+    ? (fixedFromScan ?? (await Promise.all(resolveCiProjectRoots(path.resolve(settings.directory), settings.project).map(root => fixedIssueCount(root, base)))).reduce((sum, count) => sum + count, 0))
     : 0;
   const skipped = isPullRequest && report.scannedFiles === 0 && fixed === 0;
   const effectiveBlocking = isPullRequest ? settings.blocking : "none";

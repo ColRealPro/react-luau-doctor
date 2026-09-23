@@ -4,10 +4,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { gitExecutable } from "../src/git";
 import { scanProjectWithScope } from "../src/scope";
 
 function git(cwd: string, ...args: string[]): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const result = spawnSync(gitExecutable, args, {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, GIT_AUTHOR_NAME: "React Luau Doctor Tests", GIT_AUTHOR_EMAIL: "doctor@example.invalid", GIT_COMMITTER_NAME: "React Luau Doctor Tests", GIT_COMMITTER_EMAIL: "doctor@example.invalid" },
+  });
   if (result.status !== 0) throw new Error(result.stderr || result.stdout || `git ${args.join(" ")} failed`);
   return result.stdout.trim();
 }
@@ -15,8 +20,6 @@ function git(cwd: string, ...args: string[]): string {
 function createRepo(source: string): { root: string; file: string } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-git-"));
   git(root, "init", "-b", "main");
-  git(root, "config", "user.email", "doctor@example.invalid");
-  git(root, "config", "user.name", "React Luau Doctor Tests");
   const file = path.join(root, "Component.luau");
   fs.writeFileSync(file, source);
   git(root, "add", ".");
@@ -48,7 +51,10 @@ return Component
 test("changed scope reports diagnostics introduced relative to the git base", async (t) => {
   const { root, file } = createRepo(cleanSource);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  git(root, "checkout", "-b", "feature");
   fs.writeFileSync(file, brokenSource);
+  git(root, "add", "Component.luau");
+  git(root, "commit", "-m", "introduce issue");
 
   const report = await scanProjectWithScope(root, { scope: "changed" });
   assert.equal(report.scope, "changed");
@@ -84,8 +90,6 @@ test("lines scope considers secondary evidence highlights for aggregated diagnos
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-highlight-lines-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   git(root, "init", "-b", "main");
-  git(root, "config", "user.email", "doctor@example.invalid");
-  git(root, "config", "user.name", "React Luau Doctor Tests");
 
   fs.writeFileSync(path.join(root, "MemoChild.luau"), `local React = require(script.Parent.React)
 local MemoChild = React.memo(function(props)
@@ -147,8 +151,6 @@ test("changed scope batch-loads baseline files whose paths contain spaces", asyn
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-space-path-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   git(root, "init", "-b", "main");
-  git(root, "config", "user.email", "doctor@example.invalid");
-  git(root, "config", "user.name", "React Luau Doctor Tests");
   const file = path.join(root, "Component With Space.luau");
   fs.writeFileSync(file, cleanSource);
   git(root, "add", ".");
