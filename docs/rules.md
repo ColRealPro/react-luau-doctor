@@ -1,6 +1,6 @@
 # Rule catalog
 
-Doctor currently includes 35 rules. This table lists their default severities; individual findings can be downgraded when evidence is uncertain. Explicit configuration overrides the severity for every finding from that rule.
+Doctor currently includes 36 rules. This table lists their default severities; individual findings can be downgraded when evidence is uncertain. Explicit configuration overrides the severity for every finding from that rule.
 
 | Rule | Default | Category | Checks |
 | --- | --- | --- | --- |
@@ -36,6 +36,7 @@ Doctor currently includes 35 rules. This table lists their default severities; i
 | `react-luau/no-task-spawn-in-render` | error | Correctness | Do not schedule asynchronous work during render. |
 | `react-luau/no-side-effects-in-render` | error | Correctness | Do not create Instances, start tweens, subscribe, or perform other externally observable side effects during component render. |
 | `react-luau/no-create-root-in-render` | error | Roblox | Do not create ReactRoblox roots during component render. |
+| `react-luau/no-static-name-prop` | warning | Correctness | Use a child table key instead of a static `Name` prop on a Roblox instance; dynamic names are allowed. |
 | `react-luau/no-prop-mutation` | error | Correctness | Component props should be treated as immutable inputs. |
 | `react-luau/no-array-index-as-key` | suggestion | Correctness | Review dynamic React children that use their current array position as identity. |
 | `react-luau/unstable-context-value` | warning | Performance | Avoid recreating context value tables on every provider render when identity matters. |

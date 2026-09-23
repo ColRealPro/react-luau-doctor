@@ -11,6 +11,7 @@ import { noArrayIndexAsKey } from "./no-array-index-as-key";
 import { noCreateContextInRender } from "./no-create-context-in-render";
 import { noNestedComponentDefinition } from "./no-nested-component-definition";
 import { noPropMutation } from "./no-prop-mutation";
+import { noStaticNameProp } from "./no-static-name-prop";
 import { noRandomKey } from "./no-random-key";
 import { noSetStateInRender } from "./no-set-state-in-render";
 import { parseErrors } from "./parse-errors";
@@ -76,6 +77,7 @@ export const rules: RuleDefinition[] = [
   noSideEffectsInRender,
   noCreateRootInRender,
   noPropMutation,
+  noStaticNameProp,
   noArrayIndexAsKey,
   unstableContextValue,
 ];

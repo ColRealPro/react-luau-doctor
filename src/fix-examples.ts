@@ -355,6 +355,17 @@ end`,
 root:render(element)`,
     note: "Create and own roots outside component render. A component should not imperatively create another React root while rendering.",
   },
+  "react-luau/no-static-name-prop": {
+    before: `return React.createElement("Frame", {}, {
+\tChild = React.createElement("TextLabel", {
+\t\tName = "Label",
+\t}),
+})`,
+    after: `return React.createElement("Frame", {}, {
+\tLabel = React.createElement("TextLabel"),
+})`,
+    note: "The child table key names a static instance. Keep Name in props when the name must change dynamically.",
+  },
   "react-luau/no-prop-mutation": {
     before: `props.value = normalize(props.value)`,
     after: `local value = normalize(props.value)`,

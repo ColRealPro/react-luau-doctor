@@ -24,6 +24,35 @@ test("finds React-Luau and Roblox-specific issues", async () => {
   assert.ok(ids.has("react-luau/no-array-index-as-key"));
 });
 
+test("reports static Name props on named Roblox children but allows dynamic names", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-child-name-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "Names.luau"), `local React = require(script.Parent.React)
+local createElement = React.createElement
+local function Names(props)
+  return React.createElement("Frame", {}, {
+    First = React.createElement("TextLabel", { Name = "First" }),
+    Second = createElement("Frame", { ["Name"] = 'Second' }),
+    Third = React.createElement("Frame", { Name = ("Third") }),
+    Fourth = React.createElement("Frame", { Name = "Four" .. "th" }),
+    ["Fifth"] = React.createElement("Frame", { Name = "Fifth" }),
+    Dynamic = React.createElement("Frame", { Name = props.name }),
+    DynamicCapitalized = React.createElement("Frame", { Name = props.Name }),
+    Computed = React.createElement("Frame", { Name = getName() }),
+    Interpolated = React.createElement("Frame", { Name = \`Item{props.id}\` }),
+    Concatenated = React.createElement("Frame", { Name = "Item" .. props.id }),
+    Custom = React.createElement(Widget, { Name = "Widget" }),
+  })
+end
+local Root = React.createElement("Frame", { Name = "Root" })
+return Names
+`);
+
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter((item) => item.rule === "react-luau/no-static-name-prop");
+  assert.deepEqual(diagnostics.map((item) => item.location.line), [5, 6, 7, 8, 9]);
+});
+
 test("accepts binding-driven animation with owned cleanup", async () => {
   const ids = await ruleIds("good-component.luau");
   assert.equal(ids.has("react-luau/prefer-binding-over-state"), false);
