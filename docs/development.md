@@ -17,23 +17,35 @@ bun run build
 
 ## Source layout
 
-| Path | Responsibility |
-| --- | --- |
-| `src/cli.ts` | Commands, options, explanation output, exit gates. |
-| `src/scanner.ts` | File scans, rule execution, diagnostic construction. |
-| `src/ast/` | Syntax traversal and file-level React evidence. |
-| `src/project-model.ts` | Cross-file React relationships. |
-| `src/project-effects.ts` | Source-visible effects and propagation. |
-| `src/rules/` | Rule definitions and repair guidance. |
-| `src/git.ts`, `src/scope.ts` | Git content selection and comparisons. |
-| `src/ci.ts` | Generated workflows, npm version pinning, GitHub reporting. |
-| `vendor/` | Luau parser grammar and its license. |
+| Path                         | Responsibility                                              |
+| ---------------------------- | ----------------------------------------------------------- |
+| `src/cli.ts`                 | Commands, options, explanation output, exit gates.          |
+| `src/scanner.ts`             | File scans, rule execution, diagnostic construction.        |
+| `src/ast/`                   | Syntax traversal and file-level React evidence.             |
+| `src/project-model.ts`       | Cross-file React relationships.                             |
+| `src/project-effects.ts`     | Source-visible effects and propagation.                     |
+| `src/rules/`                 | Rule definitions and repair guidance.                       |
+| `src/lsp/`                   | Editor session, diagnostics, and the project worker.        |
+| `editors/vscode/`            | VS Code client and extension package.                       |
+| `src/git.ts`, `src/scope.ts` | Git content selection and comparisons.                      |
+| `src/ci.ts`                  | Generated workflows, npm version pinning, GitHub reporting. |
+| `vendor/`                    | Luau parser grammar and its license.                        |
 
 The build bundles `src/cli.ts` into `dist/cli.js`, leaving runtime dependencies external. `dist/` exists for the npm distribution, where the package `bin` points at `dist/cli.js`; it is not a source-controlled CI runtime. The parser locates its grammar relative to the published package layout.
 
+## Maintain editor diagnostics
+
+The editor's live rule set is an explicit allowlist in `src/lsp/live-rules.ts`. Adding a rule does not make it live. Keep rules that need current project or source-effect information in deep analysis. An edit may parse its current file, but must not discover project files or rebuild project effects. Project refreshes run through one persistent worker, and the editor cache has a separate namespace from the CLI cache.
+
+Put reusable presentation text in a rule's `guidance` and finding-specific text on its `DiagnosticInput`. `src/presentation.ts` applies the fallbacks for both `why` and the editor. Keep rule wording and fix examples out of the LSP renderer.
+
+Unsaved deep diagnostics refresh after a longer idle pause using all open buffers as overlays. Continuous typing only resets the timer. The worker still runs one project refresh at a time. Incomplete syntax does not start an unsaved deep refresh.
+
+Full-document LSP synchronization is intentional until profiling shows parsing is a meaningful latency cost. Run `bun run benchmark:lsp` on representative files and compare installed-extension latency and CPU use before changing parsing or worker behavior. Build the Node server with `bun run build:lsp`. Package the VS Code extension with its production dependencies so both Tree-sitter WASM files remain available.
+
 ## Change a rule
 
-Add a minimal failing fixture and a valid counterpart. Test the intended diagnostic, location, default severity, and help. Cover explicit severity overrides when a rule supplies confidence-based severities. Register new rules in `src/rules/index.ts`, add a before/after repair example in `src/fix-examples.ts`, and update the catalog in `docs/rules.md`. Tests require an example for every rule and parse each suggested snippet.
+Add a minimal failing fixture and a valid counterpart. Test the intended diagnostic, location, default severity, and help. Cover explicit severity overrides when a rule supplies confidence-based severities. Register new rules in `src/rules/index.ts`, add reusable guidance to the rule and a before/after example in `src/rules/examples.ts`, and update the catalog in `docs/rules.md`. Tests require an example for every rule and parse each suggested snippet.
 
 Check a proposed repair in Roblox where runtime behavior matters. Tests of syntax alone cannot validate UI behavior or performance.
 

@@ -20,6 +20,8 @@
   ],
   "scripts": {
     "build": "bun run scripts/build.ts",
+    "build:lsp": "bun run scripts/build-lsp.ts",
+    "benchmark:lsp": "bun run scripts/benchmark-lsp.ts",
     "check": "bunx tsc -p tsconfig.json --noEmit",
     "test": "bun run build && bun test --parallel=4",
     "doctor:example": "bun run src/cli.ts examples",
@@ -37,6 +39,9 @@
   "devDependencies": {
     "@actions/workflow-parser": "0.3.61",
     "@types/bun": "1.4.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "vscode-languageserver": "^10.1.2",
     "typescript": "5.8.3"
   },
   "keywords": [

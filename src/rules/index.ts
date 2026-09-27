@@ -1,11 +1,14 @@
 import type { RuleDefinition } from "../types";
+import { fixExampleForRule } from "./examples";
 import { effectNeedsCleanup } from "./effect-needs-cleanup";
+
 import {
   noDerivedStateEffect,
   noEffectWithFreshDeps,
   noMutableInDeps,
   noSelfUpdatingEffect,
 } from "./effect-state-rules";
+
 import { exhaustiveDeps } from "./exhaustive-deps";
 import { noArrayIndexAsKey } from "./no-array-index-as-key";
 import { noCreateContextInRender } from "./no-create-context-in-render";
@@ -15,6 +18,7 @@ import { noStaticNameProp } from "./no-static-name-prop";
 import { noRandomKey } from "./no-random-key";
 import { noSetStateInRender } from "./no-set-state-in-render";
 import { parseErrors } from "./parse-errors";
+
 import {
   preferUseRefForMutableCell,
   rerenderHighFrequencyState,
@@ -25,15 +29,23 @@ import {
   rerenderUnnecessaryUseMemo,
   rerenderUnstableMemoProps,
 } from "./performance-rules";
-import { preferBindingOverState, preferBindingOverStateCandidate } from "./prefer-binding-over-state";
+
+import {
+  preferBindingOverState,
+  preferBindingOverStateCandidate,
+} from "./prefer-binding-over-state";
+
 import { noCreateRootInRender } from "./react-roblox-lifecycle";
 import { noRefCurrentInRender } from "./ref-rules";
+
 import {
   noSideEffectsInRender,
   noTaskSpawnInRender,
   noYieldInRender,
 } from "./render-side-effects";
+
 import { rulesOfHooks } from "./rules-of-hooks";
+
 import {
   noDirectStateMutation,
   rerenderFunctionalSetstate,
@@ -41,9 +53,10 @@ import {
   rerenderLazyStateInit,
   rerenderStateOnlyInHandlers,
 } from "./state-performance";
+
 import { unstableContextValue } from "./unstable-context-value";
 
-export const rules: RuleDefinition[] = [
+const definitions: RuleDefinition[] = [
   parseErrors,
   rulesOfHooks,
   exhaustiveDeps,
@@ -81,5 +94,14 @@ export const rules: RuleDefinition[] = [
   noArrayIndexAsKey,
   unstableContextValue,
 ];
+
+export const rules: RuleDefinition[] = definitions.map((rule) => ({
+  ...rule,
+
+  guidance: {
+    ...rule.guidance,
+    example: rule.guidance?.example ?? fixExampleForRule(rule.id),
+  },
+}));
 
 export const rulesById = new Map(rules.map((rule) => [rule.id, rule]));

@@ -22,4 +22,5 @@ export interface SyntaxNode {
 
 export interface SyntaxTree {
   rootNode: SyntaxNode;
+  delete?(): void;
 }

@@ -6,6 +6,8 @@ React-Luau Doctor checks `.lua` and `.luau` source files for hook mistakes, miss
 
 This beta CLI runs with Bun and analyzes React-Luau source on your computer or CI runner. It does not run inside Roblox Studio, analyze JavaScript/TypeScript React, or edit your code automatically.
 
+The VS Code extension is not on the Marketplace yet, and VS Code is the only bundled editor integration. See [local VS Code setup](docs/lsp.md). Using the installed extension does not require Bun.
+
 ## Get started
 
 React-Luau Doctor requires [Bun](https://bun.com/) 1.4.0 or newer. Run it directly from npm with either Bun or npm:

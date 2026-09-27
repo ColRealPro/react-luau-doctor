@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CachedSourceEffectModule } from "./project-effects";
+
 import type {
   Diagnostic,
   ProjectModel,
@@ -33,12 +34,38 @@ interface SerializedSourceEffectSummary {
 
 interface SerializedProjectModel {
   memoizedModules: Array<[string, "shallow" | "custom"]>;
-  bindingCandidateHooks: Array<[string, ProjectModel["bindingCandidateHooks"] extends Map<string, infer V> ? V : never]>;
-  externalCallbackModules: Array<[string, ProjectModel["externalCallbackModules"] extends Map<string, infer V> ? V : never]>;
+
+  bindingCandidateHooks: Array<
+    [
+      string,
+      ProjectModel["bindingCandidateHooks"] extends Map<string, infer V>
+        ? V
+        : never,
+    ]
+  >;
+
+  externalCallbackModules: Array<
+    [
+      string,
+      ProjectModel["externalCallbackModules"] extends Map<string, infer V>
+        ? V
+        : never,
+    ]
+  >;
+
   bindingApiAlternatives: Array<[string, string]>;
   bindingCompatibleComponentProps: Array<[string, string[]]>;
   staticIterationTables: Array<[string, string[]]>;
-  conditionalHookModes: Array<[string, ProjectModel["conditionalHookModes"] extends Map<string, infer V> ? V : never]>;
+
+  conditionalHookModes: Array<
+    [
+      string,
+      ProjectModel["conditionalHookModes"] extends Map<string, infer V>
+        ? V
+        : never,
+    ]
+  >;
+
   reactHookModules: Array<[string, boolean]>;
   sourceEffects: Array<[string, SerializedSourceEffectSummary]>;
 }
@@ -65,6 +92,7 @@ interface ProjectCachePayload {
 }
 
 export interface ProjectCacheSession {
+  namespace: string;
   enabled: boolean;
   root: string;
   filename: string | null;
@@ -84,10 +112,15 @@ function hashText(value: string): string {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-let analyzerHash: string | null = null;
+const analyzerHashes = new Map<string, string>();
 
-function hashAnalyzerFile(hash: crypto.Hash, root: string, filename: string): void {
+function hashAnalyzerFile(
+  hash: crypto.Hash,
+  root: string,
+  filename: string,
+): void {
   if (!fs.existsSync(filename)) return;
+
   hash.update(normalizeRelative(path.relative(root, filename)));
   hash.update("\0");
   hash.update(fs.readFileSync(filename));
@@ -96,25 +129,43 @@ function hashAnalyzerFile(hash: crypto.Hash, root: string, filename: string): vo
 
 function sourceFiles(directory: string): string[] {
   if (!fs.existsSync(directory)) return [];
+
   const files: string[] = [];
+
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
     const filename = path.join(directory, entry.name);
+
     if (entry.isDirectory()) files.push(...sourceFiles(filename));
     else if (entry.isFile() && entry.name.endsWith(".ts")) files.push(filename);
   }
+
   return files;
 }
 
-function currentAnalyzerHash(): string {
-  if (analyzerHash) return analyzerHash;
+function currentAnalyzerHash(namespace = "cli"): string {
+  const existing = analyzerHashes.get(namespace);
+
+  if (existing) return existing;
 
   const hash = crypto.createHash("sha256");
-  let packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+  let packageRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+  );
+
   let bundledCli: string | null = null;
 
   try {
-    const entrypoint = process.argv[1] ? fs.realpathSync(process.argv[1]) : null;
-    if (entrypoint && path.basename(entrypoint) === "cli.js" && path.basename(path.dirname(entrypoint)) === "dist") {
+    const entrypoint = process.argv[1]
+      ? fs.realpathSync(process.argv[1])
+      : null;
+
+    if (
+      entrypoint &&
+      path.basename(entrypoint) === "cli.js" &&
+      path.basename(path.dirname(entrypoint)) === "dist"
+    ) {
       bundledCli = entrypoint;
       packageRoot = path.dirname(path.dirname(entrypoint));
     }
@@ -122,9 +173,18 @@ function currentAnalyzerHash(): string {
     // Source execution and tests may not have a filesystem-backed CLI entrypoint.
   }
 
-  if (bundledCli) {
+  if (namespace !== "cli") {
+    const runtimeDir = path.dirname(fileURLToPath(import.meta.url));
+    hashAnalyzerFile(hash, runtimeDir, path.join(runtimeDir, "server.js"));
+    hashAnalyzerFile(hash, runtimeDir, path.join(runtimeDir, "deep-worker.js"));
+  } else if (bundledCli) {
     hashAnalyzerFile(hash, packageRoot, bundledCli);
-    hashAnalyzerFile(hash, packageRoot, path.join(path.dirname(bundledCli), "scan-worker.js"));
+
+    hashAnalyzerFile(
+      hash,
+      packageRoot,
+      path.join(path.dirname(bundledCli), "scan-worker.js"),
+    );
   } else {
     for (const filename of sourceFiles(path.join(packageRoot, "src")).sort()) {
       hashAnalyzerFile(hash, packageRoot, filename);
@@ -132,13 +192,22 @@ function currentAnalyzerHash(): string {
   }
 
   hashAnalyzerFile(hash, packageRoot, path.join(packageRoot, "package.json"));
-  hashAnalyzerFile(hash, packageRoot, path.join(packageRoot, "vendor", "tree-sitter-luau.wasm"));
-  analyzerHash = hash.digest("hex");
-  return analyzerHash;
+
+  hashAnalyzerFile(
+    hash,
+    packageRoot,
+    path.join(packageRoot, "vendor", "tree-sitter-luau.wasm"),
+  );
+
+  const result = hash.digest("hex");
+  analyzerHashes.set(namespace, result);
+
+  return result;
 }
 
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
+
   if (value && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
@@ -146,6 +215,7 @@ function stableValue(value: unknown): unknown {
         .map(([key, entry]) => [key, stableValue(entry)]),
     );
   }
+
   return value;
 }
 
@@ -154,29 +224,55 @@ export function stableCacheKey(value: unknown): string {
 }
 
 export function cacheBaseDirectory(): string {
-  if (process.env.REACT_LUAU_DOCTOR_CACHE_DIR) return path.resolve(process.env.REACT_LUAU_DOCTOR_CACHE_DIR);
+  if (process.env.REACT_LUAU_DOCTOR_CACHE_DIR)
+    return path.resolve(process.env.REACT_LUAU_DOCTOR_CACHE_DIR);
+
   if (process.platform === "win32") {
-    const base = process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local");
+    const base =
+      process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local");
+
     return path.join(base, "react-luau-doctor", "Cache");
   }
-  if (process.platform === "darwin") return path.join(os.homedir(), "Library", "Caches", "react-luau-doctor");
-  return path.join(process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache"), "react-luau-doctor");
+
+  if (process.platform === "darwin")
+    return path.join(os.homedir(), "Library", "Caches", "react-luau-doctor");
+
+  return path.join(
+    process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache"),
+    "react-luau-doctor",
+  );
 }
 
-function projectCacheFilename(root: string): string {
-  const canonical = process.platform === "win32" ? path.resolve(root).toLowerCase() : path.resolve(root);
-  return path.join(cacheBaseDirectory(), `project-${hashText(canonical).slice(0, 24)}.json`);
+function projectCacheFilename(root: string, namespace = "cli"): string {
+  const canonical =
+    process.platform === "win32"
+      ? path.resolve(root).toLowerCase()
+      : path.resolve(root);
+
+  return path.join(
+    cacheBaseDirectory(),
+    `${namespace === "cli" ? "project" : `project-${namespace}`}-${hashText(canonical).slice(0, 24)}.json`,
+  );
 }
 
-function readPayload(filename: string, root: string): ProjectCachePayload | null {
+function readPayload(
+  filename: string,
+  root: string,
+  namespace = "cli",
+): ProjectCachePayload | null {
   try {
-    const parsed = JSON.parse(fs.readFileSync(filename, "utf8")) as ProjectCachePayload;
+    const parsed = JSON.parse(
+      fs.readFileSync(filename, "utf8"),
+    ) as ProjectCachePayload;
+
     if (
-      parsed.analyzerHash !== currentAnalyzerHash() ||
+      parsed.analyzerHash !== currentAnalyzerHash(namespace) ||
       path.resolve(parsed.root) !== path.resolve(root) ||
       !parsed.files ||
       typeof parsed.fingerprint !== "string"
-    ) return null;
+    )
+      return null;
+
     return parsed;
   } catch {
     return null;
@@ -195,7 +291,10 @@ function writePayload(filename: string, payload: ProjectCachePayload): void {
   }
 }
 
-function fileStateMatches(previous: CachedFileState | undefined, stat: fs.Stats): boolean {
+function fileStateMatches(
+  previous: CachedFileState | undefined,
+  stat: fs.Stats,
+): boolean {
   return Boolean(
     previous &&
     previous.size === stat.size &&
@@ -210,40 +309,60 @@ export function prepareProjectCache(
   candidates: ScanFileInput[],
   enabled = true,
   onProgress?: (current: number, total: number, file?: string) => void,
+  namespace = "cli",
 ): ProjectCacheSession {
-  const cacheEnabled = enabled && process.env.REACT_LUAU_DOCTOR_DISABLE_CACHE !== "1";
-  const filename = cacheEnabled ? projectCacheFilename(root) : null;
-  const previous = filename ? readPayload(filename, root) : null;
+  const cacheEnabled =
+    enabled && process.env.REACT_LUAU_DOCTOR_DISABLE_CACHE !== "1";
+
+  const filename = cacheEnabled ? projectCacheFilename(root, namespace) : null;
+  const previous = filename ? readPayload(filename, root, namespace) : null;
   const files: Record<string, CachedFileState> = {};
   const sources = new Map<string, string>();
   const fingerprintParts: string[] = [];
 
   onProgress?.(0, candidates.length);
+
   for (let index = 0; index < candidates.length; index += 1) {
     const candidate = candidates[index];
-    const relativePath = normalizeRelative(candidate.relativePath ?? path.relative(root, candidate.absolutePath));
+
+    const relativePath = normalizeRelative(
+      candidate.relativePath ?? path.relative(root, candidate.absolutePath),
+    );
+
     const previousState = previous?.files[relativePath];
     let state: CachedFileState;
 
     if (candidate.source !== undefined) {
       const hash = hashText(candidate.source);
       sources.set(relativePath, candidate.source);
-      state = { hash, isReactFile: previousState?.hash === hash ? previousState.isReactFile : undefined };
+
+      state = {
+        hash,
+
+        isReactFile:
+          previousState?.hash === hash ? previousState.isReactFile : undefined,
+      };
     } else {
       try {
         const stat = fs.statSync(candidate.absolutePath);
+
         if (fileStateMatches(previousState, stat)) {
           state = { ...previousState! };
         } else {
           const source = fs.readFileSync(candidate.absolutePath, "utf8");
           const hash = hashText(source);
           sources.set(relativePath, source);
+
           state = {
             size: stat.size,
             mtimeMs: stat.mtimeMs,
             ctimeMs: stat.ctimeMs,
             hash,
-            isReactFile: previousState?.hash === hash ? previousState.isReactFile : undefined,
+
+            isReactFile:
+              previousState?.hash === hash
+                ? previousState.isReactFile
+                : undefined,
           };
         }
       } catch {
@@ -258,7 +377,9 @@ export function prepareProjectCache(
   }
 
   const fingerprint = hashText(fingerprintParts.join("\0"));
+
   return {
+    namespace,
     enabled: cacheEnabled,
     root,
     filename,
@@ -270,15 +391,27 @@ export function prepareProjectCache(
   };
 }
 
-export function materializeProjectCandidates(session: ProjectCacheSession, candidates: ScanFileInput[]): ScanFileInput[] {
+export function materializeProjectCandidates(
+  session: ProjectCacheSession,
+  candidates: ScanFileInput[],
+): ScanFileInput[] {
   return candidates.map((candidate) => {
     if (candidate.source !== undefined) return candidate;
-    const relativePath = normalizeRelative(candidate.relativePath ?? path.relative(session.root, candidate.absolutePath));
+
+    const relativePath = normalizeRelative(
+      candidate.relativePath ??
+        path.relative(session.root, candidate.absolutePath),
+    );
+
     const cachedSource = session.sources.get(relativePath);
-    if (cachedSource !== undefined) return { ...candidate, relativePath, source: cachedSource };
+
+    if (cachedSource !== undefined)
+      return { ...candidate, relativePath, source: cachedSource };
+
     try {
       const source = fs.readFileSync(candidate.absolutePath, "utf8");
       session.sources.set(relativePath, source);
+
       return { ...candidate, relativePath, source };
     } catch {
       return { ...candidate, relativePath };
@@ -286,72 +419,136 @@ export function materializeProjectCandidates(session: ProjectCacheSession, candi
   });
 }
 
-function serializeSourceEffect(summary: SourceEffectModuleSummary): SerializedSourceEffectSummary {
+function serializeSourceEffect(
+  summary: SourceEffectModuleSummary,
+): SerializedSourceEffectSummary {
   return {
     effectfulMembers: [...summary.effectfulMembers].sort(),
     effectfulExport: summary.effectfulExport,
     mutatingMembers: [...summary.mutatingMembers].sort(),
-    mutatingExportParameters: [...summary.mutatingExportParameters].sort((a, b) => a - b),
+
+    mutatingExportParameters: [...summary.mutatingExportParameters].sort(
+      (a, b) => a - b,
+    ),
+
     mutatingMemberParameters: [...summary.mutatingMemberParameters]
-      .map(([name, indexes]) => [name, [...indexes].sort((a, b) => a - b)] as [string, number[]])
+      .map(
+        ([name, indexes]) =>
+          [name, [...indexes].sort((a, b) => a - b)] as [string, number[]],
+      )
       .sort(([left], [right]) => left.localeCompare(right)),
+
     localMutatingParameters: [...summary.localMutatingParameters]
-      .map(([name, indexes]) => [name, [...indexes].sort((a, b) => a - b)] as [string, number[]])
+      .map(
+        ([name, indexes]) =>
+          [name, [...indexes].sort((a, b) => a - b)] as [string, number[]],
+      )
       .sort(([left], [right]) => left.localeCompare(right)),
+
     instanceFactories: [...summary.instanceFactories].sort(),
   };
 }
 
-function deserializeSourceEffect(summary: SerializedSourceEffectSummary): SourceEffectModuleSummary {
+function deserializeSourceEffect(
+  summary: SerializedSourceEffectSummary,
+): SourceEffectModuleSummary {
   return {
     effectfulMembers: new Set(summary.effectfulMembers),
     effectfulExport: summary.effectfulExport,
     mutatingMembers: new Set(summary.mutatingMembers ?? []),
     mutatingExportParameters: new Set(summary.mutatingExportParameters ?? []),
+
     mutatingMemberParameters: new Map(
-      (summary.mutatingMemberParameters ?? []).map(([name, indexes]) => [name, new Set(indexes)]),
+      (summary.mutatingMemberParameters ?? []).map(([name, indexes]) => [
+        name,
+        new Set(indexes),
+      ]),
     ),
+
     localMutatingParameters: new Map(
-      (summary.localMutatingParameters ?? []).map(([name, indexes]) => [name, new Set(indexes)]),
+      (summary.localMutatingParameters ?? []).map(([name, indexes]) => [
+        name,
+        new Set(indexes),
+      ]),
     ),
+
     instanceFactories: new Set(summary.instanceFactories),
   };
 }
 
-export function serializeProjectModel(project: ProjectModel): SerializedProjectModel {
+export function serializeProjectModel(
+  project: ProjectModel,
+): SerializedProjectModel {
   return {
     memoizedModules: [...project.memoizedModules],
     bindingCandidateHooks: [...project.bindingCandidateHooks],
     externalCallbackModules: [...project.externalCallbackModules],
     bindingApiAlternatives: [...project.bindingApiAlternatives],
-    bindingCompatibleComponentProps: [...project.bindingCompatibleComponentProps].map(([key, value]) => [key, [...value].sort()]),
-    staticIterationTables: [...project.staticIterationTables].map(([key, value]) => [key, [...value].sort()]),
+
+    bindingCompatibleComponentProps: [
+      ...project.bindingCompatibleComponentProps,
+    ].map(([key, value]) => [key, [...value].sort()]),
+
+    staticIterationTables: [...project.staticIterationTables].map(
+      ([key, value]) => [key, [...value].sort()],
+    ),
+
     conditionalHookModes: [...project.conditionalHookModes],
     reactHookModules: [...project.reactHookModules],
-    sourceEffects: [...project.sourceEffects].map(([key, value]) => [key, serializeSourceEffect(value)]),
+
+    sourceEffects: [...project.sourceEffects].map(([key, value]) => [
+      key,
+      serializeSourceEffect(value),
+    ]),
   };
 }
 
-export function deserializeProjectModel(project: SerializedProjectModel): ProjectModel {
+export function deserializeProjectModel(
+  project: SerializedProjectModel,
+): ProjectModel {
   return {
     memoizedModules: new Map(project.memoizedModules),
     bindingCandidateHooks: new Map(project.bindingCandidateHooks),
     externalCallbackModules: new Map(project.externalCallbackModules),
     bindingApiAlternatives: new Map(project.bindingApiAlternatives),
-    bindingCompatibleComponentProps: new Map(project.bindingCompatibleComponentProps.map(([key, value]) => [key, new Set(value)])),
-    staticIterationTables: new Map(project.staticIterationTables.map(([key, value]) => [key, new Set(value)])),
+
+    bindingCompatibleComponentProps: new Map(
+      project.bindingCompatibleComponentProps.map(([key, value]) => [
+        key,
+        new Set(value),
+      ]),
+    ),
+
+    staticIterationTables: new Map(
+      project.staticIterationTables.map(([key, value]) => [
+        key,
+        new Set(value),
+      ]),
+    ),
+
     conditionalHookModes: new Map(project.conditionalHookModes),
     reactHookModules: new Map(project.reactHookModules ?? []),
-    sourceEffects: new Map(project.sourceEffects.map(([key, value]) => [key, deserializeSourceEffect(value)])),
+
+    sourceEffects: new Map(
+      project.sourceEffects.map(([key, value]) => [
+        key,
+        deserializeSourceEffect(value),
+      ]),
+    ),
   };
 }
 
-export function cachedEffectModules(session: ProjectCacheSession): Record<string, CachedSourceEffectModule> {
+export function cachedEffectModules(
+  session: ProjectCacheSession,
+): Record<string, CachedSourceEffectModule> {
   return session.previous?.effectModules ?? {};
 }
 
-export function previousProjectModel(session: ProjectCacheSession): ProjectModel | null {
+export function previousProjectModel(
+  session: ProjectCacheSession,
+): ProjectModel | null {
   if (!session.previous?.projectModel) return null;
+
   try {
     return deserializeProjectModel(session.previous.projectModel);
   } catch {
@@ -361,6 +558,7 @@ export function previousProjectModel(session: ProjectCacheSession): ProjectModel
 
 export function projectModelFeatureKey(project: ProjectModel): string {
   const serialized = serializeProjectModel(project);
+
   return stableCacheKey({
     memoizedModules: serialized.memoizedModules,
     bindingCandidateHooks: serialized.bindingCandidateHooks,
@@ -373,8 +571,11 @@ export function projectModelFeatureKey(project: ProjectModel): string {
   });
 }
 
-export function cachedProjectModel(session: ProjectCacheSession): ProjectModel | null {
+export function cachedProjectModel(
+  session: ProjectCacheSession,
+): ProjectModel | null {
   if (!session.exact || !session.previous?.projectModel) return null;
+
   try {
     return deserializeProjectModel(session.previous.projectModel);
   } catch {
@@ -382,9 +583,14 @@ export function cachedProjectModel(session: ProjectCacheSession): ProjectModel |
   }
 }
 
-export function previousCachedReport(session: ProjectCacheSession, key: string): CachedReportData | null {
+export function previousCachedReport(
+  session: ProjectCacheSession,
+  key: string,
+): CachedReportData | null {
   const report = session.previous?.reports?.[key];
+
   if (!report) return null;
+
   return {
     scannedFiles: report.scannedFiles,
     candidateFiles: report.candidateFiles,
@@ -392,10 +598,16 @@ export function previousCachedReport(session: ProjectCacheSession, key: string):
   };
 }
 
-export function cachedReport(session: ProjectCacheSession, key: string): CachedReportData | null {
+export function cachedReport(
+  session: ProjectCacheSession,
+  key: string,
+): CachedReportData | null {
   if (!session.exact) return null;
+
   const report = session.previous?.reports?.[key];
+
   if (!report) return null;
+
   return {
     scannedFiles: report.scannedFiles,
     candidateFiles: report.candidateFiles,
@@ -405,43 +617,74 @@ export function cachedReport(session: ProjectCacheSession, key: string): CachedR
 
 export function cacheHasSameFileSet(session: ProjectCacheSession): boolean {
   if (!session.previous) return false;
+
   const previousFiles = Object.keys(session.previous.files).sort();
   const currentFiles = Object.keys(session.files).sort();
-  return previousFiles.length === currentFiles.length && previousFiles.every((file, index) => file === currentFiles[index]);
+
+  return (
+    previousFiles.length === currentFiles.length &&
+    previousFiles.every((file, index) => file === currentFiles[index])
+  );
 }
 
 export function changedProjectFiles(session: ProjectCacheSession): string[] {
   if (!session.previous) return Object.keys(session.files);
-  const all = new Set([...Object.keys(session.previous.files), ...Object.keys(session.files)]);
-  return [...all].filter((file) => session.previous?.files[file]?.hash !== session.files[file]?.hash).sort();
+
+  const all = new Set([
+    ...Object.keys(session.previous.files),
+    ...Object.keys(session.files),
+  ]);
+
+  return [...all]
+    .filter(
+      (file) =>
+        session.previous?.files[file]?.hash !== session.files[file]?.hash,
+    )
+    .sort();
 }
 
-export function knownReactFile(session: ProjectCacheSession, relativePath: string): boolean | undefined {
+export function knownReactFile(
+  session: ProjectCacheSession,
+  relativePath: string,
+): boolean | undefined {
   return session.files[normalizeRelative(relativePath)]?.isReactFile;
 }
 
-export function recordReactFile(session: ProjectCacheSession, relativePath: string, isReactFile: boolean): void {
+export function recordReactFile(
+  session: ProjectCacheSession,
+  relativePath: string,
+  isReactFile: boolean,
+): void {
   const state = session.files[normalizeRelative(relativePath)];
+
   if (state) state.isReactFile = isReactFile;
 }
 
 export function saveProjectCache(
   session: ProjectCacheSession,
   project: ProjectModel,
-  effectModules: Record<string, CachedSourceEffectModule> = session.previous?.effectModules ?? {},
+  effectModules: Record<string, CachedSourceEffectModule> = session.previous
+    ?.effectModules ?? {},
   reportKey?: string,
   report?: CachedReportData,
 ): void {
   if (!session.enabled || !session.filename) return;
-  const reports: Record<string, CachedReportEntry> = session.exact ? { ...(session.previous?.reports ?? {}) } : {};
-  if (reportKey && report) reports[reportKey] = { ...report, lastUsedAt: Date.now() };
+
+  const reports: Record<string, CachedReportEntry> = session.exact
+    ? { ...(session.previous?.reports ?? {}) }
+    : {};
+
+  if (reportKey && report)
+    reports[reportKey] = { ...report, lastUsedAt: Date.now() };
+
   const prunedReports = Object.fromEntries(
     Object.entries(reports)
       .sort(([, left], [, right]) => right.lastUsedAt - left.lastUsedAt)
       .slice(0, MAX_CACHED_REPORTS),
   );
+
   writePayload(session.filename, {
-    analyzerHash: currentAnalyzerHash(),
+    analyzerHash: currentAnalyzerHash(session.namespace),
     root: path.resolve(session.root),
     fingerprint: session.fingerprint,
     files: session.files,
@@ -452,6 +695,6 @@ export function saveProjectCache(
   });
 }
 
-export function projectCachePath(root: string): string {
-  return projectCacheFilename(root);
+export function projectCachePath(root: string, namespace = "cli"): string {
+  return projectCacheFilename(root, namespace);
 }

@@ -1,6 +1,7 @@
 import type { SyntaxNode, SyntaxTree } from "./syntax";
 
 export type Severity = "error" | "warning" | "suggestion";
+
 export type Category =
   | "Correctness"
   | "Hooks"
@@ -8,6 +9,7 @@ export type Category =
   | "Performance"
   | "Roblox"
   | "Architecture";
+
 export type ScanScope = "full" | "files" | "changed" | "lines";
 export type BlockingLevel = "error" | "warning" | "none";
 
@@ -25,17 +27,29 @@ export interface FixPreview {
   kind?: "exact" | "pattern";
 }
 
+export interface RuleGuidance {
+  summary?: string;
+  explanation?: string;
+  help?: string;
+  example?: FixPreview;
+  caveat?: string;
+}
+
 export interface Diagnostic {
   id: string;
   rule: string;
   category: Category;
   severity: Severity;
   message: string;
+  summary?: string;
+  explanation?: string;
   help?: string;
+  caveat?: string;
   file: string;
   location: Location;
   highlights?: Location[];
   fixPreview?: FixPreview;
+  editorRanges?: Array<{ location: Location; summary?: string }>;
 }
 
 export interface RuleDefinition {
@@ -43,6 +57,7 @@ export interface RuleDefinition {
   category: Category;
   severity: Severity;
   description: string;
+  guidance?: RuleGuidance;
   run(context: RuleContext): DiagnosticInput[];
 }
 
@@ -50,9 +65,13 @@ export interface DiagnosticInput {
   node: SyntaxNode;
   highlights?: SyntaxNode[];
   message: string;
+  summary?: string;
+  explanation?: string;
   help?: string;
+  caveat?: string;
   severity?: Severity;
   fixPreview?: FixPreview;
+  editorRanges?: Array<{ node: SyntaxNode; summary?: string }>;
 }
 
 export interface FunctionInfo {
@@ -95,9 +114,7 @@ export interface ReactModel {
 }
 
 export type BindingCandidateSourceKind =
-  | "instance-property"
-  | "external-state"
-  | "derived-external-state";
+  "instance-property" | "external-state" | "derived-external-state";
 
 export type BindingCandidateMirrorConfidence = "strong" | "possible" | "none";
 
@@ -130,7 +147,6 @@ export interface ExternalCallbackFunctionSummary {
   callbackParameterIndexes: number[];
   highFrequency: boolean;
 }
-
 
 export interface SourceEffectModuleSummary {
   effectfulMembers: Set<string>;

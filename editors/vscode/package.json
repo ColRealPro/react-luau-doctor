@@ -1,0 +1,73 @@
+{
+  "name": "react-luau-doctor-vscode",
+  "displayName": "React-Luau Doctor",
+  "description": "Live and deep diagnostics for React-Luau projects",
+  "version": "0.1.0",
+  "publisher": "colrealpro",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/colrealpro/react-luau-doctor.git"
+  },
+  "type": "module",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "main": "./extension.cjs",
+  "activationEvents": [
+    "onLanguage:luau",
+    "onLanguage:lua"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "luau",
+        "aliases": [
+          "Luau"
+        ],
+        "extensions": [
+          ".luau"
+        ]
+      }
+    ],
+    "configuration": {
+      "title": "React-Luau Doctor",
+      "properties": {
+        "reactLuauDoctor.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable React-Luau Doctor diagnostics."
+        },
+        "reactLuauDoctor.liveDebounceMs": {
+          "type": "number",
+          "default": 250,
+          "minimum": 0,
+          "description": "Delay before live analysis in milliseconds."
+        },
+        "reactLuauDoctor.deepOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Refresh all Doctor findings for open files when you save."
+        },
+        "reactLuauDoctor.workspaceScan": {
+          "type": "boolean",
+          "default": false,
+          "description": "Scan unopened project files in the background, after open-file work."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "10.1.2",
+    "vscode-languageserver": "10.1.2",
+    "web-tree-sitter": "0.26.11"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.95.0",
+    "typescript": "^5.8.3"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json"
+  }
+}
