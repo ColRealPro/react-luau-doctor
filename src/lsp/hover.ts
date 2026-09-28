@@ -59,9 +59,9 @@ export function diagnosticHover(
     }
   }
 
-  if (detail.explanation !== detail.summary) {
-    parts.push(plainText(detail.explanation));
-  }
+  // if (detail.explanation !== detail.summary) {
+  //   parts.push(plainText(detail.explanation));
+  // }
 
   return {
     range: diagnostic.range,
