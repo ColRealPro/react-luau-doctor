@@ -56,6 +56,7 @@ function bindingModeFixPreview(
   summary: BindingCandidateHookSummary,
   call: SyntaxNode,
   context: RuleContext,
+  directlySubstitutable: boolean,
 ): FixPreview | undefined {
   const parameterIndex = summary.bindingModeParameterIndex;
 
@@ -65,19 +66,24 @@ function bindingModeFixPreview(
   const desired = summary.bindingWhenTruthy ? "true" : "false";
   const args = context.callArguments(call);
 
+  const derivationNote = directlySubstitutable
+    ? ""
+    : " Also convert visual derivations of the returned value to Binding:map (or React.joinBindings for multiple Bindings); changing this argument alone is not a complete fix.";
+
   if (parameterIndex < args.length) {
     const after = replaceWithinNode(call, args[parameterIndex], desired);
 
     if (!after || after === call.text) return undefined;
 
     return {
-      kind: "exact",
+      kind: directlySubstitutable ? "exact" : "pattern",
       before: call.text,
       after,
 
-      note: summary.bindingModeParameterName
-        ? `Switch the ${summary.bindingModeParameterName} parameter to the hook's Binding mode.`
-        : "Switch this call to the hook's Binding mode.",
+      note:
+        (summary.bindingModeParameterName
+          ? `Switch the ${summary.bindingModeParameterName} parameter to the hook's Binding mode.`
+          : "Switch this call to the hook's Binding mode.") + derivationNote,
     };
   }
 
@@ -97,13 +103,15 @@ function bindingModeFixPreview(
     const insertion = `${args.length > 0 ? ", " : ""}${appended}`;
 
     return {
-      kind: "exact",
+      kind: directlySubstitutable ? "exact" : "pattern",
       before: call.text,
       after: `${call.text.slice(0, close)}${insertion}${call.text.slice(close)}`,
 
-      note: summary.bindingModeParameterName
-        ? `Enable the hook's Binding mode through the ${summary.bindingModeParameterName} parameter without changing omitted optional arguments.`
-        : "Enable the hook's Binding mode without changing omitted optional arguments.",
+      note:
+        (summary.bindingModeParameterName
+          ? `Enable the hook's Binding mode through the ${summary.bindingModeParameterName} parameter without changing omitted optional arguments.`
+          : "Enable the hook's Binding mode without changing omitted optional arguments.") +
+        derivationNote,
     };
   }
 
@@ -578,6 +586,169 @@ function allReadsDirectlyBindingSubstitutable(
   }
 
   return reads > 0;
+}
+
+function isSimpleBindingDerivation(
+  node: SyntaxNode,
+  valueName: string,
+  context: RuleContext,
+): boolean {
+  if (node.type === "identifier") return node.text === valueName;
+
+  if (["number", "string", "true", "false", "nil"].includes(node.type))
+    return true;
+
+  if (node.type === "dot_index_expression") {
+    const base = node.namedChildren[0];
+
+    return Boolean(base && isSimpleBindingDerivation(base, valueName, context));
+  }
+
+  if (node.type === "function_call") {
+    const path = context.getCallPath(node);
+
+    if (path === "math.random" || path === "math.randomseed") return false;
+
+    const root = path?.split(/[.:]/)[0];
+
+    if (
+      !root ||
+      context.model.functions.some(
+        (fn) => fn.parameters.includes(root) || fn.name === root,
+      ) ||
+      context.model.allNodes.some(
+        (candidate) =>
+          candidate.type === "variable_declaration" &&
+          declarationNames(candidate).includes(root),
+      )
+    )
+      return false;
+
+    return (
+      isBindingMapSafeCall(node, context) &&
+      context
+        .callArguments(node)
+        .every((arg) => isSimpleBindingDerivation(arg, valueName, context))
+    );
+  }
+
+  if (
+    [
+      "binary_expression",
+      "unary_expression",
+      "parenthesized_expression",
+    ].includes(node.type)
+  ) {
+    return node.namedChildren.every((child) =>
+      isSimpleBindingDerivation(child, valueName, context),
+    );
+  }
+
+  return false;
+}
+
+function importedHookFixPreview(
+  summary: BindingCandidateHookSummary,
+  call: SyntaxNode,
+  valueName: string,
+  owner: FunctionInfo,
+  declaration: SyntaxNode,
+  context: RuleContext,
+  compatibleComponentProps: Map<string, Set<string>>,
+): FixPreview | undefined {
+  const directlySubstitutable = allReadsDirectlyBindingSubstitutable(
+    valueName,
+    owner,
+    declaration,
+    context,
+    compatibleComponentProps,
+  );
+
+  const preview = bindingModeFixPreview(
+    summary,
+    call,
+    context,
+    directlySubstitutable,
+  );
+
+  if (!preview || directlySubstitutable || !owner.body) return preview;
+
+  if ((declaration.text.split("=")[0] ?? "").includes(":")) return preview;
+
+  const edits = new Map<number, { node: SyntaxNode; after: string }>();
+  const sourceLines = context.source.split(/\r?\n/);
+
+  edits.set(call.startIndex, { node: call, after: preview.after });
+
+  for (const read of context.walk(owner.body)) {
+    if (!isReadNode(read, valueName, owner, declaration)) continue;
+
+    if (isDirectBindingValueUsage(read, context, compatibleComponentProps))
+      continue;
+
+    if (!isTransparentUsage(read, context, compatibleComponentProps))
+      return preview;
+
+    let field: SyntaxNode | null = read.parent;
+
+    while (field && field.type !== "field") field = field.parent;
+
+    if (!field) return preview;
+
+    const expression = fieldValue(field);
+
+    if (
+      !expression ||
+      !isSimpleBindingDerivation(expression, valueName, context)
+    )
+      return preview;
+
+    if (edits.has(expression.startIndex)) continue;
+
+    let mapped = expression.text;
+
+    const reads = [...context.walk(expression)].filter((node) =>
+      isReadNode(node, valueName, owner, declaration),
+    );
+
+    for (const node of reads.sort((a, b) => b.startIndex - a.startIndex)) {
+      const start = node.startIndex - expression.startIndex;
+      const end = node.endIndex - expression.startIndex;
+
+      mapped = `${mapped.slice(0, start)}value${mapped.slice(end)}`;
+    }
+
+    const line = sourceLines[field.startPosition.row] ?? "";
+    const indent = line.match(/^\s*/)?.[0] ?? "";
+    const unit = indent.includes("\t") ? "\t" : "    ";
+
+    edits.set(expression.startIndex, {
+      node: expression,
+      after: `${valueName}:map(function(value)\n${indent}${unit}return ${mapped}\n${indent}end)`,
+    });
+  }
+
+  if (edits.size === 1) return preview;
+
+  let after = owner.node.text;
+
+  for (const edit of [...edits.values()].sort(
+    (a, b) => b.node.startIndex - a.node.startIndex,
+  )) {
+    const start = edit.node.startIndex - owner.node.startIndex;
+    const end = edit.node.endIndex - owner.node.startIndex;
+
+    if (start < 0 || after.slice(start, end) !== edit.node.text) return preview;
+
+    after = `${after.slice(0, start)}${edit.after}${after.slice(end)}`;
+  }
+
+  return {
+    kind: "exact",
+    before: owner.node.text,
+    after,
+    note: "Enable the hook's Binding mode and map the derived visual properties from the returned Binding.",
+  };
 }
 
 function derivedLocalDeclarationForRead(
@@ -1963,17 +2134,17 @@ export const preferBindingOverState: RuleDefinition = {
         message,
         help,
 
-        fixPreview:
-          hasBindingMode &&
-          allReadsDirectlyBindingSubstitutable(
-            localName,
-            owner,
-            declaration,
-            context,
-            compatibleComponentProps,
-          )
-            ? bindingModeFixPreview(summary, call, context)
-            : undefined,
+        fixPreview: hasBindingMode
+          ? importedHookFixPreview(
+              summary,
+              call,
+              localName,
+              owner,
+              declaration,
+              context,
+              compatibleComponentProps,
+            )
+          : undefined,
       });
     }
 
@@ -2223,16 +2394,16 @@ export const preferBindingOverStateCandidate: RuleDefinition = {
         help,
 
         fixPreview:
-          presentationOnly &&
-          hasBindingMode &&
-          allReadsDirectlyBindingSubstitutable(
-            localName,
-            owner,
-            declaration,
-            context,
-            compatibleComponentProps,
-          )
-            ? bindingModeFixPreview(summary, call, context)
+          presentationOnly && hasBindingMode
+            ? importedHookFixPreview(
+                summary,
+                call,
+                localName,
+                owner,
+                declaration,
+                context,
+                compatibleComponentProps,
+              )
             : undefined,
       });
     }

@@ -1,5 +1,6 @@
 import type { Diagnostic, Hover, Position } from "vscode-languageserver/node";
 import type { ResolvedPresentation } from "../presentation";
+import { compactFixPreview } from "../fix-preview";
 
 function contains(diagnostic: Diagnostic, position: Position): boolean {
   const { start, end } = diagnostic.range;
@@ -52,13 +53,15 @@ export function diagnosticHover(
   }
 
   if (detail.example) {
+    const preview = compactFixPreview(detail.example);
+
     const title =
       detail.example.kind === "exact" ? "Suggested change" : "Example pattern";
 
     parts.push(
       `**${title}**`,
-      `**Current**\n\n${codeBlock(detail.example.before)}`,
-      `**Suggested**\n\n${codeBlock(detail.example.after)}`,
+      `**Current**\n\n${codeBlock(preview.before)}`,
+      `**Suggested**\n\n${codeBlock(preview.after)}`,
     );
 
     if (detail.example.note) {

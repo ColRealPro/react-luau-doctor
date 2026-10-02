@@ -30,6 +30,7 @@ import {
 } from "./update-install";
 
 import { presentationFor } from "./presentation";
+import { compactFixPreview, previewLineMatches } from "./fix-preview";
 import { createProgressRenderer } from "./progress";
 import { createInlineSuppressionChecker } from "./inline-disables";
 
@@ -763,45 +764,7 @@ function whyPreviewDiff(
   beforeLines: string[],
   afterLines: string[],
 ): WhyPreviewDiff {
-  const rows = beforeLines.length + 1;
-  const columns = afterLines.length + 1;
-  const dp = Array.from({ length: rows }, () => Array<number>(columns).fill(0));
-
-  for (
-    let beforeIndex = beforeLines.length - 1;
-    beforeIndex >= 0;
-    beforeIndex -= 1
-  ) {
-    for (
-      let afterIndex = afterLines.length - 1;
-      afterIndex >= 0;
-      afterIndex -= 1
-    ) {
-      dp[beforeIndex][afterIndex] =
-        beforeLines[beforeIndex] === afterLines[afterIndex]
-          ? dp[beforeIndex + 1][afterIndex + 1] + 1
-          : Math.max(
-              dp[beforeIndex + 1][afterIndex],
-              dp[beforeIndex][afterIndex + 1],
-            );
-    }
-  }
-
-  const matches: Array<[number, number]> = [];
-  let beforeIndex = 0;
-  let afterIndex = 0;
-
-  while (beforeIndex < beforeLines.length && afterIndex < afterLines.length) {
-    if (beforeLines[beforeIndex] === afterLines[afterIndex]) {
-      matches.push([beforeIndex, afterIndex]);
-      beforeIndex += 1;
-      afterIndex += 1;
-    } else if (
-      dp[beforeIndex + 1][afterIndex] >= dp[beforeIndex][afterIndex + 1]
-    )
-      beforeIndex += 1;
-    else afterIndex += 1;
-  }
+  const matches = previewLineMatches(beforeLines, afterLines);
 
   const beforeRanges = beforeLines.map(() => [] as WhyCharacterRange[]);
   const afterRanges = afterLines.map(() => [] as WhyCharacterRange[]);
@@ -914,6 +877,8 @@ function renderWhyFixPreview(
   colorized: boolean,
   textWidth: number,
 ): string[] {
+  preview = compactFixPreview(preview);
+
   const beforeLines = normalizeWhyPreviewLines(preview.before);
   const afterLines = normalizeWhyPreviewLines(preview.after);
   const diff = whyPreviewDiff(beforeLines, afterLines);
