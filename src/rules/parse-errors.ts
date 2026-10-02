@@ -45,6 +45,7 @@ export const parseErrors: RuleDefinition = {
   id: "react-luau/parse-error",
   category: "Correctness",
   severity: "error",
+  lspEnabled: false,
   description: "Report executable Luau syntax that the bundled parser cannot form into a complete syntax tree.",
   run(context) {
     const diagnostics = [];

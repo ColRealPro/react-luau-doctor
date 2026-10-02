@@ -56,6 +56,7 @@ export interface RuleDefinition {
   id: string;
   category: Category;
   severity: Severity;
+  lspEnabled?: boolean;
   description: string;
   guidance?: RuleGuidance;
   run(context: RuleContext): DiagnosticInput[];

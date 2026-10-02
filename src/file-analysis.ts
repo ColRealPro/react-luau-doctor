@@ -34,6 +34,7 @@ export interface ReactFileAnalysisInput {
   categories?: Category[];
   minSeverity: Severity;
   respectInlineDisables: boolean;
+  lsp?: boolean;
 }
 
 export interface ReactFileAnalysisResult {
@@ -166,6 +167,7 @@ export async function analyzeReactFile(
     const diagnostics: Diagnostic[] = [];
 
     for (const rule of selectedRules) {
+      if (input.lsp && rule.lspEnabled === false) continue;
       if (categorySet && !categorySet.has(rule.category)) continue;
 
       const severity = effectiveSeverity(rule.severity, rule.id, input.config);

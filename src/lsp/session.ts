@@ -448,6 +448,7 @@ export class WorkspaceSession {
         relativePath: document.relativePath,
         source,
         forceScan: false,
+        lsp: true,
         project,
         config: this.config,
         categories: this.config.categories,
