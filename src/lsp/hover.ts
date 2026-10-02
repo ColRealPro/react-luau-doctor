@@ -52,7 +52,14 @@ export function diagnosticHover(
   }
 
   if (detail.example) {
-    parts.push(`**Example**\n\n${codeBlock(detail.example.after)}`);
+    const title =
+      detail.example.kind === "exact" ? "Suggested change" : "Example pattern";
+
+    parts.push(
+      `**${title}**`,
+      `**Current**\n\n${codeBlock(detail.example.before)}`,
+      `**Suggested**\n\n${codeBlock(detail.example.after)}`,
+    );
 
     if (detail.example.note) {
       parts.push(plainText(detail.example.note));
