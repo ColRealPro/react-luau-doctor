@@ -2858,6 +2858,138 @@ return Component
   assert.ok(diagnostics.some((diagnostic) => diagnostic.message.includes("table.insert mutates an argument derived from props")));
 });
 
+test("prop mutation checks include useMemo callbacks and preserve cloned and shadowed inputs", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-memo-props-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "Inventory.luau"), `local React = require(script.Parent.React)
+local useMemo = React.useMemo
+local function Inventory(props)
+  local items = React.useMemo(function()
+    table.sort(props.items, function(a, b)
+      return a.rarity > b.rarity
+    end)
+    props.changed = true
+    local alias = props.items
+    table.insert(alias, {})
+    local cloned = table.clone(props.items)
+    table.sort(cloned)
+    return cloned
+  end, { props.items })
+  local other = useMemo(function()
+    table.remove(props.items)
+    return items
+  end, { props.items })
+  local shadowed = React.useMemo(function()
+    local props = { items = {} }
+    table.sort(props.items)
+    props.changed = true
+    return props
+  end, {})
+  local callback = React.useCallback(function()
+    table.sort(props.items)
+  end, { props.items })
+  return React.createElement("Frame")
+end
+return Inventory
+`);
+
+  const report = await scanPath(root, { cache: false });
+  const diagnostics = report.diagnostics.filter(d => d.rule === "react-luau/no-prop-mutation");
+  assert.deepEqual(diagnostics.map(d => d.location.line), [5, 8, 10, 16, 26]);
+});
+
+test("prop mutation checks include captured props in named and deferred functions", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-named-memo-props-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "Inventory.luau"), `local React = require(script.Parent.React)
+local useMemo = React.useMemo
+local function Inventory(props)
+  local sortItems = function()
+    table.sort(props.items)
+    props.changed = true
+    local copy = table.clone(props.items)
+    table.sort(copy)
+    return copy
+  end
+  local alias = sortItems
+  local items = useMemo(alias, { props.items })
+  local function removeItem()
+    table.remove(props.items)
+    return items
+  end
+  React.useMemo(removeItem, { props.items })
+  local reassigned
+  reassigned = function()
+    table.clear(props.items)
+    return items
+  end
+  React.useMemo(reassigned, { props.items })
+  local function unused()
+    table.sort(props.items)
+  end
+  local function deferred()
+    table.sort(props.items)
+  end
+  React.useCallback(deferred, { props.items })
+  local function shadowed()
+    table.sort(props.items)
+  end
+  do
+    local shadowed = function() return {} end
+    React.useMemo(shadowed, {})
+  end
+  local function replaced()
+    table.sort(props.items)
+  end
+  replaced = function() return {} end
+  React.useMemo(replaced, {})
+  local function withParameter(shadowed)
+    return React.useMemo(shadowed, {})
+  end
+  React.useMemo(withParameter, {})
+  return React.createElement("Frame")
+end
+return Inventory
+`);
+
+  const report = await scanPath(root, { cache: false });
+  const diagnostics = report.diagnostics.filter(d => d.rule === "react-luau/no-prop-mutation");
+  assert.deepEqual(diagnostics.map(d => d.location.line), [5, 6, 14, 20, 25, 28, 32, 39]);
+});
+
+test("prop mutation checks respect nested parameter shadowing and captured aliases", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-closure-props-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local function Component(props)
+  local items = props.items
+  local function shadowed(props, items)
+    props.changed = true
+    table.sort(props.items)
+    table.sort(items)
+    local alias = props.items
+    table.sort(alias)
+  end
+  local function captured(props)
+    table.sort(items)
+  end
+  React.useEffect(function()
+    props.changed = true
+    table.sort(items)
+  end, { props.items })
+  return React.createElement("TextButton", {
+    [React.Event.Activated] = function()
+      table.sort(props.items)
+    end,
+  })
+end
+return Component
+`);
+  const report = await scanPath(root, { cache: false });
+  const diagnostics = report.diagnostics.filter(d => d.rule === "react-luau/no-prop-mutation");
+  assert.deepEqual(diagnostics.map(d => d.location.line), [12, 15, 16, 20]);
+});
+
 test("parameter mutation summaries follow table state through helper calls without flagging cloned state", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-parameter-state-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

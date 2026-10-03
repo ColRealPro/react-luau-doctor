@@ -1,6 +1,6 @@
 import type { SyntaxNode } from "../syntax";
 import { moduleKeys, normalizeRequireTarget, resolveModuleReference } from "../module-resolution";
-import { normalizeExpressionText, rootIdentifier, sameNode } from "../ast/walk";
+import { normalizeExpressionText, parameterBindingNames, rootIdentifier, sameNode } from "../ast/walk";
 import type { FunctionInfo, RuleContext, SourceEffectModuleSummary, StateBinding } from "../types";
 
 export type MutationValueOrigin =
@@ -116,6 +116,10 @@ function directChildContaining(block: SyntaxNode, node: SyntaxNode): SyntaxNode 
 function visibleBinding(name: string, node: SyntaxNode, owner: FunctionInfo): BindingLookup | null {
   let current: SyntaxNode | null = node;
   while (current && !sameNode(current, owner.node)) {
+    if ((current.type === "function_definition" || current.type === "function_declaration")
+      && parameterBindingNames(current.childForFieldName("parameters")).includes(name)) {
+      return { node: current, expression: null };
+    }
     const parent: SyntaxNode | null = current.parent;
     if (parent?.type === "block") {
       const containing = directChildContaining(parent, node);

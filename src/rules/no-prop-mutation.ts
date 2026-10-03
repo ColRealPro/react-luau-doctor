@@ -13,7 +13,7 @@ export const noPropMutation: RuleDefinition = {
     for (const node of context.walk()) {
       if (node.type === "assignment_statement" || node.type === "update_statement") {
         const component = context.containingComponent(node);
-        if (!component || !context.isDirectlyExecutedInFunction(node, component)) continue;
+        if (!component) continue;
 
         const propsName = component.parameters[0];
         if (!propsName) continue;
@@ -32,7 +32,7 @@ export const noPropMutation: RuleDefinition = {
 
       if (node.type !== "function_call" || !mightMutateParameters(context, node)) continue;
       const component = context.containingComponent(node);
-      if (!component || !context.isDirectlyExecutedInFunction(node, component)) continue;
+      if (!component) continue;
       const propsName = component.parameters[0];
       if (!propsName) continue;
 
