@@ -12,11 +12,9 @@ If you need to build the VSIX from this checkout, Bun is required for building:
 bun install --frozen-lockfile
 npm --prefix editors/vscode ci
 bun run build:lsp
-cd editors/vscode
-bunx --bun vsce package
 ```
 
-Install the resulting `react-luau-doctor-vscode-*.vsix` through **Install from VSIX…**.
+For automatic installation, replace `bun run build:lsp` with `bun run install:lsp` (requires the VS Code `code` command on PATH).
 
 ## Configure
 

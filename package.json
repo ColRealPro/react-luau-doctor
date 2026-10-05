@@ -20,7 +20,8 @@
   ],
   "scripts": {
     "build": "bun run scripts/build.ts",
-    "build:lsp": "bun run scripts/build-lsp.ts",
+    "build:lsp": "bun run scripts/build-lsp.ts && cd editors/vscode && bunx --bun vsce package",
+    "install:lsp": "bun run build:lsp && bun run scripts/install-lsp.ts",
     "benchmark:lsp": "bun run scripts/benchmark-lsp.ts",
     "check": "bunx tsc -p tsconfig.json --noEmit",
     "test": "bun run build && bun test --parallel=4",
