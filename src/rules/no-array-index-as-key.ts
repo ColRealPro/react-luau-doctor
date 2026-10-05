@@ -1,15 +1,26 @@
 import type { SyntaxNode } from "../syntax";
 import type { RuleContext, RuleDefinition } from "../types";
 import { assignmentLeft, fieldName, fieldValue } from "./helpers";
+import { collectionKeyKindResolver, isUnshadowedBuiltin, type CollectionKeyKind } from "./collection-key-kind";
 
-function loopIndex(text: string): string | null {
-  const numeric = text.match(/^\s*for\s+([A-Za-z_][A-Za-z0-9_]*)\s*=/s);
-  if (numeric) return numeric[1];
-
-  const generic = text.match(/^\s*for\s+([A-Za-z_][A-Za-z0-9_]*)\s*,/s);
-  const candidate = generic?.[1] ?? null;
-  // Single-letter keys are frequently dictionary keys in Luau, not array positions.
-  return candidate && /^(?:idx|index|position)$/i.test(candidate) ? candidate : null;
+function loopIdentity(
+  context: RuleContext,
+  loop: SyntaxNode,
+  kindFor: (expression: SyntaxNode, site: SyntaxNode) => CollectionKeyKind,
+): { index: string; kind: CollectionKeyKind } | null {
+  const numeric = loop.text.match(/^\s*for\s+([A-Za-z_][A-Za-z0-9_]*)\s*=/s);
+  if (numeric) return { index: numeric[1], kind: "array" };
+  const clause = loop.namedChildren.find((child) => child.type === "for_generic_clause");
+  const variables = clause?.namedChildren.find((child) => child.type === "variable_list")?.namedChildren;
+  if (!variables || variables.length < 2) return null;
+  let collection = clause?.namedChildren.find((child) => child.type === "expression_list")?.namedChildren[0];
+  if (!collection) return null;
+  if (collection.type === "function_call") {
+    const path = context.getCallPath(collection);
+    if (path === "ipairs" && isUnshadowedBuiltin(collection, "ipairs")) return { index: variables[0].text, kind: "array" };
+    if (path === "pairs" && isUnshadowedBuiltin(collection, "pairs")) collection = context.callArguments(collection)[0];
+  }
+  return collection ? { index: variables[0].text, kind: kindFor(collection, loop) } : null;
 }
 
 function assignmentAncestor(call: SyntaxNode, loop: SyntaxNode): SyntaxNode | null {
@@ -39,11 +50,15 @@ export const noArrayIndexAsKey: RuleDefinition = {
   description: "Review dynamic React children that use their current array position as identity.",
   run(context) {
     const diagnostics = [];
+    let resolveKind: ReturnType<typeof collectionKeyKindResolver> | undefined;
+    const kindFor = (expression: SyntaxNode, site: SyntaxNode): CollectionKeyKind =>
+      (resolveKind ??= collectionKeyKindResolver(context))(expression, site);
 
     for (const node of context.walk()) {
       if (node.type !== "for_statement") continue;
-      const index = loopIndex(node.text);
-      if (!index) continue;
+      const identity = loopIdentity(context, node, kindFor);
+      if (!identity || identity.kind === "dictionary") continue;
+      const { index, kind } = identity;
       const escaped = index.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const keyProp = new RegExp(`\\bkey\\s*=\\s*${escaped}\\b`);
       const indexedTarget = new RegExp(`\\[\\s*${escaped}\\s*\\]\\s*$`);
@@ -71,7 +86,13 @@ export const noArrayIndexAsKey: RuleDefinition = {
       diagnostics.push({
         node: highlights[0],
         highlights,
-        message: `Loop index ${index} is used as React child identity.`,
+        message: kind === "array"
+          ? `Loop index ${index} is used as React child identity.`
+          : `Loop key ${index} may be an array position used as React child identity.`,
+        ...(kind === "unknown" ? {
+          explanation: "This collection's key type could not be established. Luau generic iteration can yield either array positions or dictionary keys.",
+          caveat: "A stable dictionary key is valid child identity. Review this only if the loop key represents the item's current position.",
+        } : {}),
         help: "Use a stable item key when children can be inserted, removed, reordered, or kept alive for exit animation.",
       });
     }

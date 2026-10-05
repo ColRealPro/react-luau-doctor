@@ -209,6 +209,21 @@ function maskTypeAliases(source: string, mask: Uint8Array): Range[] {
   return ranges;
 }
 
+/** Simple aliases retained for conservative syntax-based type hints. */
+export function simpleTypeAliases(source: string): Array<{ name: string; type: string; startIndex: number }> {
+  const mask = codeMask(source);
+  const result = [];
+  for (const range of maskTypeAliases(source, mask)) {
+    // Ignore comments and string contents when interpreting type syntax.
+    const text = source.slice(range.start, range.end).split("").map((char, index) =>
+      mask[range.start + index] ? char : " "
+    ).join("");
+    const match = text.match(/^\s*(?:export\s+)?type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([\s\S]*?)\s*;?\s*$/);
+    if (match) result.push({ name: match[1], type: match[2], startIndex: Buffer.byteLength(source.slice(0, range.start)) });
+  }
+  return result;
+}
+
 function maskTypeLevelBlocks(source: string, mask: Uint8Array): Range[] {
   const { lines, offsets } = lineData(source);
   const ranges: Range[] = [];

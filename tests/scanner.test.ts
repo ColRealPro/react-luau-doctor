@@ -3108,3 +3108,199 @@ return BadReactComponent
     "forcing analysis of a non-React framework hook module should not reinterpret its hooks as React hooks",
   );
 });
+
+test("suggests reviewing unknown collection keys returned from useMemo and passed to a fragment", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-memo-child-index-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = `local React = require(script.Parent.React)
+local createElement = React.createElement
+local function Inventory(props)
+  local itemElements = React.useMemo(function(): { [string]: React.ReactElement<any, any> }
+    local elements = {}
+    local sortedItems = table.clone(props.items)
+    table.sort(sortedItems, function(a, b)
+      return a.rarity > b.rarity
+    end)
+    for i, v in sortedItems do
+      elements[i] = createElement(DailyShopItem, { itemName = v.name })
+    end
+    return elements
+  end, { props.items })
+  return createElement(React.Fragment, nil, itemElements)
+end
+return Inventory
+`;
+  fs.writeFileSync(path.join(root, "Inventory.luau"), source);
+
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter((item) => item.rule === "react-luau/no-array-index-as-key");
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].severity, "suggestion");
+  assert.equal(diagnostics[0].message, "Loop key i may be an array position used as React child identity.");
+  assert.match(diagnostics[0].caveat ?? "", /stable dictionary key is valid/);
+  const location = diagnostics[0].location;
+  assert.equal(location.line, 11);
+  assert.equal(source.split("\n")[location.line - 1].slice(location.column - 1, location.endColumn - 1), "i");
+});
+
+test("recognizes positional and unknown keys without relying on variable names", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-child-indices-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const loops = {
+    Generic: `for i, item in props.items do
+      children[i] = React.createElement(Row, {})
+    end`,
+    ExplicitKey: `for i, item in props.items do
+      children[item.id] = React.createElement(Row, { key = i })
+    end`,
+    Ipairs: `for offset, item in ipairs(props.items) do
+      children[offset] = React.createElement(Row, {})
+    end`,
+    ShadowedIpairs: `local ipairs = props.iterator
+    for offset, item in ipairs(props.items) do
+      children[offset] = React.createElement(Row, {})
+    end`,
+    Numeric: `for i = 1, #props.items do
+      children[i] = React.createElement(Row, {})
+    end`,
+    UnknownK: `for k, item in props.itemsById do
+      children[k] = React.createElement(Row, {})
+    end`,
+    Stable: `for i, item in props.items do
+      children[item.id] = React.createElement(Row, { LayoutOrder = i })
+    end`,
+  };
+  for (const [name, loop] of Object.entries(loops)) {
+    fs.writeFileSync(path.join(root, `${name}.luau`), `local React = require(script.Parent.React)
+local function Component(props)
+  local children = {}
+  ${loop}
+  return React.createElement(React.Fragment, nil, children)
+end
+return Component
+`);
+  }
+
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter((item) => item.rule === "react-luau/no-array-index-as-key");
+  assert.deepEqual(diagnostics.map((item) => item.file).sort(), ["ExplicitKey.luau", "Generic.luau", "Ipairs.luau", "Numeric.luau", "ShadowedIpairs.luau", "UnknownK.luau"]);
+  for (const diagnostic of diagnostics) {
+    assert.equal(diagnostic.message.includes("may be"), !["Ipairs.luau", "Numeric.luau"].includes(diagnostic.file));
+  }
+});
+
+test("resolves scoped type aliases without treating commented types as declarations", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-child-key-alias-scope-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "Scoped.luau"), `local React = require(script.Parent.React)
+-- Unicode before aliases: café
+type Items = { Item }
+--[[
+type Items = { [string]: Item }
+]]
+local function Dictionary(props)
+  type Items = { [string]: Item }
+  local items: Items = props.items
+  local children = {}
+  for i, item in items do
+    children[i] = React.createElement(Row, {})
+  end
+  return React.createElement(React.Fragment, nil, children)
+end
+local function Array(props)
+  local items: Items = props.items
+  local children = {}
+  for k, item in pairs(items) do
+    children[k] = React.createElement(Row, {})
+  end
+  return React.createElement(React.Fragment, nil, children)
+end
+return Array
+`);
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter((item) => item.rule === "react-luau/no-array-index-as-key");
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].message, "Loop index k is used as React child identity.");
+});
+
+test("uses visible collection shapes and types to distinguish positional and dictionary keys", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-child-key-types-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const cases = [
+    { name: "StringDictionary", type: "{ [string]: Item }", expected: "none" },
+    { name: "Array", type: "{ Item }", expected: "array" },
+    // Numeric keys can represent stable IDs, so the indexer alone proves no position.
+    { name: "NumericMap", type: "{ [number]: Item }", expected: "unknown" },
+    { name: "ImportedType", type: "Types.Items", expected: "unknown" },
+  ];
+  for (const entry of cases) {
+    fs.writeFileSync(path.join(root, `${entry.name}.luau`), `local React = require(script.Parent.React)
+export type InventoryProps = {
+  items: ${entry.type},
+}
+local function Inventory(props: InventoryProps)
+  local children = React.useMemo(function()
+    local sortedItems = table.clone(props.items)
+    table.sort(sortedItems, function(a, b) return a.rarity > b.rarity end)
+    local elements = {}
+    for k, item in sortedItems do
+      elements[k] = React.createElement(Row, {})
+    end
+    return elements
+  end, { props.items })
+  return React.createElement(React.Fragment, nil, children)
+end
+return Inventory
+`);
+  }
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter((item) => item.rule === "react-luau/no-array-index-as-key");
+  for (const entry of cases) {
+    const diagnostic = diagnostics.find((item) => item.file === `${entry.name}.luau`);
+    if (entry.expected === "none") assert.equal(diagnostic, undefined);
+    else {
+      assert.ok(diagnostic, entry.name);
+      assert.equal(diagnostic.message.includes("may be"), entry.expected === "unknown", entry.name);
+    }
+  }
+});
+
+test("respects local type hints, aliases, dictionary literals and shadowed collections", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-local-child-key-types-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const cases = {
+    ArrayLiteral: `local items = { props.first, props.second }`,
+    DictionaryLiteral: `local items = { First = props.first, Second = props.second }`,
+    StringAnnotation: `local items: { [string]: Item } = props.items`,
+    ArrayAnnotation: `local items: { Item } = props.items`,
+    Alias: `local source = { props.first, props.second }
+  local items = source`,
+    Shadowed: `local items = { props.first, props.second }
+  local items: { [string]: Item } = props.items`,
+    Reassigned: `local items = { props.first, props.second }
+  items = props.items`,
+    ConditionalReassignment: `local items = { props.first, props.second }
+  if props.replace then items = props.items end`,
+    NumericLiteralMap: `local items = { [100] = props.first, [200] = props.second }`,
+    MixedLiteral: `local items = { props.first, Named = props.second }`,
+  };
+  for (const [name, setup] of Object.entries(cases)) {
+    fs.writeFileSync(path.join(root, `${name}.luau`), `local React = require(script.Parent.React)
+local function Component(props)
+  ${setup}
+  local children = {}
+  for index, item in items do
+    children[index] = React.createElement(Row, {})
+  end
+  return React.createElement(React.Fragment, nil, children)
+end
+return Component
+`);
+  }
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter((item) => item.rule === "react-luau/no-array-index-as-key");
+  assert.deepEqual(diagnostics.map((item) => item.file).sort(), ["Alias.luau", "ArrayAnnotation.luau", "ArrayLiteral.luau", "ConditionalReassignment.luau", "MixedLiteral.luau", "NumericLiteralMap.luau", "Reassigned.luau"]);
+  for (const diagnostic of diagnostics) {
+    assert.equal(diagnostic.message.includes("may be"), ["ConditionalReassignment.luau", "MixedLiteral.luau", "NumericLiteralMap.luau", "Reassigned.luau"].includes(diagnostic.file));
+  }
+});
