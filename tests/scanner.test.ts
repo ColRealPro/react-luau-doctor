@@ -1778,6 +1778,53 @@ return Component`);
   assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks"), false);
 });
 
+test("rules of hooks accepts private module literal loops and keeps unsafe sources flagged", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-local-static-hook-loop-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const cases = [
+    { name: "Direct", source: "BUTTONS", before: "", flagged: false },
+    { name: "Pairs", source: "pairs(BUTTONS)", before: "", flagged: false },
+    { name: "Ipairs", source: "ipairs(BUTTONS)", before: "", flagged: false },
+    { name: "Reassigned", source: "BUTTONS", before: "BUTTONS = props.items", flagged: true },
+    { name: "Mutated", source: "BUTTONS", before: "BUTTONS[1] = nil", flagged: true },
+    { name: "Insert", source: "BUTTONS", before: "table.insert(BUTTONS, props.item)", flagged: true },
+    { name: "Escape", source: "BUTTONS", before: "mutate(BUTTONS)", flagged: true },
+    { name: "Alias", source: "BUTTONS", before: "local alias = BUTTONS\nalias[1] = nil", flagged: true },
+    { name: "Shadowed", source: "BUTTONS", before: "local BUTTONS = props.items", flagged: true },
+  ];
+
+  for (const entry of cases) {
+    fs.writeFileSync(path.join(root, `${entry.name}.luau`), `local React = require(script.Parent.React)
+local LobbyHudState = require(script.Parent.LobbyHudState)
+local BUTTONS = { { name = "Decks" }, { name = "Loadout" } }
+local function Component(props)
+  local selectedIndex, setSelectedIndex = React.useState(nil)
+  local count = #BUTTONS
+  ${entry.before}
+  local buttons = {}
+  for i, buttonData in ${entry.source} do
+    buttons[buttonData.name] = React.createElement("TextButton", {
+      OnClick = React.useCallback(function()
+        LobbyHudState:Set("SelectedTab", buttonData.name)
+      end, { buttonData }),
+      OnHover = React.useCallback(function() setSelectedIndex(i) end, { i }),
+      OnUnhover = React.useCallback(function() setSelectedIndex(nil) end, {}),
+    })
+  end
+  return React.createElement("Frame", nil, buttons)
+end
+return Component`);
+  }
+
+  const report = await scanPath(root);
+  for (const entry of cases) {
+    assert.equal(report.diagnostics.some((diagnostic) =>
+      diagnostic.file === `${entry.name}.luau` && diagnostic.rule === "react-luau/rules-of-hooks"
+    ), entry.flagged, entry.name);
+  }
+});
+
 test("rules of hooks still reports loops whose collection shape is runtime-dependent", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-dynamic-hook-loop-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

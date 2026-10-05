@@ -410,6 +410,55 @@ function moduleInvariantVariables(context: RuleContext): Set<string> {
   );
 }
 
+function staticModuleTables(context: RuleContext): Set<string> {
+  const candidates = new Set<string>();
+  const declarations = new Set<string>();
+
+  for (const node of context.walk(context.root)) {
+    if (node.type !== "variable_declaration" || context.nearestFunction(node))
+      continue;
+
+    const names = declarationNames(node);
+    const expressions = declarationExpressions(node);
+    names.forEach((name, index) => {
+      if (declarations.has(name)) {
+        candidates.delete(name);
+        return;
+      }
+      declarations.add(name);
+      const expression = expressions[index];
+      if (expression && tableConstructorHasStableArity(expression))
+        candidates.add(name);
+    });
+  }
+
+  // Only accept private literals whose uses cannot mutate or leak the table.
+  // Aliases, writes, unknown calls, and shadowing conservatively invalidate it.
+  for (const node of context.walk(context.root)) {
+    if (node.type !== "identifier" || !candidates.has(node.text)) continue;
+    const parent = node.parent;
+    if (
+      parent?.type === "variable_list" &&
+      parent.parent?.parent?.type === "variable_declaration" &&
+      !context.nearestFunction(node)
+    ) continue;
+    if (parent?.type === "unary_expression" && parent.text.trim().startsWith("#"))
+      continue;
+    if (
+      parent?.type === "expression_list" &&
+      parent.parent?.type === "for_generic_clause"
+    ) continue;
+    if (parent?.type === "arguments" && parent.namedChildren.length === 1) {
+      const call = parent.parent;
+      const path = call && context.getCallPath(call);
+      if (path === "pairs" || path === "ipairs") continue;
+    }
+    candidates.delete(node.text);
+  }
+
+  return candidates;
+}
+
 function simpleConditionRoot(controlFlow: SyntaxNode): string | null {
   if (
     controlFlow.type !== "if_statement" &&
@@ -720,6 +769,7 @@ function loopIterationIsProvablyStable(
   imports: Map<string, Set<string>>,
   owner: FunctionInfo,
   stableShapes: Map<number, Set<string>>,
+  moduleTables: Set<string>,
 ): boolean {
   const numeric = loop.namedChildren.find(
     (child) => child.type === "for_numeric_clause",
@@ -760,6 +810,8 @@ function loopIterationIsProvablyStable(
 
   if (!path[2] && stableShapes.get(nodeKey(owner.node))?.has(path[1]))
     return true;
+
+  if (!path[2] && moduleTables.has(path[1])) return true;
 
   const fields = imports.get(path[1]);
 
@@ -943,6 +995,7 @@ export const rulesOfHooks: RuleDefinition = {
 
     const staticImports = staticIterationImports(context);
     const stableShapes = stableShapeVariablesByFunction(context);
+    const moduleTables = staticModuleTables(context);
     const moduleInvariants = moduleInvariantVariables(context);
     const modeImports = conditionalHookModeImports(context);
     const ignoredHookImports = nonReactHookImports(context);
@@ -1079,6 +1132,7 @@ export const rulesOfHooks: RuleDefinition = {
             staticImports,
             fn,
             stableShapes,
+            moduleTables,
           )
         )
           continue;
