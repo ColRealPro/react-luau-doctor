@@ -146,6 +146,7 @@ export class WorkspaceSession {
     absolutePath: string,
     source: string,
     version: number,
+    bufferDirty = false,
   ): void {
     const relativePath = path
       .relative(this.root, absolutePath)
@@ -160,6 +161,7 @@ export class WorkspaceSession {
       relativePath,
       source,
       version,
+      bufferDirty,
     };
 
     this.documents.set(uri, document);
@@ -168,6 +170,7 @@ export class WorkspaceSession {
     if (!this.shouldAnalyze(document)) {
       this.publish(uri, version, []);
       this.log(`Skipped ${relativePath}: excluded by project filters`, "debug");
+
       return;
     }
 
@@ -187,10 +190,12 @@ export class WorkspaceSession {
       document.diagnosticsVersion = version;
       this.published.set(uri, cached.diagnostics);
       this.publish(uri, version, cached.diagnostics);
+
       this.log(
         `Reused diagnostics for ${relativePath} | Editor findings: ${cached.diagnostics.length}`,
         "debug",
       );
+
       this.scheduleUnsavedDeep();
 
       return;
@@ -217,6 +222,7 @@ export class WorkspaceSession {
       document.source = source;
       document.version = version;
       document.bufferDirty = true;
+
       return;
     }
 
@@ -260,6 +266,7 @@ export class WorkspaceSession {
 
     if (!this.shouldAnalyze(document)) {
       document.bufferDirty = false;
+
       return;
     }
 
@@ -267,6 +274,7 @@ export class WorkspaceSession {
       `Saved ${document.relativePath}${this.settings.deepOnSave ? "" : " (project analysis on save disabled)"}`,
       "info",
     );
+
     this.cancelUnsavedDeep();
     document.bufferDirty = false;
 
@@ -292,6 +300,7 @@ export class WorkspaceSession {
 
     this.cancelUnsavedDeep();
     this.documents.delete(uri);
+
     this.log(
       `Closed ${document.relativePath}${document.bufferDirty ? " (unsaved diagnostics cleared)" : " (saved diagnostics retained)"}`,
       "info",
@@ -493,6 +502,7 @@ export class WorkspaceSession {
     if (state === "background") {
       status.progress = {
         completed: this.workspaceFilesProcessed,
+
         total:
           this.workspaceFilesProcessed +
           this.workspaceQueue.length +
@@ -709,6 +719,7 @@ export class WorkspaceSession {
       document.diagnosticsVersion = version;
       this.published.set(uri, diagnostics);
       this.publish(uri, version, diagnostics);
+
       this.log(
         `Live analysis finished for ${document.relativePath} in ${Date.now() - startedAt}ms | Findings: ${result.diagnostics.length} | Version: ${version}`,
         "debug",
@@ -738,6 +749,7 @@ export class WorkspaceSession {
 
     const worker =
       this.runtime.createWorker?.(filename) ?? new Worker(filename);
+
     this.worker = worker;
     this.log("Started project analysis worker", "info");
 
@@ -780,6 +792,7 @@ export class WorkspaceSession {
     const documents = [...this.documents.values()].filter((document) =>
       this.shouldAnalyze(document),
     );
+
     if (
       this.disposed ||
       !this.settings.enable ||
@@ -842,6 +855,7 @@ export class WorkspaceSession {
       `Starting project analysis${idle ? " after typing paused" : ""} | Open files: ${request.buffers.length}`,
       "info",
     );
+
     this.ensureWorker().postMessage(request);
   }
 
@@ -870,7 +884,9 @@ export class WorkspaceSession {
         "Discarded project analysis after configuration or project files changed",
         "debug",
       );
+
       this.queueAffectedFiles(response);
+
       const affected = new Set(
         (response.affectedFiles ?? response.files ?? []).map((filename) =>
           path.resolve(filename),
@@ -997,6 +1013,7 @@ export class WorkspaceSession {
         path.resolve(document.absolutePath),
       ),
     );
+
     const candidates =
       response.files &&
       new Set(response.files.map((filename) => path.resolve(filename)));

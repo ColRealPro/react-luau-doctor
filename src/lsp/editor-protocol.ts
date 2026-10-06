@@ -1,4 +1,5 @@
 export interface AnalysisStatus {
+  rootUri?: string;
   state: "idle" | "analyzing" | "background" | "disabled" | "error";
   message?: string;
   progress?: { completed: number; total: number };

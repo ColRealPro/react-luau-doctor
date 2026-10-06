@@ -1,6 +1,3 @@
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
 import {
   createConnection,
   ProposedFeatures,
@@ -10,71 +7,40 @@ import {
   type InitializeResult,
 } from "vscode-languageserver/node";
 
-import { loadConfigWithSource, validateKnownRules } from "../config";
 import packageJson from "../../package.json";
+import type { EditorSettings } from "./session";
+import { WorkspaceManager } from "./workspace-manager";
 
 import {
-  WorkspaceSession,
-  defaultEditorSettings,
-  type EditorSettings,
-} from "./session";
-import {
-  rescanRequest, explainFindingRequest, statusNotification, type ExplainFindingParams,
+  rescanRequest,
+  explainFindingRequest,
+  statusNotification,
+  type ExplainFindingParams,
 } from "./editor-protocol";
 
 const connection = createConnection(ProposedFeatures.all);
-let session: WorkspaceSession | null = null;
-let root = process.cwd();
-let settings = defaultEditorSettings;
 
-function isRelevant(filename: string): boolean {
-  return /\.(?:luau|lua)$/i.test(filename);
-}
+const workspaces = new WorkspaceManager({
+  publish: (params) => connection.sendDiagnostics(params),
+  log: (message, level) => connection.console[level](message),
+  status: (status) => connection.sendNotification(statusNotification, status),
+});
 
-function projectConfig() {
-  const loaded = loadConfigWithSource(root);
-  validateKnownRules(loaded.config);
-
-  return loaded;
-}
-
-function configure(): boolean {
-  try {
-    const { config, filename } = projectConfig();
-    connection.console.info(filename ? `Loaded project config: ${filename}` : "Using default project configuration (no config file found)");
-    connection.console.info(`Project filters | Include: ${config.include?.length ? config.include.join(", ") : "all Luau files"} | Ignore: ${config.ignore?.length ? config.ignore.join(", ") : "default exclusions"}`);
-    connection.console.info(`Rule overrides: ${Object.entries(config.rules ?? {}).map(([rule, value]) => `${rule}=${value}`).join(", ") || "none"}`);
-    session?.updateConfig(config, settings);
-    return true;
-  } catch (error) {
-    const message = `Configuration failed: ${String(error)}`;
-    session?.configurationError(message);
-    return false;
-  }
-}
+let supportsFolderChanges = false;
 
 connection.onInitialize((params: InitializeParams): InitializeResult => {
-  const uri = params.workspaceFolders?.[0]?.uri ?? params.rootUri;
-
-  if (uri?.startsWith("file:")) root = path.resolve(fileURLToPath(uri));
-
-  settings = {
-    ...defaultEditorSettings,
-    ...(params.initializationOptions as Partial<EditorSettings> | undefined),
-  };
-
-  session = new WorkspaceSession(
-    root,
-    {},
-    settings,
-    (documentUri, version, diagnostics) =>
-      connection.sendDiagnostics({ uri: documentUri, version, diagnostics }),
-    (message, level) => connection.console[level](message),
-    { onStatus: (status) => connection.sendNotification(statusNotification, status) },
+  workspaces.initialize(
+    params.workspaceFolders,
+    params.rootUri,
+    params.initializationOptions as Partial<EditorSettings> | undefined,
   );
+
+  supportsFolderChanges =
+    params.capabilities.workspace?.workspaceFolders === true;
 
   return {
     serverInfo: { name: "React-Luau Doctor", version: packageJson.version },
+
     capabilities: {
       textDocumentSync: {
         openClose: true,
@@ -84,104 +50,92 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
 
       hoverProvider: true,
       codeActionProvider: { codeActionKinds: [CodeActionKind.QuickFix] },
+      workspace: {
+        workspaceFolders: { supported: true, changeNotifications: true },
+      },
     },
   };
 });
 
 connection.onInitialized(() => {
-  connection.console.info(`React-Luau Doctor ${packageJson.version} language server | Node ${process.version}`);
-  connection.console.info(`Project root: ${root}`);
-  if (configure() && settings.enable && !settings.workspaceScan)
-    connection.console.info("Ready for open files | Background workspace scanning is off");
+  connection.console.info(
+    `React-Luau Doctor ${packageJson.version} language server | Node ${process.version}`,
+  );
+  workspaces.start();
+
+  if (supportsFolderChanges)
+    connection.workspace.onDidChangeWorkspaceFolders((event) =>
+      workspaces.updateFolders(event),
+    );
 });
 
-connection.onCodeAction(async ({ textDocument, range, context }) => {
-  if (context.only &&
-    !context.only.some((kind) => CodeActionKind.QuickFix.startsWith(kind)))
+connection.onCodeAction(({ textDocument, range, context }) => {
+  if (
+    context.only &&
+    !context.only.some((kind) => CodeActionKind.QuickFix.startsWith(kind))
+  )
     return [];
-  return session?.codeActions(textDocument.uri, range) ?? [];
+
+  return (
+    workspaces
+      .sessionForUri(textDocument.uri)
+      ?.codeActions(textDocument.uri, range) ?? []
+  );
 });
 
-connection.onRequest(rescanRequest, () => {
-  connection.console.info("Project rescan requested");
-  return configure();
-});
-connection.onRequest(explainFindingRequest, (params: ExplainFindingParams) =>
-  params && typeof params.uri === "string" && typeof params.version === "number" &&
-    typeof params.findingId === "string" ? session?.explainFinding(params) ?? null : null,
+connection.onRequest(rescanRequest, (params?: { uri?: string }) =>
+  workspaces.rescan(params?.uri),
 );
 
-connection.onDidOpenTextDocument(({ textDocument }) => {
-  if (!session || !textDocument.uri.startsWith("file:")) return;
+connection.onRequest(explainFindingRequest, (params: ExplainFindingParams) =>
+  params &&
+  typeof params.uri === "string" &&
+  typeof params.version === "number" &&
+  typeof params.findingId === "string"
+    ? (workspaces.sessionForUri(params.uri)?.explainFinding(params) ?? null)
+    : null,
+);
 
-  const filename = fileURLToPath(textDocument.uri);
-
-  if (isRelevant(filename)) {
-    session.open(
-      textDocument.uri,
-      filename,
-      textDocument.text,
-      textDocument.version,
-    );
-  }
-});
+connection.onDidOpenTextDocument(({ textDocument }) =>
+  workspaces.open(textDocument),
+);
 
 connection.onDidChangeTextDocument(({ textDocument, contentChanges }) => {
   const change = contentChanges.at(-1);
 
-  if (change) {
-    session?.change(textDocument.uri, change.text, textDocument.version);
-  }
+  if (change)
+    workspaces.change(textDocument.uri, change.text, textDocument.version);
 });
 
 connection.onDidSaveTextDocument(({ textDocument }) =>
-  session?.save(textDocument.uri),
+  workspaces.save(textDocument.uri),
 );
-
 connection.onDidCloseTextDocument(({ textDocument }) =>
-  session?.close(textDocument.uri),
+  workspaces.close(textDocument.uri),
 );
 
 connection.onHover(
   ({ textDocument, position }) =>
-    session?.hover(textDocument.uri, position) ?? null,
+    workspaces
+      .sessionForUri(textDocument.uri)
+      ?.hover(textDocument.uri, position) ?? null,
 );
 
 connection.onDidChangeConfiguration((params) => {
-  connection.console.info("Editor settings changed");
   const value = (
     params.settings as { reactLuauDoctor?: Partial<EditorSettings> } | undefined
   )?.reactLuauDoctor;
-
-  if (value) {
-    settings = { ...defaultEditorSettings, ...value };
-  }
-
-  configure();
+  workspaces.updateSettings(value);
 });
 
-connection.onDidChangeWatchedFiles(({ changes }) => {
-  if (
-    changes.some((change) =>
-      /react-luau-doctor\.config\.json$/i.test(change.uri),
-    )
-  ) {
-    connection.console.info("Project config changed");
-    configure();
-  } else {
-    session?.watchedFilesChanged(changes);
-  }
-});
+connection.onDidChangeWatchedFiles(({ changes }) =>
+  workspaces.watchedFilesChanged(changes),
+);
 
 connection.onShutdown(() => {
   connection.console.info("Shutting down language server");
-  session?.dispose();
-  session = null;
+  workspaces.dispose();
 });
 
-connection.onExit(() => {
-  session?.dispose();
-  session = null;
-});
-
+connection.onExit(() => workspaces.dispose());
 connection.listen();

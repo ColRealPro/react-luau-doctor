@@ -75,13 +75,16 @@ export async function activate(
   );
 
   const languageClient = client;
+
   const status = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Left,
     100,
   );
+
   status.name = "React-Luau Doctor";
   status.command = "reactLuauDoctor.showOutput";
   let analysis: AnalysisStatus = { state: "idle" };
+  const analyses = new Map<string, AnalysisStatus>();
   let explanationTerminal: vscode.Terminal | undefined;
   let explanationPty: ExplanationTerminal | undefined;
 
@@ -98,15 +101,24 @@ export async function activate(
       return;
     }
 
+    const rootUri = vscode.workspace
+      .getWorkspaceFolder(editor.document.uri)
+      ?.uri.toString();
+    const activeAnalysis = rootUri
+      ? (analyses.get(rootUri) ?? { state: "idle" })
+      : analysis;
     const state = languageClient.state;
+
     const failed =
       state === State.StartFailed ||
       state === State.Stopped ||
-      analysis.state === "error";
+      activeAnalysis.state === "error";
+
     const analyzing =
-      state === State.Starting || analysis.state === "analyzing";
-    const background = analysis.state === "background";
-    const disabled = analysis.state === "disabled";
+      state === State.Starting || activeAnalysis.state === "analyzing";
+
+    const background = activeAnalysis.state === "background";
+    const disabled = activeAnalysis.state === "disabled";
 
     const count = vscode.languages
       .getDiagnostics(editor.document.uri)
@@ -125,7 +137,7 @@ export async function activate(
       : undefined;
 
     status.tooltip = failed
-      ? `${analysis.message ?? "Language server stopped\nRun React-Luau Doctor: Restart Language Server"}\nClick to open output`
+      ? `${activeAnalysis.message ?? "Language server stopped\nRun React-Luau Doctor: Restart Language Server"}\nClick to open output`
       : disabled
         ? "React-Luau Doctor is disabled\nEnable it in Settings"
         : analyzing
@@ -154,10 +166,15 @@ export async function activate(
       statusNotification,
       (value: AnalysisStatus) => {
         analysis = value;
+
+        if (value.rootUri) analyses.set(value.rootUri, value);
+
         updateStatus();
       },
     ),
     languageClient.onDidChangeState(({ newState }) => {
+      if (newState === State.Starting) analyses.clear();
+
       if (newState === State.Starting)
         languageClient.outputChannel.info("Starting language server");
       else if (newState === State.Running)
@@ -170,6 +187,11 @@ export async function activate(
       updateStatus();
     }),
     vscode.window.onDidChangeActiveTextEditor(updateStatus),
+    vscode.workspace.onDidChangeWorkspaceFolders(({ removed }) => {
+      for (const folder of removed) analyses.delete(folder.uri.toString());
+
+      updateStatus();
+    }),
     vscode.languages.onDidChangeDiagnostics(updateStatus),
     vscode.commands.registerCommand("reactLuauDoctor.showOutput", () =>
       languageClient.outputChannel.show(),
@@ -184,7 +206,9 @@ export async function activate(
           return;
         }
 
-        await languageClient.sendRequest(rescanRequest);
+        await languageClient.sendRequest(rescanRequest, {
+          uri: vscode.window.activeTextEditor?.document.uri.toString(),
+        });
       }),
     ),
     vscode.commands.registerCommand("reactLuauDoctor.restart", () =>
@@ -208,9 +232,11 @@ export async function activate(
 
           if (!explanationTerminal) {
             const writes = new vscode.EventEmitter<string>();
+
             explanationPty = new ExplanationTerminal((text) =>
               writes.fire(text),
             );
+
             const pty = explanationPty;
 
             explanationTerminal = vscode.window.createTerminal({
@@ -219,8 +245,10 @@ export async function activate(
 
               pty: {
                 onDidWrite: writes.event,
+
                 open: (dimensions?: vscode.TerminalDimensions) =>
                   pty.open(dimensions),
+
                 setDimensions: (dimensions: vscode.TerminalDimensions) =>
                   pty.setDimensions(dimensions),
 
@@ -246,6 +274,7 @@ export async function activate(
               languageClient.outputChannel.error(
                 `Explain failed: ${String(error)}`,
               );
+
               throw error;
             }
           });

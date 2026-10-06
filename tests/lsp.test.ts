@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
 import type { Worker } from "node:worker_threads";
@@ -13,6 +13,7 @@ import {
   StreamMessageWriter,
   MessageType,
   type CodeAction,
+  type InitializeParams,
   type InitializeResult,
   type PublishDiagnosticsParams,
   type TextDocumentEdit,
@@ -1010,6 +1011,266 @@ test("incremental refreshes invalidate cached importers and preserve discarded i
   });
 });
 
+function startProtocolServer(t: TestContext) {
+  const child = spawn(Bun.which("node")!, [bundledServer, "--stdio"], {
+    stdio: "pipe",
+    env: {
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([key]) => key.toLowerCase() !== "path",
+        ),
+      ),
+      PATH: "",
+    },
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const connection = createMessageConnection(
+    new StreamMessageReader(child.stdout),
+    new StreamMessageWriter(child.stdin),
+  );
+  const notifications = new EventEmitter();
+  const diagnostics: PublishDiagnosticsParams[] = [];
+  const statuses: AnalysisStatus[] = [];
+  const output: LogMessageParams[] = [];
+  connection.onNotification("window/logMessage", (value: LogMessageParams) => {
+    output.push(value);
+    notifications.emit("update");
+  });
+  connection.onNotification(
+    "textDocument/publishDiagnostics",
+    (value: PublishDiagnosticsParams) => {
+      diagnostics.push(value);
+      notifications.emit("update");
+    },
+  );
+  connection.onNotification(statusNotification, (value: AnalysisStatus) => {
+    statuses.push(value);
+    notifications.emit("update");
+  });
+  connection.listen();
+  t.after(() => {
+    connection.dispose();
+    child.kill();
+  });
+
+  const waitFor = async (condition: () => boolean) => {
+    if (condition()) return;
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error(`LSP response timed out: ${stderr}`));
+      }, 10000);
+      const check = () => {
+        if (condition()) {
+          cleanup();
+          resolve();
+        }
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        notifications.off("update", check);
+      };
+      notifications.on("update", check);
+    });
+  };
+  const initialize = (params: InitializeParams) =>
+    Promise.race([
+      connection.sendRequest<InitializeResult>("initialize", params),
+      new Promise<never>((_, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error(`Initialization timed out: ${stderr}`)),
+          10000,
+        );
+        timer.unref();
+      }),
+    ]);
+  return { connection, diagnostics, statuses, output, waitFor, initialize };
+}
+
+test(
+  "Node server isolates workspace folders and moves open buffers when folders change",
+  {
+    skip: !fs.existsSync(bundledServer) || !Bun.which("node"),
+  },
+  async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-lsp-folders-"));
+    const a = path.join(root, "project");
+    const b = path.join(root, "project-extra");
+    const nested = path.join(a, "nested");
+    const source =
+      "local React = require(script.Parent.React)\nlocal function Component(props)\nprops.text = 'saved'\nreturn React.createElement('TextLabel', { Text = props.text })\nend\nreturn Component\n";
+    const configPath = (folder: string) =>
+      path.join(folder, "react-luau-doctor.config.json");
+    const folder = (directory: string) => ({
+      uri: pathToFileURL(directory).href,
+      name: path.basename(directory),
+    });
+    const fileUri = (directory: string) =>
+      pathToFileURL(path.join(directory, "Component.luau")).href;
+    for (const directory of [a, b, nested]) {
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(path.join(directory, "Component.luau"), source);
+      fs.writeFileSync(
+        configPath(directory),
+        JSON.stringify({
+          rules: {
+            "react-luau/no-prop-mutation": directory === a ? "off" : "warning",
+          },
+        }),
+      );
+    }
+    const { connection, diagnostics, statuses, output, waitFor, initialize } =
+      startProtocolServer(t);
+    t.after(() => {
+      fs.rmSync(root, { recursive: true, force: true });
+      for (const directory of [a, b, nested])
+        fs.rmSync(projectCachePath(directory, "lsp"), { force: true });
+    });
+    const initialized = await initialize({
+      processId: null,
+      rootUri: null,
+      capabilities: { workspace: { workspaceFolders: true } },
+      workspaceFolders: [folder(a), folder(b)],
+    });
+    assert.deepEqual(initialized.capabilities.workspace?.workspaceFolders, {
+      supported: true,
+      changeNotifications: true,
+    });
+    await connection.sendNotification("initialized", {});
+    const latest = (directory: string) =>
+      diagnostics.findLast((item) => item.uri === fileUri(directory));
+    const mutation = (directory: string) =>
+      latest(directory)?.diagnostics.find(
+        (item) => item.code === "react-luau/no-prop-mutation",
+      );
+    const open = (directory: string) =>
+      connection.sendNotification("textDocument/didOpen", {
+        textDocument: {
+          uri: fileUri(directory),
+          languageId: "luau",
+          version: 1,
+          text: source,
+        },
+      });
+    await open(a);
+    await open(b);
+    await open(nested);
+    await waitFor(
+      () =>
+        latest(a)?.version === 1 &&
+        latest(nested)?.version === 1 &&
+        mutation(b)?.severity === 2,
+    );
+    assert.equal(mutation(a), undefined);
+    assert.equal(mutation(nested), undefined);
+    await waitFor(() =>
+      [a, b].every(
+        (directory) =>
+          statuses.findLast(
+            (status) => status.rootUri === folder(directory).uri,
+          )?.state === "idle",
+      ),
+    );
+
+    const bPublications = diagnostics.filter(
+      (item) => item.uri === fileUri(b),
+    ).length;
+    fs.writeFileSync(
+      configPath(a),
+      JSON.stringify({ rules: { "react-luau/no-prop-mutation": "error" } }),
+    );
+    await connection.sendNotification("workspace/didChangeWatchedFiles", {
+      changes: [{ uri: pathToFileURL(configPath(a)).href, type: 2 }],
+    });
+    await waitFor(
+      () => mutation(a)?.severity === 1 && mutation(nested)?.severity === 1,
+    );
+    assert.equal(
+      diagnostics.filter((item) => item.uri === fileUri(b)).length,
+      bPublications,
+    );
+
+    const unsaved = source.replace("'saved'", "'unsaved'");
+    await connection.sendNotification("textDocument/didChange", {
+      textDocument: { uri: fileUri(nested), version: 2 },
+      contentChanges: [{ text: unsaved }],
+    });
+    await connection.sendNotification("workspace/didChangeWorkspaceFolders", {
+      event: { added: [folder(nested)], removed: [] },
+    });
+    await waitFor(
+      () => latest(nested)?.version === 2 && mutation(nested)?.severity === 2,
+    );
+    const actions = await connection.sendRequest<CodeAction[]>(
+      "textDocument/codeAction",
+      {
+        textDocument: { uri: fileUri(nested) },
+        range: mutation(nested)!.range,
+        context: { diagnostics: [mutation(nested)!] },
+      },
+    );
+    const explain = actions.find((action) => action.command)?.command
+      ?.arguments?.[0];
+    assert.match(
+      await connection.sendRequest<string>(explainFindingRequest, explain),
+      /unsaved/,
+    );
+    await waitFor(
+      () =>
+        statuses.findLast((status) => status.rootUri === folder(nested).uri)
+          ?.state === "idle",
+    );
+    await connection.sendNotification("workspace/didChangeWorkspaceFolders", {
+      event: { added: [], removed: [folder(nested)] },
+    });
+    await waitFor(
+      () => latest(nested)?.version === 2 && mutation(nested)?.severity === 1,
+    );
+
+    const logs = output.length;
+    const statusCount = statuses.length;
+    assert.equal(
+      await connection.sendRequest(rescanRequest, { uri: fileUri(b) }),
+      true,
+    );
+    await waitFor(() =>
+      statuses
+        .slice(statusCount)
+        .some(
+          (status) =>
+            status.rootUri === folder(b).uri && status.state === "idle",
+        ),
+    );
+    assert.equal(
+      output
+        .slice(logs)
+        .some((item) =>
+          item.message.startsWith(`[${a}] Starting project analysis`),
+        ),
+      false,
+    );
+    await connection.sendNotification("workspace/didChangeWorkspaceFolders", {
+      event: { added: [], removed: [folder(b)] },
+    });
+    await waitFor(() => latest(b)?.diagnostics.length === 0);
+    await connection.sendNotification("textDocument/didChange", {
+      textDocument: { uri: fileUri(b), version: 2 },
+      contentChanges: [{ text: unsaved }],
+    });
+    await connection.sendNotification("workspace/didChangeWorkspaceFolders", {
+      event: { added: [folder(b)], removed: [] },
+    });
+    await waitFor(
+      () => latest(b)?.version === 2 && mutation(b)?.severity === 2,
+    );
+    await connection.sendRequest("shutdown");
+    await connection.sendNotification("exit");
+  },
+);
+
 test(
   "Node server recovers from invalid config and supports diagnostics, explanations, suppressions, and rescanning",
   {
@@ -1024,89 +1285,17 @@ test(
       "local React = require(script.Parent.React)\nlocal function Component(props)\n\tprops.text = 'changed'\n\treturn React.createElement('TextLabel', { Text = props.text })\nend\nreturn Component\n";
     fs.writeFileSync(filename, source.replace("'changed'", "'saved'"));
     fs.writeFileSync(configPath, "{");
-    const child = spawn(Bun.which("node")!, [bundledServer, "--stdio"], {
-      stdio: "pipe",
-      env: {
-        ...Object.fromEntries(
-          Object.entries(process.env).filter(
-            ([key]) => key.toLowerCase() !== "path",
-          ),
-        ),
-        PATH: "",
-      },
-    });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    const connection = createMessageConnection(
-      new StreamMessageReader(child.stdout),
-      new StreamMessageWriter(child.stdin),
-    );
-    const notifications = new EventEmitter();
-    const diagnostics: PublishDiagnosticsParams[] = [];
-    const statuses: AnalysisStatus[] = [];
-    const output: LogMessageParams[] = [];
-    connection.onNotification(
-      "window/logMessage",
-      (value: LogMessageParams) => {
-        output.push(value);
-        notifications.emit("update");
-      },
-    );
-    connection.onNotification(
-      "textDocument/publishDiagnostics",
-      (value: PublishDiagnosticsParams) => {
-        diagnostics.push(value);
-        notifications.emit("update");
-      },
-    );
-    connection.onNotification(statusNotification, (value: AnalysisStatus) => {
-      statuses.push(value);
-      notifications.emit("update");
-    });
-    connection.listen();
+    const { connection, diagnostics, statuses, output, waitFor, initialize } =
+      startProtocolServer(t);
     t.after(() => {
-      connection.dispose();
-      child.kill();
       fs.rmSync(root, { recursive: true, force: true });
       fs.rmSync(projectCachePath(root, "lsp"), { force: true });
     });
-
-    const waitFor = async (condition: () => boolean) => {
-      if (condition()) return;
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          cleanup();
-          reject(new Error(`LSP response timed out: ${stderr}`));
-        }, 10000);
-        const check = () => {
-          if (condition()) {
-            cleanup();
-            resolve();
-          }
-        };
-        const cleanup = () => {
-          clearTimeout(timer);
-          notifications.off("update", check);
-        };
-        notifications.on("update", check);
-      });
-    };
-    const initialized = await Promise.race([
-      connection.sendRequest<InitializeResult>("initialize", {
-        processId: null,
-        rootUri: pathToFileURL(root).href,
-        capabilities: {},
-      }),
-      new Promise<never>((_, reject) => {
-        const timer = setTimeout(
-          () => reject(new Error(`Initialization timed out: ${stderr}`)),
-          10000,
-        );
-        timer.unref();
-      }),
-    ]);
+    const initialized = await initialize({
+      processId: null,
+      rootUri: pathToFileURL(root).href,
+      capabilities: {},
+    });
     assert.equal(initialized.capabilities.hoverProvider, true);
     assert.ok(initialized.capabilities.codeActionProvider);
     assert.equal(initialized.serverInfo?.name, "React-Luau Doctor");
