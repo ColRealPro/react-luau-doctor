@@ -4,6 +4,41 @@ import type { SyntaxNode } from "../syntax";
 import type { RuleContext, RuleDefinition } from "../types";
 import { callNameNode } from "./helpers";
 
+function isBinding(
+  context: RuleContext,
+  expression: SyntaxNode,
+  seen = new Set<number>(),
+): boolean {
+  if (seen.has(expression.id)) return false;
+
+  seen.add(expression.id);
+  const resolved = resolveLocalValue(context, expression);
+
+  if (
+    !resolved ||
+    resolved.returnIndex !== 0 ||
+    resolved.value.type !== "function_call"
+  )
+    return false;
+
+  if (
+    ["React.useBinding", "React.createBinding", "React.joinBindings"].includes(
+      reactApiPath(context, resolved.value) ?? "",
+    )
+  )
+    return true;
+
+  const name = resolved.value.childForFieldName("name");
+
+  return (
+    name?.type === "method_index_expression" &&
+    name.namedChildren.at(-1)?.text === "map" &&
+    Boolean(
+      name.namedChildren[0] && isBinding(context, name.namedChildren[0], seen),
+    )
+  );
+}
+
 function isLazyRefInitialization(
   context: RuleContext,
   call: SyntaxNode,
@@ -70,6 +105,32 @@ function isLazyRefInitialization(
   return false;
 }
 
+function isRefInitializer(context: RuleContext, call: SyntaxNode): boolean {
+  let node = call;
+
+  while (node.parent) {
+    const parent = node.parent;
+
+    if (["function_definition", "function_declaration"].includes(parent.type))
+      return false;
+
+    if (parent.type === "arguments") {
+      const hook = parent.parent;
+
+      if (
+        hook?.type === "function_call" &&
+        reactApiPath(context, hook) === "React.useRef" &&
+        context.callArguments(hook)[0]?.id === node.id
+      )
+        return true;
+    }
+
+    node = parent;
+  }
+
+  return false;
+}
+
 export const noCreateBindingInRender: RuleDefinition = {
   id: "react-luau/no-create-binding-in-render",
   category: "Correctness",
@@ -100,6 +161,50 @@ export const noCreateBindingInRender: RuleDefinition = {
           node: callNameNode(call),
           message: "React.createBinding creates a new binding on every render",
           help: "Use React.useBinding so rerenders preserve the binding and its current value",
+        },
+      ];
+    });
+  },
+};
+
+export const noBindingGetValueInRender: RuleDefinition = {
+  id: "react-luau/no-binding-getvalue-in-render",
+  category: "Correctness",
+  severity: "warning",
+  description:
+    "Do not read binding snapshots during render except to initialize a ref",
+
+  guidance: {
+    explanation:
+      "getValue returns a snapshot without subscribing — later binding updates do not rerender the component or update props built from that snapshot",
+
+    help: "Pass the binding directly to the prop or use binding:map(function(value) return ... end)",
+    caveat:
+      "A snapshot used to initialize React.useRef is allowed because the initial value is intentionally preserved",
+  },
+
+  run(context) {
+    return context.findCalls().flatMap((call) => {
+      const owner = context.nearestFunction(call);
+      const name = call.childForFieldName("name");
+      const receiver = name?.namedChildren[0];
+
+      if (
+        !owner ||
+        (!owner.isComponent && !owner.isHook) ||
+        name?.type !== "method_index_expression" ||
+        name.namedChildren.at(-1)?.text !== "getValue" ||
+        !receiver ||
+        !isBinding(context, receiver) ||
+        isRefInitializer(context, call)
+      )
+        return [];
+
+      return [
+        {
+          node: name,
+          message: `${receiver.text}:getValue() reads a binding snapshot during render`,
+          help: "Pass the binding itself or map it so the prop subscribes to binding updates",
         },
       ];
     });

@@ -26,6 +26,14 @@ end)`,
     note: "Keep the binding and updater stable across renders",
   },
 
+  "react-luau/no-binding-getvalue-in-render": {
+    before: `Text = tostring(value:getValue())`,
+    after: `Text = value:map(function(current)
+\treturn tostring(current)
+end)`,
+    note: "Map the binding so later updates reach the prop",
+  },
+
   "react-luau/parse-error": {
     before: `return React.createElement("Frame", {
 \tVisible = true,

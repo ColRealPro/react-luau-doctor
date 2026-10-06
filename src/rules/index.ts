@@ -1,5 +1,8 @@
 import type { RuleDefinition } from "../types";
-import { noCreateBindingInRender } from "./binding-rules";
+import {
+  noBindingGetValueInRender,
+  noCreateBindingInRender,
+} from "./binding-rules";
 import { noCallComponentAsFunction } from "./no-call-component-as-function";
 import { noMutatingStateUpdater } from "./no-mutating-state-updater";
 import { fixExampleForRule } from "./examples";
@@ -86,6 +89,7 @@ const definitions: RuleDefinition[] = [
   noMutatingStateUpdater,
   noCallComponentAsFunction,
   noCreateBindingInRender,
+  noBindingGetValueInRender,
   noDirectStateMutation,
   noRefCurrentInRender,
   noCreateContextInRender,

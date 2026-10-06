@@ -184,6 +184,79 @@ return Component`,
   );
 });
 
+test("binding snapshot reads follow proven bindings and maps but allow events and unrelated getValue methods", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-binding-read-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "Component.luau"),
+    `local React = require(script.Parent.React)
+local shared = React.createBinding(0)
+local function Component()
+    local value, setValue = React.useBinding(0)
+    local alias = (value :: any)
+    local mapped = value:map(function(current) return tostring(current) end)
+    local joined = React.joinBindings({ value, shared })
+    local first = alias:getValue()
+    local second = mapped:getValue()
+    local third = joined:getValue()
+    local fourth = shared:getValue()
+    local unrelated = makeStore()
+    unrelated:getValue()
+    React.useEffect(function() value:getValue() end, {})
+    do
+        local value = makeStore()
+        value:getValue()
+    end
+    return React.createElement("TextButton", {
+        Text = mapped,
+        [React.Event.Activated] = function() setValue(value:getValue() + 1) end,
+    })
+end
+return Component`,
+  );
+  const report = await scanPath(root, { cache: false });
+  const findings = report.diagnostics.filter(
+    (item) => item.rule === "react-luau/no-binding-getvalue-in-render",
+  );
+  assert.deepEqual(
+    findings.map((item) => item.location.line),
+    [8, 9, 10, 11],
+  );
+});
+
+test("binding snapshots may initialize refs without exempting other render reads or shadowed hooks", async (t) => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "doctor-binding-ref-init-"),
+  );
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "Component.luau"),
+    `local React = require(script.Parent.React)
+local useRef = React.useRef
+local function Component()
+    local value = React.useBinding(0)
+    local direct = React.useRef(value:getValue())
+    local aliased = useRef({ previous = value:getValue() })
+    local formatted = React.useRef(tostring(value:getValue()))
+    local snapshot = value:getValue()
+    direct.current = value:getValue()
+    local useRef = function(initial) return initial end
+    local unrelated = useRef(value:getValue())
+    local extra = React.useRef(nil, value:getValue())
+    return React.createElement("TextLabel", { Text = value:getValue() })
+end
+return Component`,
+  );
+  const report = await scanPath(root, { cache: false });
+  const findings = report.diagnostics.filter(
+    (item) => item.rule === "react-luau/no-binding-getvalue-in-render",
+  );
+  assert.deepEqual(
+    findings.map((item) => item.location.line),
+    [8, 9, 11, 12, 13],
+  );
+});
+
 async function ruleIds(filename: string): Promise<Set<string>> {
   const report = await scanPath(fixtures);
   return new Set(report.diagnostics.filter((diagnostic) => diagnostic.file === filename).map((diagnostic) => diagnostic.rule));
