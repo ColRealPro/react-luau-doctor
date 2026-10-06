@@ -312,6 +312,7 @@ return Component
   const why = run(["why", "Component.luau:4", "--cwd", root], root);
   assert.equal(why.status, 0, why.stderr);
   assert.match(why.stdout, /hidden by an inline react-luau-doctor suppression/);
+  assert.match(why.stdout, /> 4 \|   props\.value = 1\n/);
   assert.match(why.stdout, /react-luau\/no-prop-mutation/);
   assert.match(why.stdout, /Why this fired/);
   assert.match(why.stdout, /How to fix/);
