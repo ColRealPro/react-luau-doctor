@@ -37,3 +37,13 @@ fs.copyFileSync(
   path.join(root, "vendor", "tree-sitter-luau.wasm"),
   path.join(extension, "vendor", "tree-sitter-luau.wasm"),
 );
+
+fs.copyFileSync(
+  path.join(root, "vendor", "tree-sitter-luau.LICENSE"),
+  path.join(extension, "vendor", "tree-sitter-luau.LICENSE"),
+);
+
+fs.copyFileSync(
+  path.join(root, "THIRD_PARTY_NOTICES.md"),
+  path.join(extension, "THIRD_PARTY_NOTICES.md"),
+);
