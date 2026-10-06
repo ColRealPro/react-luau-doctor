@@ -14,6 +14,12 @@ end)`,
     note: "Copy any nested table being changed as well",
   },
 
+  "react-luau/no-call-component-as-function": {
+    before: `local child = Child({ value = value })`,
+    after: `local child = React.createElement(Child, { value = value })`,
+    note: "Give the child its own component identity and hook lifecycle",
+  },
+
   "react-luau/parse-error": {
     before: `return React.createElement("Frame", {
 \tVisible = true,

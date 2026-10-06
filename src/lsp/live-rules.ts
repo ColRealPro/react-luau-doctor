@@ -18,6 +18,7 @@ const LIVE_IDS = [
   "react-luau/rerender-lazy-ref-init",
   "react-luau/rerender-state-only-in-handlers",
   "react-luau/no-set-state-in-render",
+  "react-luau/no-call-component-as-function",
   "react-luau/no-ref-current-in-render",
   "react-luau/no-create-context-in-render",
   "react-luau/no-nested-component-definition",

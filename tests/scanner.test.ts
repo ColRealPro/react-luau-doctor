@@ -77,6 +77,72 @@ return Component`,
   );
 });
 
+test("direct component calls follow local aliases without confusing helpers or shadowed names", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-component-call-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "Component.luau"),
+    `local React = require(script.Parent.React)
+local function Child()
+    React.useState(0)
+    return React.createElement("Frame")
+end
+local function PureChild() return React.createElement("Frame") end
+local function MakeElement() return React.createElement("Frame") end
+local alias = Child
+local function Parent()
+    local child = alias()
+    local pure = PureChild()
+    local helper = MakeElement()
+    local element = React.createElement(PureChild)
+    do
+        local Child = function() return 1 end
+        Child()
+    end
+    local function callback(Child) return Child() end
+    return React.createElement("Frame", {}, { child, pure, helper, element })
+end
+return Parent`,
+  );
+  const report = await scanPath(root, { cache: false });
+  const findings = report.diagnostics.filter(
+    (item) => item.rule === "react-luau/no-call-component-as-function",
+  );
+  assert.deepEqual(
+    findings.map((item) => item.location.line),
+    [10, 11],
+  );
+});
+
+test("hook-using helpers that return values are not treated as directly called components", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-hook-helper-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "Component.luau"),
+    `local React = require(script.Parent.React)
+local function makeValues(initial)
+    local first = React.useBinding(initial)
+    local second = React.useBinding(0)
+    local unusedElement = React.createElement("Frame")
+    return first, second
+end
+local alias = makeValues
+local function Component()
+    local first, second = makeValues(1)
+    local third, fourth = alias(2)
+    return React.createElement("Frame")
+end
+return Component`,
+  );
+  const report = await scanPath(root, { cache: false });
+  assert.equal(
+    report.diagnostics.some(
+      (item) => item.rule === "react-luau/no-call-component-as-function",
+    ),
+    false,
+  );
+});
+
 async function ruleIds(filename: string): Promise<Set<string>> {
   const report = await scanPath(fixtures);
   return new Set(report.diagnostics.filter((diagnostic) => diagnostic.file === filename).map((diagnostic) => diagnostic.rule));
