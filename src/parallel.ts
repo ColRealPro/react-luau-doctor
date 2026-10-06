@@ -26,6 +26,7 @@ export interface EffectIndexWorkerRequest {
   type: "effect-index";
   files: EffectWorkerIndexInput[];
   moduleAliases: Map<string, string>;
+  reportProgress?: boolean;
 }
 
 export interface EffectIndexWorkerResponse {
@@ -49,16 +50,26 @@ export interface ReactScanWorkerProgress {
   file: string;
 }
 
+export interface EffectIndexWorkerProgress {
+  type: "effect-index-progress";
+  file: string;
+}
+
 interface WorkerErrorResponse {
   type: "error";
   message: string;
   stack?: string;
 }
 
-export type AnalysisWorkerRequest = ReactScanWorkerRequest | EffectIndexWorkerRequest | EffectAnalyzeWorkerRequest;
+export interface AnalysisWorkerCloseRequest {
+  type: "close";
+}
+
+export type AnalysisWorkerRequest = ReactScanWorkerRequest | EffectIndexWorkerRequest | EffectAnalyzeWorkerRequest | AnalysisWorkerCloseRequest;
 export type AnalysisWorkerResponse =
   | ReactScanWorkerResponse
   | ReactScanWorkerProgress
+  | EffectIndexWorkerProgress
   | EffectIndexWorkerResponse
   | EffectAnalyzeWorkerResponse
   | WorkerErrorResponse;
@@ -93,6 +104,7 @@ function balancedIndexes(files: Array<{ source: string }>, workerCount: number):
 export class AnalysisWorkerPool {
   private readonly workers: Worker[];
   private readonly effectOwners = new Map<string, number>();
+  private readonly activeWorkers = new Set<Worker>();
 
   constructor(workerCount: number) {
     this.workers = Array.from({ length: workerCount }, () => new Worker(workerUrl()));
@@ -115,13 +127,12 @@ export class AnalysisWorkerPool {
 
     const results = await Promise.all(batches.map(async (batch, index) => {
       if (batch.length === 0) return [];
-      const response = await this.send(this.workers[index], {
-        type: "effect-index",
-        files: batch,
-        moduleAliases,
-      });
+      const response = await this.send(
+        this.workers[index],
+        { type: "effect-index", files: batch, moduleAliases, reportProgress: Boolean(onBatchComplete) },
+        (progress) => onBatchComplete?.(1, progress.file),
+      );
       if (response.type !== "effect-index") throw new Error(`Unexpected analysis worker response: ${response.type}`);
-      onBatchComplete?.(batch.length, batch.at(-1)?.relativePath);
       return response.modules;
     }));
     return results.flat();
@@ -185,23 +196,39 @@ export class AnalysisWorkerPool {
   close(): void {
     for (const worker of this.workers) {
       worker.unref();
-      void worker.terminate().catch(() => {});
+      if (this.activeWorkers.has(worker)) {
+        void worker.terminate().catch(() => {});
+        continue;
+      }
+
+      // Release cached syntax trees before runtime teardown to keep shutdown fast
+      const timeout = setTimeout(() => void worker.terminate().catch(() => {}), 1000);
+      timeout.unref();
+      worker.once("exit", () => clearTimeout(timeout));
+      try {
+        worker.postMessage({ type: "close" } satisfies AnalysisWorkerCloseRequest);
+      } catch {
+        clearTimeout(timeout);
+        void worker.terminate().catch(() => {});
+      }
     }
   }
 
   private send(
     worker: Worker,
     request: AnalysisWorkerRequest,
-    onProgress?: (progress: ReactScanWorkerProgress) => void,
+    onProgress?: (progress: ReactScanWorkerProgress | EffectIndexWorkerProgress) => void,
   ): Promise<AnalysisWorkerResponse> {
     return new Promise((resolve, reject) => {
+      this.activeWorkers.add(worker);
       const cleanup = (): void => {
+        this.activeWorkers.delete(worker);
         worker.off("message", onMessage);
         worker.off("error", onError);
         worker.off("exit", onExit);
       };
       const onMessage = (response: AnalysisWorkerResponse): void => {
-        if (response.type === "react-scan-progress") {
+        if (response.type === "react-scan-progress" || response.type === "effect-index-progress") {
           onProgress?.(response);
           return;
         }
@@ -219,14 +246,18 @@ export class AnalysisWorkerPool {
         reject(error);
       };
       const onExit = (code: number): void => {
-        if (code === 0) return;
         cleanup();
         reject(new Error(`Analysis worker exited with code ${code}`));
       };
       worker.on("message", onMessage);
       worker.on("error", onError);
       worker.on("exit", onExit);
-      worker.postMessage(request);
+      try {
+        worker.postMessage(request);
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
     });
   }
 }

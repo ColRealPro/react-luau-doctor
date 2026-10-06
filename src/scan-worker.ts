@@ -15,6 +15,14 @@ const treeCache = new Map<string, { source: string; tree: SyntaxTree }>();
 
 parentPort.on("message", async (request: AnalysisWorkerRequest) => {
   try {
+    if (request.type === "close") {
+      for (const cached of treeCache.values()) cached.tree.delete?.();
+      treeCache.clear();
+      effectStates.clear();
+      parentPort!.close();
+      return;
+    }
+
     if (request.type === "effect-index") {
       const modules = [];
       for (const file of request.files) {
@@ -24,8 +32,12 @@ parentPort.on("message", async (request: AnalysisWorkerRequest) => {
           treeCache.set(file.relativePath, { source: file.source, tree: result.tree });
           modules.push(result.indexed);
         } catch {
-          // The normal scanner owns parse diagnostics. Failed effect modules are
-          // omitted here exactly as they are in the sequential effect pass.
+          // The normal scanner owns parse diagnostics, so failed effect modules
+          // are omitted here exactly as they are in the sequential effect pass
+        } finally {
+          if (request.reportProgress) {
+            parentPort!.postMessage({ type: "effect-index-progress", file: file.relativePath } satisfies AnalysisWorkerResponse);
+          }
         }
       }
       parentPort!.postMessage({ type: "effect-index", modules } satisfies AnalysisWorkerResponse);

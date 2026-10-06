@@ -681,6 +681,35 @@ test("scan progress advances across every candidate file", async () => {
   assert.equal(progress.at(-1)?.total, report.candidateFiles);
 });
 
+test("parallel effect parsing reports progress for each completed file", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-parse-progress-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const fileCount = 24;
+  for (let index = 0; index < fileCount; index += 1) {
+    fs.writeFileSync(path.join(root, `Component${index}.luau`), `local React = require(script.Parent.React)
+local function Component()
+  return React.createElement("Frame")
+end
+return Component
+`);
+  }
+  const progress: Array<{ current: number; total: number; file?: string }> = [];
+  const report = await scanPath(root, {
+    cache: false,
+    parallel: true,
+    onProgress(value) {
+      if (value.phase === "effects-parse") progress.push(value);
+    },
+  });
+
+  assert.equal(report.scannedFiles, fileCount);
+  assert.deepEqual([...new Set(progress.map((value) => value.current))],
+    Array.from({ length: fileCount + 1 }, (_, index) => index));
+  assert.ok(progress.every((value) => value.total === fileCount));
+  assert.equal(new Set(progress.filter((value) => value.current > 0 && value.file).map((value) => value.file)).size,
+    fileCount);
+});
+
 test("project effect progress continues through graph finalization after source parsing completes", async () => {
   const progress: Array<{ phase?: string; label?: string; current: number; total: number }> = [];
   await scanPath(fixtures, {
