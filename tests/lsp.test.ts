@@ -1,17 +1,19 @@
-import { EventEmitter } from "node:events";
-import type { Worker } from "node:worker_threads";
-import { pathToFileURL } from "node:url";
-import { WorkspaceSession, defaultEditorSettings } from "../src/lsp/session";
-import type { AnalysisStatus } from "../src/lsp/editor-protocol";
-import type { Diagnostic } from "../src/types";
-import type { DeepRequest, WorkspaceFileRequest } from "../src/lsp/protocol";
-import type { ReactFileAnalysisResult } from "../src/file-analysis";
-
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { EventEmitter } from "node:events";
+import { spawn } from "node:child_process";
+import type { Worker } from "node:worker_threads";
+import { pathToFileURL } from "node:url";
+import {
+  createMessageConnection, StreamMessageReader, StreamMessageWriter,
+  MessageType,
+  type CodeAction, type InitializeResult,
+  type PublishDiagnosticsParams, type TextDocumentEdit,
+  type LogMessageParams,
+} from "vscode-languageserver/node";
 
 import {
   prepareProjectCache,
@@ -24,6 +26,15 @@ import { diagnosticHover } from "../src/lsp/hover";
 import { SourcePositions, toLspDiagnostics } from "../src/lsp/positions";
 import { buildProjectModel } from "../src/project-model";
 import { scanPath } from "../src/scanner";
+import { diagnosticCodeActions } from "../src/lsp/code-actions";
+import { WorkspaceSession, defaultEditorSettings } from "../src/lsp/session";
+import { rescanRequest, explainFindingRequest, statusNotification, type AnalysisStatus } from "../src/lsp/editor-protocol";
+import { ExplanationTerminal } from "../editors/vscode/src/explanation-terminal";
+import { renderWhyDiagnostic } from "../src/why";
+import { createInlineSuppressionChecker } from "../src/inline-disables";
+import type { Diagnostic } from "../src/types";
+import type { DeepRequest, WorkspaceFileRequest } from "../src/lsp/protocol";
+import type { ReactFileAnalysisResult } from "../src/file-analysis";
 
 class FakeWorker extends EventEmitter {
   readonly requests: Array<DeepRequest | WorkspaceFileRequest> = [];
@@ -40,6 +51,15 @@ function finding(line: number): Diagnostic {
     severity: "error", message: "Props are immutable", file: "Component.luau",
     location: { line, column: 1, endLine: line, endColumn: 10 },
   };
+}
+
+function applyAction(source: string, action: CodeAction): string {
+  const edit = (action.edit!.documentChanges![0] as TextDocumentEdit).edits[0]!;
+  assert.ok("newText" in edit);
+  const lines = source.split(/(?<=\n)/);
+  const offset = (position: typeof edit.range.start) =>
+    lines.slice(0, position.line).join("").length + position.character;
+  return source.slice(0, offset(edit.range.start)) + edit.newText + source.slice(offset(edit.range.end));
 }
 
 test("deep editor overlays agree with a normal Doctor scan", async (t) => {
@@ -172,7 +192,72 @@ test("each unstable memo prop gets its own editor range", async () => {
   assert.match(hover.contents.value, /React-Luau Doctor.*How to fix.*Example/s);
 });
 
-test("sessions recover from worker failures without an old exit clearing the replacement", async (t) => {
+test("explanation terminals wait for open, reuse the panel, and discard obsolete requests", async () => {
+  const writes: string[] = [];
+  const terminal = new ExplanationTerminal((text) => writes.push(text));
+  let finishOld!: (text: string) => void;
+  terminal.explain((columns) => {
+    assert.equal(columns, 80);
+    return new Promise((resolve) => { finishOld = resolve; });
+  });
+  assert.equal(writes.length, 0);
+  terminal.open({ columns: 80 });
+  terminal.explain(async () => "New finding\nWhy this fired\n");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  finishOld("Old finding");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(writes.length, 1);
+  assert.match(writes[0]!, /New finding\r\nWhy this fired\r\n$/);
+  assert.ok(writes[0]!.startsWith("\x1b[0m\x1b[2J\x1b[3J\x1b[H"));
+  terminal.explain(async () => null);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.match(writes.at(-1)!, /finding has changed/);
+  terminal.explain(async () => "Closed finding");
+  terminal.close();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(writes.length, 2);
+});
+
+test("suppression actions use the finding's origin and preserve indentation, CRLF, and existing directives", async () => {
+  for (const preceding of ["", "\t-- react-luau-doctor-disable-next-line no-random-key -- intentional\r\n"]) {
+    const source = `local props = {}\r\n${preceding}\tprops.text = 'value'\r\n`;
+    const line = preceding ? 3 : 2;
+    const diagnostic = finding(line);
+    diagnostic.editorRanges = [{ location: { line: 1, column: 1, endLine: 1, endColumn: 6 } }];
+    const diagnostics = toLspDiagnostics(source, [diagnostic]);
+    const actions = await diagnosticCodeActions("file:///Component.luau", 7, source, diagnostics, diagnostics[0]!.range);
+    const suppression = actions.find((action) => action.edit)!;
+    assert.ok(suppression);
+    assert.equal((suppression.edit!.documentChanges![0] as TextDocumentEdit).textDocument.version, 7);
+    const updated = applyAction(source, suppression);
+    assert.equal(createInlineSuppressionChecker(updated)(diagnostic.rule, preceding ? line : line + 1), true);
+    assert.match(updated, /\t-- react-luau-doctor-disable-next-line/);
+    assert.equal(updated.replaceAll("\r\n", "").includes("\n"), false);
+    if (preceding) {
+      assert.match(updated, /no-random-key, react-luau\/no-prop-mutation -- intentional/);
+      assert.equal(createInlineSuppressionChecker(updated)("react-luau/no-random-key", line), true);
+    }
+  }
+});
+
+test("quick fixes avoid disabled suppressions, multiline tokens, incomplete source, and unrelated ranges", async () => {
+  for (const [source, line, respect] of [
+    ["local value = 1\n", 1, false],
+    ["local value = [[\ncontents\n]]\n", 2, true],
+    ["--[[\ncontents\n]]\nreturn 1\n", 2, true],
+    ["local value = (\n", 1, true],
+  ] as const) {
+    const diagnostics = toLspDiagnostics(source, [finding(line)]);
+    const actions = await diagnosticCodeActions("file:///Component.luau", 1, source, diagnostics, diagnostics[0]!.range, respect);
+    assert.equal(actions.some((action) => action.edit), false);
+    assert.equal(actions[0]?.command?.command, "reactLuauDoctor.explainRule");
+  }
+  const diagnostics = toLspDiagnostics("local value = 1\nreturn value\n", [finding(1)]);
+  assert.deepEqual(await diagnosticCodeActions("file:///Component.luau", 1, "local value = 1\nreturn value\n", diagnostics,
+    { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } }), []);
+});
+
+test("sessions reject stale actions and recover from worker failures without an old exit clearing the replacement", async (t) => {
   const workers: FakeWorker[] = [];
   const statuses: AnalysisStatus[] = [];
   const project = buildProjectModel(process.cwd(), []);
@@ -190,13 +275,23 @@ test("sessions recover from worker failures without an old exit clearing the rep
   session.open(uri, path.join(process.cwd(), "Component.luau"), source, 1);
   const worker = workers[0]!;
   worker.emit("message", { id: worker.requests[0]!.id, project, diagnostics: [{ relativePath: "Component.luau", version: 1, diagnostics: [finding(2)] }] });
+  const range = toLspDiagnostics(source, [finding(2)])[0]!.range;
+  const actions = await session.codeActions(uri, range);
+  assert.ok(actions.some((action) => action.edit));
+  const params = actions.find((action) => action.command)?.command?.arguments?.[0];
+  assert.deepEqual(params, { uri, version: 1, findingId: "finding" });
+  assert.equal(session.explainFinding(params), renderWhyDiagnostic(source, finding(2), true));
+  assert.equal(session.explainFinding({ ...params, findingId: "missing" }), null);
+  session.change(uri, `${source}\n`, 2);
+  assert.deepEqual(await session.codeActions(uri, range), []);
+  assert.equal(session.explainFinding(params), null);
   worker.emit("error", new Error("worker failed"));
   assert.equal(statuses.at(-1)?.state, "error");
   session.updateConfig({}, defaultEditorSettings);
   const replacement = workers[1]!;
   worker.emit("exit", 1);
   assert.equal(statuses.at(-1)?.state, "analyzing");
-  replacement.emit("message", { id: replacement.requests[0]!.id, project, diagnostics: [{ relativePath: "Component.luau", version: 1, diagnostics: [] }] });
+  replacement.emit("message", { id: replacement.requests[0]!.id, project, diagnostics: [{ relativePath: "Component.luau", version: 2, diagnostics: [] }] });
   assert.equal(statuses.at(-1)?.state, "idle");
   session.updateConfig({}, { ...defaultEditorSettings, enable: false });
   assert.equal(statuses.at(-1)?.state, "disabled");
@@ -232,6 +327,8 @@ test("configuration errors stay visible and pause diagnostics even when live wor
   assert.deepEqual(statuses.at(-1), { state: "error", message: "Invalid configuration" });
 });
 
+const bundledServer = process.env.REACT_LUAU_DOCTOR_LSP_SERVER ?? path.resolve(import.meta.dir, "../editors/vscode/server/server.js");
+
 test("background output summarizes the batch and keeps per-file details at debug level", async (t) => {
   const worker = new FakeWorker();
   const output: Array<{ message: string; level: string }> = [];
@@ -260,4 +357,104 @@ test("background output summarizes the batch and keeps per-file details at debug
   assert.ok(output.some((item) => item.level === "info" && item.message === "Queued unopened files for background analysis: 2"));
   assert.ok(output.some((item) => item.level === "info" && /Files processed: 2 \| Findings: 2$/.test(item.message)));
   assert.equal(output.filter((item) => item.level === "debug" && item.message.startsWith("Background analysis finished for")).length, 2);
+});
+
+test("Node server recovers from invalid config and supports diagnostics, explanations, suppressions, and rescanning", {
+  skip: !fs.existsSync(bundledServer) || !Bun.which("node"),
+}, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-lsp-protocol-"));
+  const filename = path.join(root, "Component.luau");
+  const uri = pathToFileURL(filename).href;
+  const configPath = path.join(root, "react-luau-doctor.config.json");
+  const source = "local React = require(script.Parent.React)\nlocal function Component(props)\n\tprops.text = 'changed'\n\treturn React.createElement('TextLabel', { Text = props.text })\nend\nreturn Component\n";
+  fs.writeFileSync(filename, source.replace("'changed'", "'saved'"));
+  fs.writeFileSync(configPath, "{");
+  const child = spawn(Bun.which("node")!, [bundledServer, "--stdio"], {
+    stdio: "pipe",
+    env: {
+      ...Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== "path")),
+      PATH: "",
+    },
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const connection = createMessageConnection(new StreamMessageReader(child.stdout), new StreamMessageWriter(child.stdin));
+  const notifications = new EventEmitter();
+  const diagnostics: PublishDiagnosticsParams[] = [];
+  const statuses: AnalysisStatus[] = [];
+  const output: LogMessageParams[] = [];
+  connection.onNotification("window/logMessage", (value: LogMessageParams) => {
+    output.push(value);
+    notifications.emit("update");
+  });
+  connection.onNotification("textDocument/publishDiagnostics", (value: PublishDiagnosticsParams) => {
+    diagnostics.push(value);
+    notifications.emit("update");
+  });
+  connection.onNotification(statusNotification, (value: AnalysisStatus) => {
+    statuses.push(value);
+    notifications.emit("update");
+  });
+  connection.listen();
+  t.after(() => {
+    connection.dispose();
+    child.kill();
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(projectCachePath(root, "lsp"), { force: true });
+  });
+
+  const waitFor = async (condition: () => boolean) => {
+    if (condition()) return;
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => { cleanup(); reject(new Error(`LSP response timed out: ${stderr}`)); }, 10000);
+      const check = () => { if (condition()) { cleanup(); resolve(); } };
+      const cleanup = () => { clearTimeout(timer); notifications.off("update", check); };
+      notifications.on("update", check);
+    });
+  };
+  const initialized = await Promise.race([
+    connection.sendRequest<InitializeResult>("initialize", { processId: null, rootUri: pathToFileURL(root).href, capabilities: {} }),
+    new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error(`Initialization timed out: ${stderr}`)), 10000); timer.unref(); }),
+  ]);
+  assert.equal(initialized.capabilities.hoverProvider, true);
+  assert.ok(initialized.capabilities.codeActionProvider);
+  assert.equal(initialized.serverInfo?.name, "React-Luau Doctor");
+  await connection.sendNotification("initialized", {});
+  await waitFor(() => statuses.some((status) => status.state === "error"));
+  assert.ok(output.some((item) => item.type === MessageType.Info && item.message === `Project root: ${root}`));
+  assert.ok(output.some((item) => item.type === MessageType.Info && /language server \| Node v/.test(item.message)));
+  assert.ok(output.some((item) => item.type === MessageType.Error && item.message.startsWith("Configuration failed:")));
+  assert.equal(output.some((item) => item.message.startsWith("Ready for open files")), false);
+  await connection.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "luau", version: 1, text: source } });
+  fs.writeFileSync(configPath, "{}");
+  await connection.sendNotification("workspace/didChangeWatchedFiles", { changes: [{ uri: pathToFileURL(configPath).href, type: 2 }] });
+  await waitFor(() => diagnostics.some((item) => item.version === 1 && item.diagnostics.some((diagnostic) => diagnostic.code === "react-luau/no-prop-mutation")));
+  await waitFor(() => output.some((item) => item.message.startsWith("Project analysis finished")));
+  assert.ok(output.some((item) => item.type === MessageType.Info && item.message === `Loaded project config: ${configPath}`));
+  assert.ok(output.some((item) => item.type === MessageType.Info && /Open files checked: 1 \| Errors: 1 \| Warnings: 0 \| Suggestions: 0$/.test(item.message)));
+  const diagnostic = diagnostics.at(-1)!.diagnostics.find((item) => item.code === "react-luau/no-prop-mutation")!;
+  const actions = await connection.sendRequest<CodeAction[]>("textDocument/codeAction", { textDocument: { uri }, range: diagnostic.range, context: { diagnostics: [diagnostic], only: ["quickfix"] } });
+  assert.ok(actions.some((action) => action.command?.command === "reactLuauDoctor.explainRule"));
+  const explainParams = actions.find((action) => action.command)?.command?.arguments?.[0];
+  const explanation = await connection.sendRequest<string>(explainFindingRequest, { ...explainParams, columns: 80 });
+  assert.match(explanation, /react-luau\/no-prop-mutation/);
+  assert.match(explanation, /Why this fired/);
+  assert.match(explanation, /How to fix/);
+  assert.match(explanation, /CURRENT/);
+  assert.match(explanation, /SUGGESTED/);
+  assert.match(explanation, /changed/);
+  assert.doesNotMatch(explanation, /saved/);
+  const updated = applyAction(source, actions.find((action) => action.edit)!);
+  await connection.sendNotification("textDocument/didChange", { textDocument: { uri, version: 2 }, contentChanges: [{ text: updated }] });
+  assert.equal(await connection.sendRequest(explainFindingRequest, explainParams), null);
+  assert.equal(await connection.sendRequest(rescanRequest), true);
+  assert.ok(output.some((item) => item.type === MessageType.Info && item.message === "Project rescan requested"));
+  await waitFor(() => diagnostics.some((item) => item.version === 2 && item.diagnostics.every((diagnostic) => diagnostic.code !== "react-luau/no-prop-mutation")));
+  assert.ok(statuses.some((status) => status.state === "analyzing"));
+  await connection.sendNotification("workspace/didChangeConfiguration", { settings: { reactLuauDoctor: { enable: false } } });
+  await waitFor(() => statuses.at(-1)?.state === "disabled");
+  assert.ok(output.some((item) => item.type === MessageType.Info && item.message.startsWith("Diagnostics disabled")));
+  await connection.sendRequest("shutdown");
+  assert.ok(output.some((item) => item.type === MessageType.Info && item.message === "Shutting down language server"));
+  await connection.sendNotification("exit");
 });

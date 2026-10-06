@@ -69,9 +69,7 @@ export function diagnosticHover(
     }
   }
 
-  // if (detail.explanation !== detail.summary) {
-  //   parts.push(plainText(detail.explanation));
-  // }
+  if (detail.caveat) parts.push(`**Caveat**\n\n${plainText(detail.caveat)}`);
 
   return {
     range: diagnostic.range,

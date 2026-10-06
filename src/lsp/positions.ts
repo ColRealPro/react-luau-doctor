@@ -5,10 +5,15 @@ import {
   type Range,
 } from "vscode-languageserver/node";
 
-import { presentationFor } from "../presentation";
+import { presentationFor, type ResolvedPresentation } from "../presentation";
 import type { Diagnostic as DoctorDiagnostic, Location } from "../types";
 
-/** Doctor columns are one-based UTF-8 bytes. LSP characters are zero-based UTF-16 units. */
+export interface EditorDiagnosticData extends ResolvedPresentation {
+  suppressionLine: number;
+  finding: DoctorDiagnostic;
+}
+
+/** Doctor columns are one-based UTF-8 bytes, LSP characters are zero-based UTF-16 units */
 export class SourcePositions {
   private readonly lines: string[];
 
@@ -67,7 +72,12 @@ export function toLspDiagnostics(
       code: finding.rule,
       source: "React-Luau Doctor",
       message: summary ?? presentation.summary,
-      data: { ...presentation, summary: summary ?? presentation.summary },
+      data: {
+        ...presentation,
+        summary: summary ?? presentation.summary,
+        suppressionLine: Math.max(0, finding.location.line - 1),
+        finding,
+      } satisfies EditorDiagnosticData,
     }));
   });
 }

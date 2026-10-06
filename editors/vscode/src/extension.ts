@@ -10,9 +10,12 @@ import {
 } from "vscode-languageclient/node";
 import {
   rescanRequest,
+  explainFindingRequest,
   statusNotification,
   type AnalysisStatus,
+  type ExplainFindingParams,
 } from "../../../src/lsp/editor-protocol.js";
+import { ExplanationTerminal } from "./explanation-terminal.js";
 
 let client: LanguageClient | undefined;
 
@@ -70,6 +73,8 @@ export async function activate(
   status.name = "React-Luau Doctor";
   status.command = "reactLuauDoctor.showOutput";
   let analysis: AnalysisStatus = { state: "idle" };
+  let explanationTerminal: vscode.Terminal | undefined;
+  let explanationPty: ExplanationTerminal | undefined;
 
   function updateStatus(): void {
     const editor = vscode.window.activeTextEditor;
@@ -139,6 +144,39 @@ export async function activate(
       await languageClient.stop();
       analysis = { state: "idle" };
       await languageClient.start();
+    })),
+    vscode.commands.registerCommand("reactLuauDoctor.explainRule", (params: ExplainFindingParams) => runCommand(async () => {
+      if (!params || typeof params.uri !== "string" || typeof params.findingId !== "string") return;
+      if (!explanationTerminal) {
+        const writes = new vscode.EventEmitter<string>();
+        explanationPty = new ExplanationTerminal((text) => writes.fire(text));
+        const pty = explanationPty;
+        explanationTerminal = vscode.window.createTerminal({
+          name: "React-Luau Doctor: Why",
+          iconPath: new vscode.ThemeIcon("pulse"),
+          pty: {
+            onDidWrite: writes.event,
+            open: (dimensions?: vscode.TerminalDimensions) => pty.open(dimensions),
+            setDimensions: (dimensions: vscode.TerminalDimensions) => pty.setDimensions(dimensions),
+            close: () => {
+              pty.close();
+              writes.dispose();
+              explanationTerminal = undefined;
+              explanationPty = undefined;
+            },
+          },
+        });
+        context.subscriptions.push(explanationTerminal);
+      }
+      explanationPty!.explain(async (columns) => {
+        try {
+          return await languageClient.sendRequest<string | null>(explainFindingRequest, { ...params, columns });
+        } catch (error) {
+          languageClient.outputChannel.error(`Explain failed: ${String(error)}`);
+          throw error;
+        }
+      });
+      explanationTerminal.show(true);
     })),
   );
   updateStatus();

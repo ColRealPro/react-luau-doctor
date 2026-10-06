@@ -34,8 +34,21 @@
         "command": "reactLuauDoctor.showOutput",
         "title": "Show Output",
         "category": "React-Luau Doctor"
+      },
+      {
+        "command": "reactLuauDoctor.explainRule",
+        "title": "Explain Rule",
+        "category": "React-Luau Doctor"
       }
     ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "reactLuauDoctor.explainRule",
+          "when": "false"
+        }
+      ]
+    },
     "languages": [
       {
         "id": "luau",

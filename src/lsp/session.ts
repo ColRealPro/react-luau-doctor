@@ -6,7 +6,8 @@ import { analyzeReactFile } from "../file-analysis";
 import { parseLuau } from "../parser";
 import type { DoctorConfig, ProjectModel } from "../types";
 import { liveRules } from "./live-rules";
-import { toLspDiagnostics } from "./positions";
+import { toLspDiagnostics, type EditorDiagnosticData } from "./positions";
+import { renderWhyDiagnostic } from "../why";
 
 import type {
   DeepRequest,
@@ -15,12 +16,13 @@ import type {
   WorkspaceFileRequest,
   WorkspaceFileResponse,
 } from "./protocol";
-import type { AnalysisStatus } from "./editor-protocol";
+import type { AnalysisStatus, ExplainFindingParams } from "./editor-protocol";
 
 import type {
-  Diagnostic, Hover, Position,
+  CodeAction, Diagnostic, Hover, Position, Range,
 } from "vscode-languageserver/node";
 import { diagnosticHover } from "./hover";
+import { diagnosticCodeActions } from "./code-actions";
 
 const MAX_RECENT_DEEP_FILES = 32;
 const WORKSPACE_FILE_DELAY_MS = 40;
@@ -53,6 +55,7 @@ interface Document extends OpenBuffer {
   bufferDirty?: boolean;
   liveRunning?: boolean;
   liveQueued?: boolean;
+  diagnosticsVersion?: number;
 }
 
 export class WorkspaceSession {
@@ -158,6 +161,7 @@ export class WorkspaceSession {
       cached.generation === this.generation
     ) {
       document.deepVersion = version;
+      document.diagnosticsVersion = version;
       this.published.set(uri, cached.diagnostics);
       this.publish(uri, version, cached.diagnostics);
       this.log(`Reused diagnostics for ${relativePath} | Editor findings: ${cached.diagnostics.length}`, "debug");
@@ -192,6 +196,7 @@ export class WorkspaceSession {
     document.source = source;
     document.version = version;
     document.deepVersion = undefined;
+    document.diagnosticsVersion = undefined;
     document.bufferDirty = true;
     this.recentDeep.delete(document.absolutePath);
     this.publishedSourceHashes.delete(uri);
@@ -295,6 +300,7 @@ export class WorkspaceSession {
       if (document.timer) clearTimeout(document.timer);
 
       document.deepVersion = undefined;
+      document.diagnosticsVersion = undefined;
       this.publish(document.uri, document.version, []);
     }
 
@@ -345,6 +351,43 @@ export class WorkspaceSession {
     if (!document) return null;
 
     return diagnosticHover(this.published.get(uri) ?? [], position);
+  }
+
+  async codeActions(uri: string, range: Range): Promise<CodeAction[]> {
+    const document = this.documents.get(uri);
+
+    if (!document || document.diagnosticsVersion !== document.version) return [];
+
+    const version = document.version;
+    const actions = await diagnosticCodeActions(
+      uri,
+      version,
+      document.source,
+      this.published.get(uri) ?? [],
+      range,
+      this.config.respectInlineDisables ?? true,
+    );
+
+    return this.documents.get(uri) === document &&
+      document.diagnosticsVersion === version && document.version === version
+      ? actions
+      : [];
+  }
+
+  explainFinding(params: ExplainFindingParams): string | null {
+    const document = this.documents.get(params.uri);
+    if (!document || document.version !== params.version ||
+      document.diagnosticsVersion !== params.version) return null;
+
+    const finding = (this.published.get(params.uri) ?? [])
+      .map((diagnostic) => (diagnostic.data as EditorDiagnosticData).finding)
+      .find((finding) => finding.id === params.findingId);
+    if (!finding) return null;
+
+    const columns = Number.isFinite(params.columns)
+      ? Math.max(34, Math.min(500, Math.floor(params.columns!))) : 120;
+    this.log(`Explaining ${finding.rule} at ${finding.file}:${finding.location.line}`, "info");
+    return renderWhyDiagnostic(document.source, finding, true, columns - 2);
   }
 
   private updateStatus(): void {
@@ -542,6 +585,7 @@ export class WorkspaceSession {
         return;
 
       const diagnostics = toLspDiagnostics(source, result.diagnostics);
+      document.diagnosticsVersion = version;
       this.published.set(uri, diagnostics);
       this.publish(uri, version, diagnostics);
       this.log(`Live analysis finished for ${document.relativePath} in ${Date.now() - startedAt}ms | Findings: ${result.diagnostics.length} | Version: ${version}`, "debug");
@@ -720,6 +764,7 @@ export class WorkspaceSession {
         for (const finding of item.diagnostics) counts[finding.severity]++;
         const diagnostics = toLspDiagnostics(document.source, item.diagnostics);
         document.deepVersion = document.version;
+        document.diagnosticsVersion = document.version;
         this.published.set(document.uri, diagnostics);
 
         this.publishedSourceHashes.set(

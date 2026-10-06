@@ -5,6 +5,7 @@ import {
   createConnection,
   ProposedFeatures,
   TextDocumentSyncKind,
+  CodeActionKind,
   type InitializeParams,
   type InitializeResult,
 } from "vscode-languageserver/node";
@@ -18,7 +19,7 @@ import {
   type EditorSettings,
 } from "./session";
 import {
-  rescanRequest, statusNotification,
+  rescanRequest, explainFindingRequest, statusNotification, type ExplainFindingParams,
 } from "./editor-protocol";
 
 const connection = createConnection(ProposedFeatures.all);
@@ -82,6 +83,7 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       },
 
       hoverProvider: true,
+      codeActionProvider: { codeActionKinds: [CodeActionKind.QuickFix] },
     },
   };
 });
@@ -93,10 +95,22 @@ connection.onInitialized(() => {
     connection.console.info("Ready for open files | Background workspace scanning is off");
 });
 
+connection.onCodeAction(async ({ textDocument, range, context }) => {
+  if (context.only &&
+    !context.only.some((kind) => CodeActionKind.QuickFix.startsWith(kind)))
+    return [];
+  return session?.codeActions(textDocument.uri, range) ?? [];
+});
+
 connection.onRequest(rescanRequest, () => {
   connection.console.info("Project rescan requested");
   return configure();
 });
+connection.onRequest(explainFindingRequest, (params: ExplainFindingParams) =>
+  params && typeof params.uri === "string" && typeof params.version === "number" &&
+    typeof params.findingId === "string" ? session?.explainFinding(params) ?? null : null,
+);
+
 connection.onDidOpenTextDocument(({ textDocument }) => {
   if (!session || !textDocument.uri.startsWith("file:")) return;
 
