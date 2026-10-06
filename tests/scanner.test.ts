@@ -7,6 +7,69 @@ import { scanPath } from "../src/scanner";
 
 const fixtures = path.resolve(import.meta.dir, "fixtures");
 
+test("render setter analysis follows expressions and aliases without warning for deferred or conditional updates", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-render-setters-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "Component.luau"),
+    `local React = require(script.Parent.React)
+local function Component(props)
+    local open, setOpen = React.useState(false)
+    local update = setOpen
+    local first = setOpen(true)
+    consume(update(true))
+    do
+        setOpen(true)
+    end
+    local left = setOpen(true) or props.enabled
+    local right = props.enabled and setOpen(true)
+    local choice = if props.enabled then setOpen(true) else nil
+    if props.enabled then setOpen(true) end
+    for _ in {} do setOpen(true) end
+    while props.enabled do setOpen(true) end
+    repeat if props.enabled then break end until setOpen(true)
+    React.useEffect(function() setOpen(true) end, {})
+    local function deferred() setOpen(true) end
+    do
+        local setOpen = function(value) return value end
+        local ignored = setOpen(true)
+    end
+    return React.createElement("TextButton", {
+        Visible = open,
+        [React.Event.Activated] = update(true),
+        [React.Event.MouseEnter] = function() setOpen(true) end,
+    })
+end
+return Component`,
+  );
+  fs.writeFileSync(
+    path.join(root, "Guarded.luau"),
+    `local React = require(script.Parent.React)
+local function Component(props)
+    local value, setValue = React.useState(0)
+    if not props.enabled then return nil end
+    local result = setValue(1)
+    return React.createElement("Frame")
+end
+return Component`,
+  );
+  const report = await scanPath(root, { cache: false });
+  const findings = report.diagnostics.filter(
+    (item) => item.rule === "react-luau/no-set-state-in-render",
+  );
+
+  assert.deepEqual(
+    findings.map((item) => [item.file, item.location.line]),
+    [
+      ["Component.luau", 5],
+      ["Component.luau", 6],
+      ["Component.luau", 8],
+      ["Component.luau", 10],
+    ["Component.luau", 25],
+    ],
+  );
+});
+
 test("dependency table aliases match inline analysis while uncertain contents remain conservative", async (t) => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "doctor-dependency-tables-"),

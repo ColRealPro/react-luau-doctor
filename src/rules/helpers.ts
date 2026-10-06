@@ -288,3 +288,41 @@ export function directFunctionCalls(context: RuleContext, fn: FunctionInfo): Syn
   if (!fn.body) return [];
   return [...context.walk(fn.body)].filter((node) => node.type === "function_call" && context.nearestFunction(node) === fn);
 }
+
+export function isUnconditionallyExecutedInFunction(
+  context: RuleContext,
+  node: SyntaxNode,
+  fn: FunctionInfo,
+): boolean {
+  if (
+    !context.isDirectlyExecutedInFunction(node, fn) ||
+    functionHasReturnedBefore(node, fn, context)
+  )
+    return false;
+
+  let child = node;
+  let parent = node.parent;
+
+  while (parent && !sameNode(parent, fn.node)) {
+    // A break can skip a repeat loop's condition even on its first iteration
+    if (parent.type === "repeat_statement") return false;
+
+    if (CONDITIONAL_TYPES.has(parent.type)) {
+      if (!sameNode(parent.childForFieldName("condition"), child)) return false;
+    }
+
+    if (
+      parent.type === "binary_expression" &&
+      parent.children.some(
+        (token) => token.type === "and" || token.type === "or",
+      )
+    ) {
+      if (!sameNode(parent.childForFieldName("left"), child)) return false;
+    }
+
+    child = parent;
+    parent = parent.parent;
+  }
+
+  return sameNode(parent, fn.node);
+}

@@ -1,10 +1,7 @@
 import type { RuleDefinition } from "../types";
+import { reactApiPath, resolveLocalValue } from "../ast/local-values";
 
-import {
-  callNameNode,
-  isBindingShadowedBetween,
-  stateBindingsFor,
-} from "./helpers";
+import { callNameNode, isUnconditionallyExecutedInFunction } from "./helpers";
 
 export const noSetStateInRender: RuleDefinition = {
   id: "react-luau/no-set-state-in-render",
@@ -12,47 +9,34 @@ export const noSetStateInRender: RuleDefinition = {
   severity: "warning",
 
   description:
-    "Do not call a component's state setter unconditionally during render.",
+    "Do not call a component's state setter unconditionally during render",
 
   run(context) {
     const diagnostics = [];
 
-    for (const component of context.model.functions) {
-      if (!component.isComponent || !component.body) continue;
+    for (const call of context.findCalls()) {
+      const component = context.nearestFunction(call);
 
-      const bindings = stateBindingsFor(context, component);
+      if (!component?.isComponent) continue;
 
-      const setters = new Map(
-        bindings.map((binding) => [binding.setterName, binding]),
-      );
+      const name = call.childForFieldName("name");
+      const setter = name && resolveLocalValue(context, name);
 
-      if (setters.size === 0) continue;
+      if (
+        !setter ||
+        setter.returnIndex !== 1 ||
+        reactApiPath(context, setter.value) !== "React.useState" ||
+        context.nearestFunction(setter.value) !== component ||
+        !isUnconditionallyExecutedInFunction(context, call, component)
+      )
+        continue;
 
-      for (const statement of component.body.namedChildren) {
-        if (statement.type !== "function_call") continue;
-
-        const path = context.getCallPath(statement);
-        const binding = path ? setters.get(path) : undefined;
-
-        if (
-          !path ||
-          !binding ||
-          isBindingShadowedBetween(
-            statement,
-            component,
-            path,
-            binding.declaration,
-          )
-        )
-          continue;
-
-        diagnostics.push({
-          node: callNameNode(statement),
-          message: `${path}() is called unconditionally during component render.`,
-          summary: `${path} runs during render and can loop.`,
-          help: "Move the update to the event or effect that owns it, or derive the value during render. An unconditional render-phase state update can continuously trigger new renders.",
-        });
-      }
+      diagnostics.push({
+        node: callNameNode(call),
+        message: `${name!.text}() is called unconditionally during component render`,
+        summary: `${name!.text} runs during render and can loop`,
+        help: "Move the update to the event or effect that owns it, or derive the value during render — an unconditional render-phase state update can continuously trigger new renders",
+      });
     }
 
     return diagnostics;
