@@ -19,6 +19,23 @@
     "onLanguage:lua"
   ],
   "contributes": {
+    "commands": [
+      {
+        "command": "reactLuauDoctor.rescan",
+        "title": "Rescan Project",
+        "category": "React-Luau Doctor"
+      },
+      {
+        "command": "reactLuauDoctor.restart",
+        "title": "Restart Language Server",
+        "category": "React-Luau Doctor"
+      },
+      {
+        "command": "reactLuauDoctor.showOutput",
+        "title": "Show Output",
+        "category": "React-Luau Doctor"
+      }
+    ],
     "languages": [
       {
         "id": "luau",
@@ -36,23 +53,23 @@
         "reactLuauDoctor.enable": {
           "type": "boolean",
           "default": true,
-          "description": "Enable React-Luau Doctor diagnostics."
+          "description": "Enable React-Luau Doctor diagnostics"
         },
         "reactLuauDoctor.liveDebounceMs": {
           "type": "number",
           "default": 250,
           "minimum": 0,
-          "description": "Delay before live analysis in milliseconds."
+          "description": "Delay before live analysis in milliseconds"
         },
         "reactLuauDoctor.deepOnSave": {
           "type": "boolean",
           "default": true,
-          "description": "Refresh all Doctor findings for open files when you save."
+          "description": "Refresh all Doctor findings for open files when you save"
         },
         "reactLuauDoctor.workspaceScan": {
           "type": "boolean",
           "default": false,
-          "description": "Scan unopened project files in the background, after open-file work."
+          "description": "Scan unopened project files in the background, after open-file work"
         }
       }
     }

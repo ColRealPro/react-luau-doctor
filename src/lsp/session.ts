@@ -15,8 +15,11 @@ import type {
   WorkspaceFileRequest,
   WorkspaceFileResponse,
 } from "./protocol";
+import type { AnalysisStatus } from "./editor-protocol";
 
-import type { Diagnostic, Hover, Position } from "vscode-languageserver/node";
+import type {
+  Diagnostic, Hover, Position,
+} from "vscode-languageserver/node";
 import { diagnosticHover } from "./hover";
 
 const MAX_RECENT_DEEP_FILES = 32;
@@ -86,6 +89,11 @@ export class WorkspaceSession {
   private unsavedDeepTimer?: ReturnType<typeof setTimeout>;
   private unsavedDeepSerial = 0;
   private lastUnsavedDeepStartedAt = 0;
+  private statusError?: string;
+  private deepStartedAt = 0;
+  private workspaceStartedAt = 0;
+  private workspaceFilesProcessed = 0;
+  private workspaceFindings = 0;
 
   constructor(
     readonly root: string,
@@ -96,14 +104,19 @@ export class WorkspaceSession {
       version: number | undefined,
       diagnostics: Diagnostic[],
     ) => void,
-    private readonly log: (message: string) => void = () => {},
+    private readonly log: (
+      message: string,
+      level: "info" | "debug" | "error",
+    ) => void = () => {},
     private readonly runtime: {
       createWorker?: (filename: string) => Worker;
       analyzeFile?: typeof analyzeReactFile;
+      onStatus?: (status: AnalysisStatus) => void;
     } = {},
   ) {}
 
   start(): void {
+    this.updateStatus();
     if (this.settings.enable && this.settings.workspaceScan)
       this.refresh(false);
   }
@@ -133,6 +146,7 @@ export class WorkspaceSession {
     };
 
     this.documents.set(uri, document);
+    this.log(`Opened ${relativePath}`, "info");
 
     if (!this.settings.enable) return;
 
@@ -146,6 +160,7 @@ export class WorkspaceSession {
       document.deepVersion = version;
       this.published.set(uri, cached.diagnostics);
       this.publish(uri, version, cached.diagnostics);
+      this.log(`Reused diagnostics for ${relativePath} | Editor findings: ${cached.diagnostics.length}`, "debug");
       this.scheduleUnsavedDeep();
 
       return;
@@ -205,6 +220,7 @@ export class WorkspaceSession {
 
     if (!document) return;
 
+    this.log(`Saved ${document.relativePath}${this.settings.deepOnSave ? "" : " (project analysis on save disabled)"}`, "info");
     this.cancelUnsavedDeep();
     document.bufferDirty = false;
 
@@ -230,6 +246,7 @@ export class WorkspaceSession {
 
     this.cancelUnsavedDeep();
     this.documents.delete(uri);
+    this.log(`Closed ${document.relativePath}${document.bufferDirty ? " (unsaved diagnostics cleared)" : " (saved diagnostics retained)"}`, "info");
 
     if (document.bufferDirty) {
       this.published.delete(uri);
@@ -265,6 +282,11 @@ export class WorkspaceSession {
     this.clearWorkspaceQueue();
     this.config = config;
     this.settings = settings;
+    this.statusError = undefined;
+    this.log(
+      `Diagnostics ${settings.enable ? "enabled" : "disabled"} | Live debounce: ${settings.liveDebounceMs}ms | Deep on save: ${settings.deepOnSave ? "on" : "off"} | Workspace scan: ${settings.workspaceScan ? "on" : "off"}`,
+      "info",
+    );
 
     for (const [uri] of this.published)
       this.publish(uri, this.documents.get(uri)?.version, []);
@@ -278,15 +300,23 @@ export class WorkspaceSession {
 
     this.published.clear();
     this.publishedSourceHashes.clear();
+    this.updateStatus();
 
     if (!settings.enable) return;
 
     if (this.documents.size > 0 || settings.workspaceScan) this.refresh(true);
   }
 
+  configurationError(message: string): void {
+    this.updateConfig({}, { ...this.settings, enable: false });
+    this.reportError(message);
+  }
+
   watchedFilesChanged(
     changes: Array<{ uri: string; type: number }> = [],
   ): void {
+    if (changes.length > 0)
+      this.log(`Project files changed: ${changes.length}`, "debug");
     this.cancelUnsavedDeep();
     this.generation++;
     this.recentDeep.clear();
@@ -315,6 +345,25 @@ export class WorkspaceSession {
     if (!document) return null;
 
     return diagnosticHover(this.published.get(uri) ?? [], position);
+  }
+
+  private updateStatus(): void {
+    if (this.disposed) return;
+
+    const busy = this.running || this.workspaceInFlight ||
+      this.workspaceQueue.length > 0 ||
+      [...this.documents.values()].some((document) => document.liveRunning);
+    const state = this.statusError ? "error"
+      : !this.settings.enable ? "disabled"
+      : busy ? "analyzing" : "idle";
+
+    this.runtime.onStatus?.({ state, message: this.statusError });
+  }
+
+  private reportError(message: string): void {
+    this.statusError = message;
+    this.log(message, "error");
+    this.updateStatus();
   }
 
   private scheduleLive(uri: string): void {
@@ -401,7 +450,10 @@ export class WorkspaceSession {
         const tree = await parseLuau(snapshot.source);
 
         try {
-          if (tree.rootNode.hasError) return;
+          if (tree.rootNode.hasError) {
+            this.log(`Deferred project analysis for ${this.documents.get(snapshot.uri)?.relativePath ?? snapshot.uri}: incomplete syntax`, "debug");
+            return;
+          }
         } finally {
           tree.delete?.();
         }
@@ -426,7 +478,7 @@ export class WorkspaceSession {
       this.lastUnsavedDeepStartedAt = Date.now();
       this.refresh(true, true);
     } catch (error) {
-      this.log(`Unsaved deep analysis preparation failed: ${String(error)}`);
+      this.reportError(`Unsaved deep analysis preparation failed: ${String(error)}`);
     }
   }
 
@@ -437,10 +489,13 @@ export class WorkspaceSession {
   ): Promise<void> {
     const document = this.documents.get(uri);
     const project = this.project;
+    const generation = this.generation;
 
     if (!document || !project || !this.settings.enable) return;
 
     document.liveRunning = true;
+    this.updateStatus();
+    const startedAt = Date.now();
 
     try {
       const input = {
@@ -480,6 +535,8 @@ export class WorkspaceSession {
       if (
         this.documents.get(uri)?.version !== version ||
         this.documents.get(uri)?.deepVersion === version ||
+        this.generation !== generation ||
+        !this.settings.enable ||
         this.disposed
       )
         return;
@@ -487,10 +544,13 @@ export class WorkspaceSession {
       const diagnostics = toLspDiagnostics(source, result.diagnostics);
       this.published.set(uri, diagnostics);
       this.publish(uri, version, diagnostics);
+      this.log(`Live analysis finished for ${document.relativePath} in ${Date.now() - startedAt}ms | Findings: ${result.diagnostics.length} | Version: ${version}`, "debug");
     } catch (error) {
-      this.log(`Live analysis failed: ${String(error)}`);
+      if (this.generation === generation && !this.disposed)
+        this.reportError(`Live analysis failed: ${String(error)}`);
     } finally {
       document.liveRunning = false;
+      this.updateStatus();
 
       if (this.documents.get(uri) === document && document.liveQueued) {
         document.liveQueued = false;
@@ -508,28 +568,37 @@ export class WorkspaceSession {
       "deep-worker.js",
     );
 
-    this.worker = this.runtime.createWorker?.(filename) ?? new Worker(filename);
+    const worker = this.runtime.createWorker?.(filename) ?? new Worker(filename);
+    this.worker = worker;
+    this.log("Started project analysis worker", "info");
 
     this.worker.on(
       "message",
       (response: DeepResponse | WorkspaceFileResponse) => {
+        if (this.worker !== worker) return;
         if ("kind" in response) this.onWorkspaceFileResult(response);
         else this.onDeepResult(response);
       },
     );
 
-    this.worker.on("error", (error) => {
-      this.log(`Deep worker failed: ${String(error)}`);
+    worker.on("error", (error) => {
+      if (this.disposed || this.worker !== worker) return;
       this.running = false;
+      this.dirty = false;
+      this.workspaceInFlight = undefined;
+      this.clearWorkspaceQueue();
       this.worker = null;
+      this.reportError(`Deep worker failed: ${String(error)}`);
     });
 
-    this.worker.on("exit", (code) => {
-      if (!this.disposed && code !== 0)
-        this.log(`Deep worker exited with code ${code}`);
-
+    worker.on("exit", (code) => {
+      if (this.disposed || this.worker !== worker) return;
       this.running = false;
+      this.dirty = false;
+      this.workspaceInFlight = undefined;
+      this.clearWorkspaceQueue();
       this.worker = null;
+      this.reportError(`Deep worker exited with code ${code}`);
     });
 
     return this.worker;
@@ -556,6 +625,9 @@ export class WorkspaceSession {
     }
 
     this.running = true;
+    this.deepStartedAt = Date.now();
+    this.statusError = undefined;
+    this.updateStatus();
     this.projectRevision++;
     this.runningGeneration = this.generation;
 
@@ -576,6 +648,7 @@ export class WorkspaceSession {
       diagnose,
     };
 
+    this.log(`Starting project analysis${idle ? " after typing paused" : ""} | Open files: ${request.buffers.length}`, "info");
     this.ensureWorker().postMessage(request);
   }
 
@@ -588,11 +661,13 @@ export class WorkspaceSession {
       this.project = null;
       this.dirty = false;
       this.dirtyIdle = false;
+      this.updateStatus();
 
       return;
     }
 
     if (this.runningGeneration !== this.generation) {
+      this.log("Discarded project analysis after configuration or project files changed", "debug");
       this.dirty = false;
       this.dirtyIdle = false;
       this.refresh(this.documents.size > 0);
@@ -601,7 +676,7 @@ export class WorkspaceSession {
     }
 
     if (response.error) {
-      this.log(`Deep analysis failed: ${response.error}`);
+      this.reportError(`Deep analysis failed: ${response.error}`);
       this.clearWorkspaceQueue();
 
       for (const document of this.documents.values())
@@ -619,9 +694,13 @@ export class WorkspaceSession {
         this.workspaceQueue = (response.files ?? []).filter(
           (filename) => !openPaths.has(path.resolve(filename)),
         );
+        this.workspaceStartedAt = this.workspaceQueue.length > 0 ? Date.now() : 0;
+        this.workspaceFilesProcessed = 0;
+        this.workspaceFindings = 0;
       }
 
       const covered = new Set<string>();
+      const counts = { error: 0, warning: 0, suggestion: 0 };
 
       for (const item of response.diagnostics) {
         const document = [...this.documents.values()].find(
@@ -638,6 +717,7 @@ export class WorkspaceSession {
         if (!this.settings.enable) continue;
 
         covered.add(document.uri);
+        for (const finding of item.diagnostics) counts[finding.severity]++;
         const diagnostics = toLspDiagnostics(document.source, item.diagnostics);
         document.deepVersion = document.version;
         this.published.set(document.uri, diagnostics);
@@ -663,6 +743,13 @@ export class WorkspaceSession {
 
       for (const document of this.documents.values())
         if (!covered.has(document.uri)) this.scheduleLive(document.uri);
+
+      this.log(
+        `Project analysis finished in ${Date.now() - this.deepStartedAt}ms${response.files ? ` | Project files: ${response.files.length}` : ""} | Open files checked: ${covered.size} | Errors: ${counts.error} | Warnings: ${counts.warning} | Suggestions: ${counts.suggestion}`,
+        "info",
+      );
+      if (this.workspaceQueue.length > 0)
+        this.log(`Queued unopened files for background analysis: ${this.workspaceQueue.length}`, "info");
     }
 
     if (this.dirty) {
@@ -671,10 +758,15 @@ export class WorkspaceSession {
       this.dirtyIdle = false;
       this.refresh(this.documents.size > 0, idle);
     } else this.scheduleWorkspaceFile();
+
+    this.updateStatus();
   }
 
   private clearWorkspaceQueue(): void {
     this.workspaceQueue = [];
+    this.workspaceStartedAt = 0;
+    this.workspaceFilesProcessed = 0;
+    this.workspaceFindings = 0;
 
     if (this.workspaceTimer) clearTimeout(this.workspaceTimer);
 
@@ -691,6 +783,13 @@ export class WorkspaceSession {
   }
 
   private scheduleWorkspaceFile(): void {
+    if (this.workspaceStartedAt > 0 && !this.workspaceInFlight && this.workspaceQueue.length === 0) {
+      this.log(
+        `Background analysis finished in ${Date.now() - this.workspaceStartedAt}ms | Files processed: ${this.workspaceFilesProcessed} | Findings: ${this.workspaceFindings}`,
+        "info",
+      );
+      this.workspaceStartedAt = 0;
+    }
     if (
       !this.settings.enable ||
       !this.settings.workspaceScan ||
@@ -728,7 +827,11 @@ export class WorkspaceSession {
             absolutePath = candidate;
         }
 
-        if (!absolutePath) return;
+        if (!absolutePath) {
+          this.scheduleWorkspaceFile();
+          this.updateStatus();
+          return;
+        }
 
         const request: WorkspaceFileRequest = {
           kind: "workspace-file",
@@ -745,6 +848,7 @@ export class WorkspaceSession {
           projectRevision: this.projectRevision,
         };
 
+        this.updateStatus();
         this.ensureWorker().postMessage(request);
       },
       Math.max(WORKSPACE_FILE_DELAY_MS, this.workspaceResumeAt - Date.now()),
@@ -765,11 +869,17 @@ export class WorkspaceSession {
       this.settings.workspaceScan &&
       !this.documents.has(uri)
     ) {
+      this.workspaceFilesProcessed++;
       if (response.error)
-        this.log(
+        this.reportError(
           `Workspace analysis failed for ${response.absolutePath}: ${response.error}`,
         );
       else {
+        this.workspaceFindings += response.diagnostics?.length ?? 0;
+        this.log(
+          `Background analysis finished for ${path.relative(this.root, response.absolutePath)} | Findings: ${response.diagnostics?.length ?? 0}`,
+          "debug",
+        );
         const diagnostics =
           response.source === undefined
             ? []
@@ -794,9 +904,11 @@ export class WorkspaceSession {
     }
 
     this.scheduleWorkspaceFile();
+    this.updateStatus();
   }
 
   dispose(): void {
+    if (this.worker) this.log("Stopping project analysis worker", "info");
     this.disposed = true;
     this.cancelUnsavedDeep();
 

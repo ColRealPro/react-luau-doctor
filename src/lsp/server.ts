@@ -9,13 +9,17 @@ import {
   type InitializeResult,
 } from "vscode-languageserver/node";
 
-import { loadConfig, validateKnownRules } from "../config";
+import { loadConfigWithSource, validateKnownRules } from "../config";
+import packageJson from "../../package.json";
 
 import {
   WorkspaceSession,
   defaultEditorSettings,
   type EditorSettings,
 } from "./session";
+import {
+  rescanRequest, statusNotification,
+} from "./editor-protocol";
 
 const connection = createConnection(ProposedFeatures.all);
 let session: WorkspaceSession | null = null;
@@ -27,17 +31,24 @@ function isRelevant(filename: string): boolean {
 }
 
 function projectConfig() {
-  const config = loadConfig(root);
-  validateKnownRules(config);
+  const loaded = loadConfigWithSource(root);
+  validateKnownRules(loaded.config);
 
-  return config;
+  return loaded;
 }
 
-function configure(): void {
+function configure(): boolean {
   try {
-    session?.updateConfig(projectConfig(), settings);
+    const { config, filename } = projectConfig();
+    connection.console.info(filename ? `Loaded project config: ${filename}` : "Using default project configuration (no config file found)");
+    connection.console.info(`Project filters | Include: ${config.include?.length ? config.include.join(", ") : "all Luau files"} | Ignore: ${config.ignore?.length ? config.ignore.join(", ") : "default exclusions"}`);
+    connection.console.info(`Rule overrides: ${Object.entries(config.rules ?? {}).map(([rule, value]) => `${rule}=${value}`).join(", ") || "none"}`);
+    session?.updateConfig(config, settings);
+    return true;
   } catch (error) {
-    connection.console.error(`Configuration failed: ${String(error)}`);
+    const message = `Configuration failed: ${String(error)}`;
+    session?.configurationError(message);
+    return false;
   }
 }
 
@@ -53,16 +64,16 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
 
   session = new WorkspaceSession(
     root,
-    projectConfig(),
+    {},
     settings,
     (documentUri, version, diagnostics) =>
       connection.sendDiagnostics({ uri: documentUri, version, diagnostics }),
-    (message) => connection.console.error(message),
+    (message, level) => connection.console[level](message),
+    { onStatus: (status) => connection.sendNotification(statusNotification, status) },
   );
 
-  session.start();
-
   return {
+    serverInfo: { name: "React-Luau Doctor", version: packageJson.version },
     capabilities: {
       textDocumentSync: {
         openClose: true,
@@ -75,6 +86,17 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
   };
 });
 
+connection.onInitialized(() => {
+  connection.console.info(`React-Luau Doctor ${packageJson.version} language server | Node ${process.version}`);
+  connection.console.info(`Project root: ${root}`);
+  if (configure() && settings.enable && !settings.workspaceScan)
+    connection.console.info("Ready for open files | Background workspace scanning is off");
+});
+
+connection.onRequest(rescanRequest, () => {
+  connection.console.info("Project rescan requested");
+  return configure();
+});
 connection.onDidOpenTextDocument(({ textDocument }) => {
   if (!session || !textDocument.uri.startsWith("file:")) return;
 
@@ -112,6 +134,7 @@ connection.onHover(
 );
 
 connection.onDidChangeConfiguration((params) => {
+  connection.console.info("Editor settings changed");
   const value = (
     params.settings as { reactLuauDoctor?: Partial<EditorSettings> } | undefined
   )?.reactLuauDoctor;
@@ -129,6 +152,7 @@ connection.onDidChangeWatchedFiles(({ changes }) => {
       /react-luau-doctor\.config\.json$/i.test(change.uri),
     )
   ) {
+    connection.console.info("Project config changed");
     configure();
   } else {
     session?.watchedFilesChanged(changes);
@@ -136,6 +160,7 @@ connection.onDidChangeWatchedFiles(({ changes }) => {
 });
 
 connection.onShutdown(() => {
+  connection.console.info("Shutting down language server");
   session?.dispose();
   session = null;
 });
