@@ -5,6 +5,7 @@ import {
 } from "./binding-rules";
 import { noCallComponentAsFunction } from "./no-call-component-as-function";
 import { noMutatingStateUpdater } from "./no-mutating-state-updater";
+import { useMemoMustReturn } from "./usememo-must-return";
 import { fixExampleForRule } from "./examples";
 import { effectNeedsCleanup } from "./effect-needs-cleanup";
 
@@ -90,6 +91,7 @@ const definitions: RuleDefinition[] = [
   noCallComponentAsFunction,
   noCreateBindingInRender,
   noBindingGetValueInRender,
+  useMemoMustReturn,
   noDirectStateMutation,
   noRefCurrentInRender,
   noCreateContextInRender,

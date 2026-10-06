@@ -34,6 +34,16 @@ end)`,
     note: "Map the binding so later updates reach the prop",
   },
 
+  "react-luau/usememo-must-return": {
+    before: `local result = React.useMemo(function()
+\tcalculateValue(input)
+end, { input })`,
+    after: `local result = React.useMemo(function()
+\treturn calculateValue(input)
+end, { input })`,
+    note: "Return the calculated value instead of discarding it",
+  },
+
   "react-luau/parse-error": {
     before: `return React.createElement("Frame", {
 \tVisible = true,

@@ -257,6 +257,42 @@ return Component`,
   );
 });
 
+test("memo callbacks must return a value but nested returns do not count and explicit nil remains allowed", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-memo-return-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "Component.luau"),
+    `local React = require(script.Parent.React)
+local memo = React.useMemo
+local function calculate() compute() end
+local function Component(props)
+    local first = memo(calculate, {})
+    local second = memo(function()
+        local function inner() return 1 end
+        inner()
+        return
+    end, {})
+    local third = memo(function() return nil end, {})
+    local fourth = memo(function()
+        if props.enabled then return 1 end
+    end, { props.enabled })
+    local fifth = memo(function() return function() return 1 end end, {})
+    local memo = function(callback) return callback() end
+    memo(function() compute() end)
+    return React.createElement("Frame")
+end
+return Component`,
+  );
+  const report = await scanPath(root, { cache: false });
+  const findings = report.diagnostics.filter(
+    (item) => item.rule === "react-luau/usememo-must-return",
+  );
+  assert.deepEqual(
+    findings.map((item) => item.location.line),
+    [5, 6],
+  );
+});
+
 async function ruleIds(filename: string): Promise<Set<string>> {
   const report = await scanPath(fixtures);
   return new Set(report.diagnostics.filter((diagnostic) => diagnostic.file === filename).map((diagnostic) => diagnostic.rule));

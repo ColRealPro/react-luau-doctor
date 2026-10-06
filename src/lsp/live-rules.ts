@@ -21,6 +21,7 @@ const LIVE_IDS = [
   "react-luau/no-call-component-as-function",
   "react-luau/no-create-binding-in-render",
   "react-luau/no-binding-getvalue-in-render",
+  "react-luau/usememo-must-return",
   "react-luau/no-ref-current-in-render",
   "react-luau/no-create-context-in-render",
   "react-luau/no-nested-component-definition",
