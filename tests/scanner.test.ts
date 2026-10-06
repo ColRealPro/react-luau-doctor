@@ -7,6 +7,76 @@ import { scanPath } from "../src/scanner";
 
 const fixtures = path.resolve(import.meta.dir, "fixtures");
 
+test("state updaters reject mutations of previous state but allow fresh copies and shadowed parameters", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-state-updater-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "mutate.luau"),
+    `return function(value) table.clear(value) end`,
+  );
+  fs.writeFileSync(
+    path.join(root, "Component.luau"),
+    `local React = require(script.Parent.React)
+local mutate = require(script.Parent.mutate)
+local function Component()
+    local items, setItems = React.useState({})
+    local update = setItems
+    update(function(previous)
+        local alias = previous.items
+        table.insert(alias, 1)
+        previous.enabled = true
+        mutate(previous.items)
+        return previous
+    end)
+    local function clear(previous)
+        table.clear(previous)
+        return previous
+    end
+    setItems(clear)
+    setItems(function(previous)
+        local copy = table.clone(previous)
+        table.insert(copy, 1)
+        copy.enabled = true
+        local function helper(previous)
+            table.insert(previous, 1)
+        end
+        helper({})
+        for previous in {} do
+            table.clear(previous)
+        end
+        return copy
+    end)
+    setItems(function(previous)
+        local copy = table.clone(previous)
+        table.insert(copy.items, 1)
+        copy.items = table.clone(previous.items)
+        table.insert(copy.items, 1)
+        return copy
+    end)
+    setItems(function(previous)
+        previous = {}
+        previous.enabled = true
+        return previous
+    end)
+    local setItems = function(callback) return callback({}) end
+    setItems(function(previous)
+        table.clear(previous)
+        return previous
+    end)
+    return React.createElement("Frame")
+end
+return Component`,
+  );
+  const report = await scanPath(root, { cache: false, parallel: false });
+  const findings = report.diagnostics.filter(
+    (item) => item.rule === "react-luau/no-mutating-state-updater",
+  );
+  assert.deepEqual(
+    findings.map((item) => item.location.line),
+    [8, 9, 10, 14, 33],
+  );
+});
+
 async function ruleIds(filename: string): Promise<Set<string>> {
   const report = await scanPath(fixtures);
   return new Set(report.diagnostics.filter((diagnostic) => diagnostic.file === filename).map((diagnostic) => diagnostic.rule));

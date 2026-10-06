@@ -1,6 +1,19 @@
 import type { FixPreview } from "../types";
 
 const examples: Record<string, FixPreview> = {
+  "react-luau/no-mutating-state-updater": {
+    before: `setItems(function(previous)
+\ttable.insert(previous, item)
+\treturn previous
+end)`,
+    after: `setItems(function(previous)
+\tlocal nextItems = table.clone(previous)
+\ttable.insert(nextItems, item)
+\treturn nextItems
+end)`,
+    note: "Copy any nested table being changed as well",
+  },
+
   "react-luau/parse-error": {
     before: `return React.createElement("Frame", {
 \tVisible = true,

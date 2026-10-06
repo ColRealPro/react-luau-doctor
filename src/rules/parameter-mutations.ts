@@ -1,4 +1,6 @@
 import type { SyntaxNode } from "../syntax";
+import { resolveLocalValue, unwrapExpression } from "../ast/local-values";
+import { isNameShadowedBetween } from "./helpers";
 import { moduleKeys, normalizeRequireTarget, resolveModuleReference } from "../module-resolution";
 import { normalizeExpressionText, parameterBindingNames, rootIdentifier, sameNode } from "../ast/walk";
 import type { FunctionInfo, RuleContext, SourceEffectModuleSummary, StateBinding } from "../types";
@@ -6,6 +8,7 @@ import type { FunctionInfo, RuleContext, SourceEffectModuleSummary, StateBinding
 export type MutationValueOrigin =
   | { kind: "props"; name: string }
   | { kind: "state"; binding: StateBinding }
+  | { kind: "parameter"; name: string }
   | { kind: "fresh" }
   | { kind: "unknown" };
 
@@ -287,18 +290,37 @@ function resolveNameOrigin(
   seen: Set<string>,
 ): MutationValueOrigin {
   const key = `${owner.node.id}:${name}:${atNode.startIndex}`;
+
   if (seen.has(key)) return { kind: "unknown" };
+
   seen.add(key);
 
   const binding = visibleBinding(name, atNode, owner);
+
   if (binding) {
     const state = stateBindingForName(context, owner, name, binding.node);
+
     if (state) return { kind: "state", binding: state };
+
     if (!binding.expression) return { kind: "unknown" };
-    return resolveExpressionOriginInternal(context, binding.expression, owner, seen);
+
+    return resolveExpressionOriginInternal(
+      context,
+      binding.expression,
+      owner,
+      seen,
+    );
   }
 
-  if (owner.isComponent && owner.parameters[0] === name) return { kind: "props", name };
+  if (owner.isComponent && owner.parameters[0] === name)
+    return { kind: "props", name };
+
+  if (
+    owner.parameters.includes(name) &&
+    !isNameShadowedBetween(atNode, owner, name)
+  )
+    return { kind: "parameter", name };
+
   return { kind: "unknown" };
 }
 
@@ -308,9 +330,66 @@ function resolveExpressionOriginInternal(
   owner: FunctionInfo,
   seen: Set<string>,
 ): MutationValueOrigin {
+  expression = unwrapExpression(expression);
+
   if (freshExpression(context, expression)) return { kind: "fresh" };
+
+  if (
+    ["dot_index_expression", "bracket_index_expression"].includes(
+      expression.type,
+    )
+  ) {
+    const base = expression.namedChildren[0];
+
+    if (!base) return { kind: "unknown" };
+
+    const origin = resolveExpressionOriginInternal(
+      context,
+      base,
+      owner,
+      new Set(seen),
+    );
+
+    if (origin.kind !== "fresh") return origin;
+
+    const resolved = resolveLocalValue(context, base);
+
+    if (
+      resolved?.value.type === "function_call" &&
+      context.getCallPath(resolved.value) === "table.clone"
+    ) {
+      // A shallow copy owns its fields but still references the original nested tables
+      const path = normalizeExpressionText(expression.text);
+
+      const reassigned =
+        owner.body &&
+        [...context.walk(owner.body)].some(
+          (node) =>
+            node.type === "assignment_statement" &&
+            node.startIndex < expression.startIndex &&
+            context.nearestFunction(node) === owner &&
+            node.namedChildren
+              .find((child) => child.type === "variable_list")
+              ?.namedChildren.some(
+                (target) => normalizeExpressionText(target.text) === path,
+              ),
+        );
+
+      if (reassigned) return { kind: "unknown" };
+
+      const argument = context.callArguments(resolved.value)[0];
+
+      if (argument)
+        return resolveExpressionOriginInternal(context, argument, owner, seen);
+    }
+
+    return origin;
+  }
+
   const root = rootIdentifier(expression.text);
+
   if (!root) return { kind: "unknown" };
+
   return resolveNameOrigin(context, root, expression, owner, seen);
 }
 

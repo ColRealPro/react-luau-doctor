@@ -1,4 +1,5 @@
 import type { RuleDefinition } from "../types";
+import { noMutatingStateUpdater } from "./no-mutating-state-updater";
 import { fixExampleForRule } from "./examples";
 import { effectNeedsCleanup } from "./effect-needs-cleanup";
 
@@ -80,6 +81,7 @@ const definitions: RuleDefinition[] = [
   rerenderLazyRefInit,
   rerenderStateOnlyInHandlers,
   noSetStateInRender,
+  noMutatingStateUpdater,
   noDirectStateMutation,
   noRefCurrentInRender,
   noCreateContextInRender,
