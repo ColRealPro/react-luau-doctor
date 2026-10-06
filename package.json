@@ -24,10 +24,12 @@
     "install:lsp": "bun run build:lsp && bun run scripts/install-lsp.ts",
     "benchmark:lsp": "bun run scripts/benchmark-lsp.ts",
     "check": "bunx tsc -p tsconfig.json --noEmit",
+    "check:lsp": "npm --prefix editors/vscode run check",
+    "test:lsp": "bun run scripts/build-lsp.ts && bun test tests/lsp.test.ts",
     "test": "bun run build && bun test --parallel=4",
     "doctor:example": "bun run src/cli.ts examples",
     "prepack": "bun run build && bun run check",
-    "ci": "bun run build && bun run check && bun test --parallel=4 && bun run scripts/verify-package.ts",
+    "ci": "bun run build && bun run check && bun run check:lsp && bun run scripts/build-lsp.ts && bun test --parallel=4 && bun run scripts/verify-package.ts",
     "verify:package": "bun run build && bun run scripts/verify-package.ts"
   },
   "engines": {
