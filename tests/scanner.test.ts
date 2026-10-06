@@ -1183,10 +1183,10 @@ return Consumer
 
   const report = await scanPath(root);
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
-  assert.ok(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate"));
+  assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate"), false);
 });
 
-test("binding candidate rule surfaces unknown custom-component consumers without upgrading them to warnings", async (t) => {
+test("binding candidate rule ignores analyzed structural custom-component consumers", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-candidate-component-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -1224,9 +1224,93 @@ return Consumer
 
   const report = await scanPath(root);
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state" && entry.file === "Consumer.luau"), false);
-  const candidate = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate" && entry.file === "Consumer.luau");
+  assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate" && entry.file === "Consumer.luau"), false);
+});
+
+test("binding candidate keeps unresolved visual custom props optional", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-unresolved-component-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "Consumer.luau"), `local React = require(script.Parent.React)
+local RunService = game:GetService("RunService")
+local UnknownChild = require(script.Parent.UnknownChild)
+local function Consumer()
+  local rotation, setRotation = React.useState(0)
+  React.useEffect(function()
+    local connection = RunService.RenderStepped:Connect(setRotation)
+    return function() connection:Disconnect() end
+  end, {})
+  return React.createElement(UnknownChild, { Rotation = rotation })
+end
+return Consumer
+`);
+  const report = await scanPath(root);
+  assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
+  const candidate = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate");
   assert.ok(candidate);
   assert.equal(candidate.severity, "suggestion");
+});
+
+test("binding candidate follows derived measurements into memoized child effects", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-child-effect-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "useProperty.luau"), `local React = require(script.Parent.React)
+local function useProperty(ref, propertyName, asBinding)
+  local value, setValue
+  if asBinding then
+    value, setValue = React.useBinding(nil)
+  else
+    value, setValue = React.useState(nil)
+  end
+  React.useEffect(function()
+    local instance = ref.current
+    if not instance then return end
+    local function update()
+      setValue(instance[propertyName])
+    end
+    local connection = instance:GetPropertyChangedSignal(propertyName):Connect(update)
+    update()
+    return function() connection:Disconnect() end
+  end, { ref, propertyName })
+  return value
+end
+return useProperty
+`);
+  fs.writeFileSync(path.join(root, "MeasuredPanel.luau"), `local React = require(script.Parent.React)
+local function MeasuredPanel(props)
+  local width, setWidth = React.useState(0)
+  React.useEffect(function()
+    setWidth(props.Width)
+  end, { props.Width })
+  return React.createElement("Frame", { Size = UDim2.fromOffset(props.Width, 24) }, {
+    indicator = React.createElement("Frame", { Size = UDim2.fromOffset(width, 4) }),
+  })
+end
+return React.memo(MeasuredPanel)
+`);
+  const consumer = `local React = require(script.Parent.React)
+local MeasuredPanel = require(script.Parent.MeasuredPanel)
+local useProperty = require(script.Parent.useProperty)
+local function Consumer()
+  local ref = React.useRef(nil)
+  local measuredSize = useProperty(ref, "AbsoluteSize") or Vector2.zero
+  local paddedWidth = measuredSize.X + 8
+  return React.createElement(MeasuredPanel, { Width = paddedWidth })
+end
+return Consumer
+`;
+  fs.writeFileSync(path.join(root, "Consumer.luau"), consumer);
+  fs.writeFileSync(path.join(root, "MixedConsumer.luau"), consumer.replace(
+    'return React.createElement(MeasuredPanel, { Width = paddedWidth })',
+    `return React.createElement("Frame", { Size = UDim2.fromOffset(paddedWidth, 24) }, {
+    panel = React.createElement(MeasuredPanel, { Width = paddedWidth }),
+  })`,
+  ));
+  const report = await scanPath(root);
+  const recommendations = report.diagnostics.filter((entry) => entry.rule.startsWith("react-luau/prefer-binding-over-state"));
+  assert.equal(recommendations.some((entry) => entry.file === "Consumer.luau"), false);
+  const mixed = recommendations.filter((entry) => entry.file === "MixedConsumer.luau");
+  assert.equal(mixed.length, 1);
+  assert.ok(mixed.every((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate"));
 });
 
 test("binding candidate rule surfaces mixed visual and structural state but ignores structural-only state", async (t) => {

@@ -225,7 +225,9 @@ local useObservedValue = require(script.Parent.useObservedValue)
 local StructuralThing = require(script.Parent.StructuralThing)
 local function Consumer()
   local value = useObservedValue()
-  return React.createElement(StructuralThing, { rotation = value })
+  return React.createElement("Frame", { Rotation = value }, {
+    child = React.createElement(StructuralThing, { rotation = value }),
+  })
 end
 return Consumer
 `);

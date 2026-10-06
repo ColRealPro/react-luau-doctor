@@ -1834,6 +1834,7 @@ function bindingUsageSummary(
 
       if (
         customComponentUsage &&
+        !compatibleComponentProps.has(customComponentUsage.component) &&
         LIKELY_VISUAL_PROP.test(customComponentUsage.property)
       ) {
         summary.visualCustomComponent += 1;

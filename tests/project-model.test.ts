@@ -105,6 +105,13 @@ local function StructuralFrame(props)
   })
 end
 return StructuralFrame`),
+    sourceFile("StructuralOnlyFrame.luau", `local React = require(script.Parent.React)
+local function StructuralOnlyFrame(props)
+  return React.createElement("Frame", nil, {
+    child = props.Visible and React.createElement("Frame") or nil,
+  })
+end
+return StructuralOnlyFrame`),
     sourceFile("MemoVisualFrame.luau", `local React = require(script.Parent.React)
 local function MemoVisualFrame(props)
   return React.createElement("Frame", { Position = props.position })
@@ -123,7 +130,16 @@ return React.memo(MemoVisualFrame)`),
     normalizeRequireTarget("script.Parent.StructuralFrame"),
     model.bindingCompatibleComponentProps,
   );
+  assert.ok(structural);
+  assert.equal(structural.size, 0);
   assert.equal(structural?.has("rotation") ?? false, false);
+
+  const structuralOnly = resolveModuleReference(
+    normalizeRequireTarget("script.Parent.StructuralOnlyFrame"),
+    model.bindingCompatibleComponentProps,
+  );
+  assert.ok(structuralOnly);
+  assert.equal(structuralOnly.size, 0);
 
   const memoVisual = resolveModuleReference(
     normalizeRequireTarget("script.Parent.MemoVisualFrame"),

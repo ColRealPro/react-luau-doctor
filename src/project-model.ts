@@ -1147,7 +1147,6 @@ function findBindingCompatibleComponentProps(
   if (!propsName) return null;
 
   const ranges = hostPropValueRanges(source);
-  if (ranges.length === 0) return null;
   const escapedProps = propsName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const readPattern = new RegExp(
     `\\b${escapedProps}\\.([A-Za-z_][A-Za-z0-9_]*)\\b|\\b${escapedProps}\\[\\s*["']([^"']+)["']\\s*\\]`,
@@ -1181,7 +1180,7 @@ function findBindingCompatibleComponentProps(
       compatible.add(property);
     }
   }
-  return compatible.size > 0 ? compatible : null;
+  return compatible;
 }
 
 
