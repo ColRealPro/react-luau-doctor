@@ -7,6 +7,119 @@ import { scanPath } from "../src/scanner";
 
 const fixtures = path.resolve(import.meta.dir, "fixtures");
 
+test("dependency table aliases match inline analysis while uncertain contents remain conservative", async (t) => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "doctor-dependency-tables-"),
+  );
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const cases = [
+    ["Inline", "", "{ props.query }"],
+    ["Alias", "local dependencies = { props.query }", "dependencies"],
+    [
+      "Chain",
+      "local dependencies = { props.query }\nlocal alias = (dependencies :: { any })",
+      "alias",
+    ],
+    [
+      "Reassigned",
+      "local dependencies = {}\ndependencies = { props.query }",
+      "dependencies",
+    ],
+    [
+      "Reused",
+      "local dependencies = { props.query }\nReact.useCallback(function() return props.query end, dependencies)",
+      "dependencies",
+    ],
+    [
+      "Complete",
+      "local dependencies = { props.query, props.category }",
+      "dependencies",
+    ],
+    [
+      "Written",
+      "local dependencies = { props.query }\nlocal alias = dependencies\nalias[2] = props.category",
+      "dependencies",
+    ],
+    [
+      "Mutated",
+      "local dependencies = { props.query }\ntable.insert(dependencies, props.category)",
+      "dependencies",
+    ],
+    [
+      "Escaped",
+      "local dependencies = { props.query }\nupdateDependencies(dependencies)",
+      "dependencies",
+    ],
+    [
+      "Conditional",
+      "local dependencies = { props.query }\nif props.enabled then dependencies = {} end",
+      "dependencies",
+    ],
+    [
+      "Shadowed",
+      "local dependencies = { props.query }\ndo\nlocal dependencies = { props.query, props.category }",
+      "dependencies",
+    ],
+  ];
+
+  for (const [name, declarations, argument] of cases) {
+    fs.writeFileSync(
+      path.join(root, `${name}.luau`),
+      `local React = require(script.Parent.React)
+local function Component(props)
+    ${declarations}
+    React.useEffect(function()
+        search(props.query, props.category)
+    end, ${argument})
+    ${name === "Shadowed" ? "end" : ""}
+    return React.createElement("Frame")
+end
+return Component`,
+    );
+  }
+
+  fs.writeFileSync(
+    path.join(root, "Memo.luau"),
+    `local React = require(script.Parent.React)
+local function Component(props)
+    local producerDependencies = { props.query }
+    local result = React.useMemo(function() return transform(props.query) end, producerDependencies)
+    local dependencies = { props.query }
+    React.useEffect(function() consume(result) end, dependencies)
+    return React.createElement("Frame")
+end
+return Component`,
+  );
+  const report = await scanPath(root, { cache: false });
+  assert.equal(
+    report.diagnostics.some((item) => item.rule === "react-luau/parse-error"),
+    false,
+  );
+  const findings = report.diagnostics.filter(
+    (item) => item.rule === "react-luau/exhaustive-deps",
+  );
+  const warnings = findings.filter((item) => item.severity === "warning");
+  assert.deepEqual(warnings.map((item) => item.file).sort(), [
+    "Alias.luau",
+    "Chain.luau",
+    "Inline.luau",
+    "Reassigned.luau",
+    "Reused.luau",
+  ]);
+
+  for (const finding of warnings) {
+    assert.match(finding.message, /missing props\.category/);
+    const source = fs.readFileSync(path.join(root, finding.file), "utf8");
+    assert.match(source.split("\n")[finding.location.line - 1], /end, /);
+  }
+
+  const memo = findings.filter((item) => item.file === "Memo.luau");
+  assert.equal(memo.length, 1);
+  assert.equal(memo[0].severity, "suggestion");
+  assert.match(memo[0].message, /memo dependencies are already covered/);
+});
+
 test("state updaters reject mutations of previous state but allow fresh copies and shadowed parameters", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-state-updater-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

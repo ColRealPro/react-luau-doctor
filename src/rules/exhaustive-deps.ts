@@ -3,6 +3,7 @@ import type { DiagnosticInput, FunctionInfo, RuleContext, RuleDefinition } from 
 import { nodeKey, normalizeExpressionText, parameterBindingNames, rootIdentifier, sameNode } from "../ast/walk";
 import { mutableDependencyBase } from "../roblox-semantics";
 import { declarationNames, dependencyExpressions, tableStartNode } from "./helpers";
+import { HOOK_ARGUMENTS, resolveDependencyTable } from "./dependency-tables";
 
 const GLOBALS = new Set([
   "game", "workspace", "script", "shared", "Enum", "Instance", "task", "coroutine", "debug", "os", "utf8", "buffer", "bit32",
@@ -10,14 +11,6 @@ const GLOBALS = new Set([
   "tonumber", "tostring", "select", "unpack", "rawget", "rawset", "rawequal", "setmetatable", "getmetatable", "Vector2", "Vector3", "UDim",
   "UDim2", "CFrame", "Color3", "BrickColor", "Rect", "Region3", "Ray", "TweenInfo", "NumberRange", "NumberSequence", "ColorSequence",
   "DateTime", "Random", "Axes", "Faces", "PhysicalProperties", "RaycastParams", "OverlapParams", "DockWidgetPluginGuiInfo",
-]);
-
-const HOOK_ARGUMENTS = new Map<string, { callbackIndex: number; depsIndex: number }>([
-  ["React.useEffect", { callbackIndex: 0, depsIndex: 1 }],
-  ["React.useLayoutEffect", { callbackIndex: 0, depsIndex: 1 }],
-  ["React.useMemo", { callbackIndex: 0, depsIndex: 1 }],
-  ["React.useCallback", { callbackIndex: 0, depsIndex: 1 }],
-  ["React.useImperativeHandle", { callbackIndex: 1, depsIndex: 2 }],
 ]);
 
 function parameterNames(functionNode: SyntaxNode): Set<string> {
@@ -451,8 +444,8 @@ function memoizedProducerDependencies(owner: FunctionInfo, context: RuleContext)
       const path = context.resolveCallPath(rawPath);
       if (path !== "React.useMemo" && path !== "React.useCallback") continue;
       const args = context.callArguments(expression);
-      const deps = args[1];
-      if (!deps || deps.type !== "table_constructor" || hasDynamicUnpackDependencies(deps, context)) continue;
+      const deps = resolveDependencyTable(context, args[1]);
+      if (!deps || hasDynamicUnpackDependencies(deps, context)) continue;
       producers.set(name, dependencyPaths(deps));
     }
   }
@@ -617,8 +610,10 @@ export const exhaustiveDeps: RuleDefinition = {
 
       const args = context.callArguments(call);
       const callback = args[shape.callbackIndex];
-      const deps = args[shape.depsIndex];
-      if (!callback || callback.type !== "function_definition" || !deps || deps.type !== "table_constructor") continue;
+      const depsArgument = args[shape.depsIndex];
+      const deps = resolveDependencyTable(context, depsArgument);
+      if (!callback || callback.type !== "function_definition" || !deps || !depsArgument) continue;
+      const depsNode = tableStartNode(depsArgument);
 
       const owner = context.nearestFunction(call);
       if (!owner || (!owner.isComponent && !owner.isHook)) continue;
@@ -655,7 +650,7 @@ export const exhaustiveDeps: RuleDefinition = {
 
       if (hasDynamicUnpackDependencies(deps, context)) {
         diagnostics.push({
-          node: tableStartNode(deps),
+          node: depsNode,
           severity: "suggestion",
           message: `${path} uses dynamic unpack(...) dependencies, so exhaustive dependency analysis is partial.`,
           help: "The analyzer cannot prove which values unpack(...) contributes. Review the explicit dependencies and the custom hook contract.",
@@ -685,7 +680,7 @@ export const exhaustiveDeps: RuleDefinition = {
 
       if (reactiveMissing.length > 0) {
         diagnostics.push({
-          node: tableStartNode(deps),
+          node: depsNode,
           message: `${path} dependency table is missing ${reactiveMissing.join(", ")}.`,
           help: `Add ${reactiveMissing.join(", ")} to the dependency table, or stop capturing ${reactiveMissing.length === 1 ? "that value" : "those values"} in the callback.`,
         });
@@ -693,7 +688,7 @@ export const exhaustiveDeps: RuleDefinition = {
 
       if (transitivelyCoveredMemoized.length > 0) {
         diagnostics.push({
-          node: tableStartNode(deps),
+          node: depsNode,
           severity: "suggestion",
           message: `${path} captures memoized value ${transitivelyCoveredMemoized.join(", ")} without listing ${transitivelyCoveredMemoized.length === 1 ? "it directly" : "them directly"}, but ${transitivelyCoveredMemoized.length === 1 ? "its memo dependencies are" : "their memo dependencies are"} already covered.`,
           help: "The producing memo dependencies are already covered. Listing the memoized value directly can make the dependency relationship clearer.",
@@ -702,7 +697,7 @@ export const exhaustiveDeps: RuleDefinition = {
 
       if (uncertainHandles.length > 0) {
         diagnostics.push({
-          node: tableStartNode(deps),
+          node: depsNode,
           severity: "suggestion",
           message: `${path} captures custom-hook handle ${uncertainHandles.join(", ")} without listing ${uncertainHandles.length === 1 ? "it as a dependency" : "them as dependencies"}.`,
           help: "The analyzer cannot prove this custom-hook return is stable. Check the hook contract before changing the dependency table.",
