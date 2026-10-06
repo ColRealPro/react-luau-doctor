@@ -87,16 +87,20 @@ export async function activate(
     const state = languageClient.state;
     const failed = state === State.StartFailed || state === State.Stopped || analysis.state === "error";
     const analyzing = state === State.Starting || analysis.state === "analyzing";
+    const background = analysis.state === "background";
+    const progress = analysis.progress ? `${analysis.progress.completed}/${analysis.progress.total}` : "";
     const disabled = analysis.state === "disabled";
     const count = vscode.languages.getDiagnostics(editor.document.uri)
       .filter((diagnostic) => diagnostic.source === "React-Luau Doctor").length;
 
     status.text = failed ? "$(warning) Doctor" : disabled ? "$(circle-slash) Doctor"
-      : analyzing ? "$(sync~spin) Doctor" : `$(pulse) Doctor${count ? `: ${count}` : ""}`;
+      : analyzing ? "$(sync~spin) Doctor" : background ? `$(sync~spin) Doctor ${progress}`
+      : `$(pulse) Doctor${count ? `: ${count}` : ""}`;
     status.backgroundColor = failed ? new vscode.ThemeColor("statusBarItem.errorBackground") : undefined;
     status.tooltip = failed ? `${analysis.message ?? "Language server stopped\nRun React-Luau Doctor: Restart Language Server"}\nClick to open output`
       : disabled ? "React-Luau Doctor is disabled\nEnable it in Settings"
       : analyzing ? "React-Luau Doctor is analyzing your project\nClick to open output"
+      : background ? `React-Luau Doctor is checking unopened files: ${progress}\nClick to open output`
       : `React-Luau Doctor: ${count} finding${count === 1 ? "" : "s"} in this file\nClick to open output`;
     status.show();
   }

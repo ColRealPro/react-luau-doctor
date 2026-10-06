@@ -332,6 +332,7 @@ const bundledServer = process.env.REACT_LUAU_DOCTOR_LSP_SERVER ?? path.resolve(i
 test("background output summarizes the batch and keeps per-file details at debug level", async (t) => {
   const worker = new FakeWorker();
   const output: Array<{ message: string; level: string }> = [];
+  const statuses: AnalysisStatus[] = [];
   const project = buildProjectModel(process.cwd(), []);
   let complete!: () => void;
   const finished = new Promise<void>((resolve) => { complete = resolve; });
@@ -339,7 +340,10 @@ test("background output summarizes the batch and keeps per-file details at debug
     () => {}, (message, level) => {
       output.push({ message, level });
       if (message.startsWith("Background analysis finished in")) complete();
-    }, { createWorker: () => worker as unknown as Worker });
+    }, {
+      createWorker: () => worker as unknown as Worker,
+      onStatus: (status) => statuses.push(status),
+    });
   t.after(() => session.dispose());
   worker.on("request", (request: DeepRequest | WorkspaceFileRequest) => {
     if (!("kind" in request)) return;
@@ -353,10 +357,47 @@ test("background output summarizes the batch and keeps per-file details at debug
     id: worker.requests[0]!.id, project, diagnostics: [],
     files: [path.join(process.cwd(), "A.luau"), path.join(process.cwd(), "B.luau")],
   });
+  assert.equal(worker.requests.length, 2);
+  assert.equal("kind" in worker.requests[1]!, true);
+  assert.deepEqual(statuses.at(-1)?.progress, { completed: 0, total: 2 });
   await finished;
+  assert.ok(statuses.some((status) => status.state === "background" && status.progress?.completed === 1 && status.progress.total === 2));
+  assert.equal(statuses.at(-1)?.state, "idle");
   assert.ok(output.some((item) => item.level === "info" && item.message === "Queued unopened files for background analysis: 2"));
   assert.ok(output.some((item) => item.level === "info" && /Files processed: 2 \| Findings: 2$/.test(item.message)));
   assert.equal(output.filter((item) => item.level === "debug" && item.message.startsWith("Background analysis finished for")).length, 2);
+});
+
+test("background scanning keeps one file in flight and yields to open-file analysis", (t) => {
+  const worker = new FakeWorker();
+  const statuses: AnalysisStatus[] = [];
+  const session = new WorkspaceSession(process.cwd(), {}, { ...defaultEditorSettings, workspaceScan: true },
+    () => {}, () => {}, {
+      createWorker: () => worker as unknown as Worker,
+      onStatus: (status) => statuses.push(status),
+    });
+  t.after(() => session.dispose());
+  const project = buildProjectModel(process.cwd(), []);
+  const files = ["A.luau", "B.luau"].map((name) => path.join(process.cwd(), name));
+  session.start();
+  worker.emit("message", { id: worker.requests[0]!.id, project, diagnostics: [], files });
+  const background = worker.requests[1] as WorkspaceFileRequest;
+  assert.equal(background.kind, "workspace-file");
+  assert.equal(worker.requests.length, 2);
+
+  const filename = path.join(process.cwd(), "Component.luau");
+  session.open(pathToFileURL(filename).href, filename, "return 1\n", 1);
+  const foreground = worker.requests[2] as DeepRequest;
+  assert.equal(foreground.diagnose, true);
+  assert.equal(foreground.buffers.length, 1);
+  assert.equal(statuses.at(-1)?.state, "analyzing");
+  worker.emit("message", { kind: "workspace-file", id: background.id, absolutePath: background.absolutePath, diagnostics: [] });
+  assert.equal(worker.requests.length, 3);
+  worker.emit("message", {
+    id: foreground.id, project, files, diagnostics: [{ relativePath: "Component.luau", version: 1, diagnostics: [] }],
+  });
+  assert.equal(worker.requests.length, 3);
+  assert.equal(statuses.at(-1)?.state, "background");
 });
 
 test("Node server recovers from invalid config and supports diagnostics, explanations, suppressions, and rescanning", {

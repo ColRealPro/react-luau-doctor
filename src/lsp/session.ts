@@ -25,7 +25,6 @@ import { diagnosticHover } from "./hover";
 import { diagnosticCodeActions } from "./code-actions";
 
 const MAX_RECENT_DEEP_FILES = 32;
-const WORKSPACE_FILE_DELAY_MS = 40;
 const UNSAVED_DEEP_IDLE_MS = 1500;
 const UNSAVED_DEEP_MIN_INTERVAL_MS = 3000;
 const WORKSPACE_EDIT_QUIET_MS = 2000;
@@ -393,14 +392,21 @@ export class WorkspaceSession {
   private updateStatus(): void {
     if (this.disposed) return;
 
-    const busy = this.running || this.workspaceInFlight ||
-      this.workspaceQueue.length > 0 ||
+    const busy = this.running ||
       [...this.documents.values()].some((document) => document.liveRunning);
+    const background = Boolean(this.workspaceInFlight) || this.workspaceQueue.length > 0;
     const state = this.statusError ? "error"
       : !this.settings.enable ? "disabled"
-      : busy ? "analyzing" : "idle";
+      : busy ? "analyzing" : background ? "background" : "idle";
 
-    this.runtime.onStatus?.({ state, message: this.statusError });
+    const status: AnalysisStatus = { state, message: this.statusError };
+    if (state === "background") {
+      status.progress = {
+        completed: this.workspaceFilesProcessed,
+        total: this.workspaceFilesProcessed + this.workspaceQueue.length + (this.workspaceInFlight ? 1 : 0),
+      };
+    }
+    this.runtime.onStatus?.(status);
   }
 
   private reportError(message: string): void {
@@ -846,58 +852,58 @@ export class WorkspaceSession {
     )
       return;
 
-    this.workspaceTimer = setTimeout(
-      () => {
-        this.workspaceTimer = undefined;
+    const run = () => {
+      this.workspaceTimer = undefined;
+
+      if (
+        this.running ||
+        this.dirty ||
+        this.workspaceInFlight ||
+        !this.settings.workspaceScan
+      )
+        return;
+
+      let absolutePath: string | undefined;
+
+      while (this.workspaceQueue.length > 0 && !absolutePath) {
+        const candidate = this.workspaceQueue.shift()!;
 
         if (
-          this.running ||
-          this.dirty ||
-          this.workspaceInFlight ||
-          !this.settings.workspaceScan
-        )
-          return;
-
-        let absolutePath: string | undefined;
-
-        while (this.workspaceQueue.length > 0 && !absolutePath) {
-          const candidate = this.workspaceQueue.shift()!;
-
-          if (
-            ![...this.documents.values()].some(
-              (document) =>
-                path.resolve(document.absolutePath) === path.resolve(candidate),
-            )
+          ![...this.documents.values()].some(
+            (document) =>
+              path.resolve(document.absolutePath) === path.resolve(candidate),
           )
-            absolutePath = candidate;
-        }
+        )
+          absolutePath = candidate;
+      }
 
-        if (!absolutePath) {
-          this.scheduleWorkspaceFile();
-          this.updateStatus();
-          return;
-        }
-
-        const request: WorkspaceFileRequest = {
-          kind: "workspace-file",
-          id: ++this.requestId,
-          root: this.root,
-          absolutePath,
-          config: this.config,
-        };
-
-        this.workspaceInFlight = {
-          id: request.id,
-          generation: this.generation,
-          absolutePath,
-          projectRevision: this.projectRevision,
-        };
-
+      if (!absolutePath) {
+        this.scheduleWorkspaceFile();
         this.updateStatus();
-        this.ensureWorker().postMessage(request);
-      },
-      Math.max(WORKSPACE_FILE_DELAY_MS, this.workspaceResumeAt - Date.now()),
-    );
+        return;
+      }
+
+      const request: WorkspaceFileRequest = {
+        kind: "workspace-file",
+        id: ++this.requestId,
+        root: this.root,
+        absolutePath,
+        config: this.config,
+      };
+
+      this.workspaceInFlight = {
+        id: request.id,
+        generation: this.generation,
+        absolutePath,
+        projectRevision: this.projectRevision,
+      };
+
+      this.updateStatus();
+      this.ensureWorker().postMessage(request);
+    };
+    const delay = this.workspaceResumeAt - Date.now();
+    if (delay > 0) this.workspaceTimer = setTimeout(run, delay);
+    else run();
   }
 
   private onWorkspaceFileResult(response: WorkspaceFileResponse): void {

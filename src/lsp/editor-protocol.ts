@@ -1,6 +1,7 @@
 export interface AnalysisStatus {
-  state: "idle" | "analyzing" | "disabled" | "error";
+  state: "idle" | "analyzing" | "background" | "disabled" | "error";
   message?: string;
+  progress?: { completed: number; total: number };
 }
 
 export interface ExplainFindingParams {
