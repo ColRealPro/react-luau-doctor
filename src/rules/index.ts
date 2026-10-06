@@ -1,4 +1,5 @@
 import type { RuleDefinition } from "../types";
+import { noCreateBindingInRender } from "./binding-rules";
 import { noCallComponentAsFunction } from "./no-call-component-as-function";
 import { noMutatingStateUpdater } from "./no-mutating-state-updater";
 import { fixExampleForRule } from "./examples";
@@ -84,6 +85,7 @@ const definitions: RuleDefinition[] = [
   noSetStateInRender,
   noMutatingStateUpdater,
   noCallComponentAsFunction,
+  noCreateBindingInRender,
   noDirectStateMutation,
   noRefCurrentInRender,
   noCreateContextInRender,

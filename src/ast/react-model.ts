@@ -16,7 +16,7 @@ const REACT_HOOKS = new Set([
   "useBinding",
 ]);
 
-const REACT_MEMBERS = new Set([...REACT_HOOKS, "createElement", "createContext", "memo", "joinBindings"]);
+const REACT_MEMBERS = new Set([...REACT_HOOKS, "createElement", "createContext", "createBinding", "memo", "joinBindings"]);
 const STABLE_CUSTOM_HOOK_RETURN = /^(?:set[A-Z0-9_]|dispatch$|send$|emit$|fire$)/i;
 const INSTANCE_FACTORY_MEMBERS = new Set([
   "Clone",

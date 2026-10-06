@@ -20,6 +20,12 @@ end)`,
     note: "Give the child its own component identity and hook lifecycle",
   },
 
+  "react-luau/no-create-binding-in-render": {
+    before: `local value, setValue = React.createBinding(0)`,
+    after: `local value, setValue = React.useBinding(0)`,
+    note: "Keep the binding and updater stable across renders",
+  },
+
   "react-luau/parse-error": {
     before: `return React.createElement("Frame", {
 \tVisible = true,

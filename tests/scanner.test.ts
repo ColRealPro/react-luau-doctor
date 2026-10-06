@@ -143,6 +143,47 @@ return Component`,
   );
 });
 
+test("binding creation warns during render but allows deferred work and guarded lazy ref initialization", async (t) => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "doctor-binding-creation-"),
+  );
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "Component.luau"),
+    `local React = require(script.Parent.React)
+local createBinding = React.createBinding
+local shared = createBinding(0)
+local function Component()
+    local value = createBinding(0)
+    local handle = React.useRef(nil)
+    if handle.current == nil then
+        handle.current = createBinding(0)
+    else
+        print("already initialized")
+    end
+    React.useEffect(function() createBinding(0) end, {})
+    return React.createElement("TextButton", {
+        Text = value,
+        [React.Event.Activated] = function() createBinding(0) end,
+    })
+end
+local function Other(React)
+    React.useState(0)
+    local binding = React.createBinding(0)
+    return React.createElement("Frame")
+end
+return Component`,
+  );
+  const report = await scanPath(root, { cache: false });
+  const findings = report.diagnostics.filter(
+    (item) => item.rule === "react-luau/no-create-binding-in-render",
+  );
+  assert.deepEqual(
+    findings.map((item) => item.location.line),
+    [5],
+  );
+});
+
 async function ruleIds(filename: string): Promise<Set<string>> {
   const report = await scanPath(fixtures);
   return new Set(report.diagnostics.filter((diagnostic) => diagnostic.file === filename).map((diagnostic) => diagnostic.rule));
