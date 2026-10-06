@@ -643,6 +643,52 @@ export function changedProjectFiles(session: ProjectCacheSession): string[] {
     .sort();
 }
 
+export function transitiveAffectedFiles(
+  changedFiles: string[],
+  previousModules: Readonly<Record<string, CachedSourceEffectModule>>,
+  currentModules: Readonly<Record<string, CachedSourceEffectModule>>,
+): Set<string> {
+  const affected = new Set(changedFiles.map(normalizeRelative));
+  const modules = new Map<string, { file: string; id: string }>();
+  const reverse = new Map<string, Set<string>>();
+
+  for (const source of [previousModules, currentModules]) {
+    for (const [rawFile, module] of Object.entries(source)) {
+      const file = normalizeRelative(rawFile);
+      modules.set(file, { file, id: module.id });
+
+      for (const dependency of module.importedModuleIds) {
+        const importers = reverse.get(dependency) ?? new Set<string>();
+        importers.add(file);
+        reverse.set(dependency, importers);
+      }
+    }
+  }
+
+  const queue = [...affected].map(
+    (file) => modules.get(file)?.id ?? file.toLowerCase(),
+  );
+
+  const visitedIds = new Set(queue);
+
+  while (queue.length > 0) {
+    const moduleId = queue.shift()!;
+
+    for (const importerFile of reverse.get(moduleId) ?? []) {
+      if (!affected.has(importerFile)) affected.add(importerFile);
+
+      const importerId = modules.get(importerFile)?.id;
+
+      if (importerId && !visitedIds.has(importerId)) {
+        visitedIds.add(importerId);
+        queue.push(importerId);
+      }
+    }
+  }
+
+  return affected;
+}
+
 export function knownReactFile(
   session: ProjectCacheSession,
   relativePath: string,

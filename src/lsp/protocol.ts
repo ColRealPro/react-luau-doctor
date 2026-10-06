@@ -13,6 +13,8 @@ export interface DeepRequest {
   config: DoctorConfig;
   buffers: OpenBuffer[];
   diagnose: boolean;
+  diagnoseFiles?: string[];
+  fullScan?: boolean;
 }
 
 export interface DeepResponse {
@@ -26,6 +28,7 @@ export interface DeepResponse {
   }>;
 
   files?: string[];
+  affectedFiles?: string[];
   error?: string;
 }
 
