@@ -45,6 +45,7 @@ export interface EditorSettings {
   liveDebounceMs: number;
   deepOnSave: boolean;
   workspaceScan: boolean;
+  respectFileFilters: boolean;
 }
 
 export const defaultEditorSettings: EditorSettings = {
@@ -52,6 +53,7 @@ export const defaultEditorSettings: EditorSettings = {
   liveDebounceMs: 250,
   deepOnSave: true,
   workspaceScan: false,
+  respectFileFilters: false,
 };
 
 interface Document extends OpenBuffer {
@@ -132,15 +134,19 @@ export class WorkspaceSession {
       this.refresh(false);
   }
 
+  private shouldAnalyze(document: Document): boolean {
+    return (
+      !this.settings.respectFileFilters ||
+      isSelectedLuauPath(document.relativePath, this.config)
+    );
+  }
+
   open(
     uri: string,
     absolutePath: string,
     source: string,
     version: number,
   ): void {
-    this.cancelUnsavedDeep();
-    this.deferWorkspaceFiles();
-
     const relativePath = path
       .relative(this.root, absolutePath)
       .split(path.sep)
@@ -158,6 +164,15 @@ export class WorkspaceSession {
 
     this.documents.set(uri, document);
     this.log(`Opened ${relativePath}`, "info");
+
+    if (!this.shouldAnalyze(document)) {
+      this.publish(uri, version, []);
+      this.log(`Skipped ${relativePath}: excluded by project filters`, "debug");
+      return;
+    }
+
+    this.cancelUnsavedDeep();
+    this.deferWorkspaceFiles();
 
     if (!this.settings.enable) return;
 
@@ -198,6 +213,13 @@ export class WorkspaceSession {
 
     if (!document || version <= document.version) return;
 
+    if (!this.shouldAnalyze(document)) {
+      document.source = source;
+      document.version = version;
+      document.bufferDirty = true;
+      return;
+    }
+
     if (this.dirtyIdle) {
       this.dirty = false;
       this.dirtyIdle = false;
@@ -235,6 +257,11 @@ export class WorkspaceSession {
     const document = this.documents.get(uri);
 
     if (!document) return;
+
+    if (!this.shouldAnalyze(document)) {
+      document.bufferDirty = false;
+      return;
+    }
 
     this.log(
       `Saved ${document.relativePath}${this.settings.deepOnSave ? "" : " (project analysis on save disabled)"}`,
@@ -278,7 +305,7 @@ export class WorkspaceSession {
       this.publish(uri, undefined, this.published.get(uri) ?? []);
     }
 
-    if (document.bufferDirty) {
+    if (document.bufferDirty && this.shouldAnalyze(document)) {
       this.recentDeep.delete(document.absolutePath);
       this.project = null;
 
@@ -291,7 +318,10 @@ export class WorkspaceSession {
 
     if (
       [...this.documents.values()].some(
-        (entry) => entry.bufferDirty && entry.deepVersion !== entry.version,
+        (entry) =>
+          this.shouldAnalyze(entry) &&
+          entry.bufferDirty &&
+          entry.deepVersion !== entry.version,
       )
     )
       this.scheduleUnsavedDeep();
@@ -308,7 +338,7 @@ export class WorkspaceSession {
     this.statusError = undefined;
 
     this.log(
-      `Diagnostics ${settings.enable ? "enabled" : "disabled"} | Live debounce: ${settings.liveDebounceMs}ms | Deep on save: ${settings.deepOnSave ? "on" : "off"} | Workspace scan: ${settings.workspaceScan ? "on" : "off"}`,
+      `Diagnostics ${settings.enable ? "enabled" : "disabled"} | Live debounce: ${settings.liveDebounceMs}ms | Deep on save: ${settings.deepOnSave ? "on" : "off"} | Workspace scan: ${settings.workspaceScan ? "on" : "off"} | Respect file filters: ${settings.respectFileFilters ? "on" : "off"}`,
       "info",
     );
 
@@ -482,7 +512,12 @@ export class WorkspaceSession {
   private scheduleLive(uri: string): void {
     const document = this.documents.get(uri);
 
-    if (!document || !this.project || document.deepVersion === document.version)
+    if (
+      !document ||
+      !this.shouldAnalyze(document) ||
+      !this.project ||
+      document.deepVersion === document.version
+    )
       return;
 
     if (document.timer) clearTimeout(document.timer);
@@ -518,7 +553,9 @@ export class WorkspaceSession {
       !this.settings.enable ||
       ![...this.documents.values()].some(
         (document) =>
-          document.bufferDirty && document.deepVersion !== document.version,
+          this.shouldAnalyze(document) &&
+          document.bufferDirty &&
+          document.deepVersion !== document.version,
       )
     )
       return;
@@ -550,7 +587,9 @@ export class WorkspaceSession {
     const snapshots = [...this.documents.values()]
       .filter(
         (document) =>
-          document.bufferDirty && document.deepVersion !== document.version,
+          this.shouldAnalyze(document) &&
+          document.bufferDirty &&
+          document.deepVersion !== document.version,
       )
       .map(({ uri, version, source }) => ({ uri, version, source }));
 
@@ -610,7 +649,13 @@ export class WorkspaceSession {
     const project = this.project;
     const generation = this.generation;
 
-    if (!document || !project || !this.settings.enable) return;
+    if (
+      !document ||
+      !this.shouldAnalyze(document) ||
+      !project ||
+      !this.settings.enable
+    )
+      return;
 
     document.liveRunning = true;
     this.updateStatus();
@@ -732,10 +777,13 @@ export class WorkspaceSession {
   }
 
   private refresh(diagnose: boolean, idle = false): void {
+    const documents = [...this.documents.values()].filter((document) =>
+      this.shouldAnalyze(document),
+    );
     if (
       this.disposed ||
       !this.settings.enable ||
-      (this.documents.size === 0 && !this.settings.workspaceScan)
+      (documents.length === 0 && !this.settings.workspaceScan)
     )
       return;
 
@@ -770,7 +818,7 @@ export class WorkspaceSession {
       root: this.root,
       config: this.config,
 
-      buffers: [...this.documents.values()].map(
+      buffers: documents.map(
         ({ absolutePath, relativePath, source, version }) => ({
           absolutePath,
           relativePath,
@@ -781,7 +829,7 @@ export class WorkspaceSession {
 
       diagnose,
 
-      diagnoseFiles: [...this.documents.values()]
+      diagnoseFiles: documents
         .filter((document) => document.deepVersion !== document.version)
         .map((document) => document.absolutePath),
 
@@ -802,7 +850,13 @@ export class WorkspaceSession {
 
     this.running = false;
 
-    if (this.documents.size === 0 && !this.settings.workspaceScan) {
+    if (
+      !this.settings.enable ||
+      (!this.settings.workspaceScan &&
+        ![...this.documents.values()].some((document) =>
+          this.shouldAnalyze(document),
+        ))
+    ) {
       this.project = null;
       this.dirty = false;
       this.dirtyIdle = false;

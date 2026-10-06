@@ -336,6 +336,95 @@ test("deep refreshes recheck changed modules and transitive importers while reta
   );
 });
 
+test("open-file filters are opt-in and react to setting and config changes", async (t) => {
+  const worker = new FakeWorker();
+  const publications: Array<{ uri: string; count: number }> = [];
+  const live: string[] = [];
+  const config = { include: ["src/**"], ignore: ["src/ignored/**"] };
+  const settings = { ...defaultEditorSettings, liveDebounceMs: 0 };
+  const session = new WorkspaceSession(
+    process.cwd(),
+    config,
+    settings,
+    (uri, _version, diagnostics) =>
+      publications.push({ uri, count: diagnostics.length }),
+    () => {},
+    {
+      createWorker: () => worker as unknown as Worker,
+      analyzeFile: async (input) => {
+        live.push(input.relativePath);
+        return {
+          relativePath: input.relativePath,
+          isReactFile: true,
+          scanned: true,
+          diagnostics: [],
+        };
+      },
+    },
+  );
+  t.after(() => session.dispose());
+  const filename = (relative: string) => path.join(process.cwd(), relative);
+  const uri = (relative: string) => pathToFileURL(filename(relative)).href;
+  const source = "local props = {}\nprops.value = 1\n";
+  const ignored = "src/ignored/Component.luau";
+  const outside = "outside/Component.luau";
+  const included = "src/Component.luau";
+  const respond = () => {
+    const request = worker.requests.at(-1) as DeepRequest;
+    worker.emit("message", {
+      id: request.id,
+      project: buildProjectModel(process.cwd(), []),
+      diagnostics: request.buffers.map((buffer) => ({
+        relativePath: buffer.relativePath,
+        version: buffer.version,
+        diagnostics: [finding(2)],
+      })),
+    });
+    return request;
+  };
+  assert.equal(settings.respectFileFilters, false);
+  session.open(uri(ignored), filename(ignored), source, 1);
+  respond();
+  assert.equal(publications.at(-1)?.count, 1);
+
+  session.change(uri(ignored), source, 2);
+  session.save(uri(ignored));
+  const filtered = { ...settings, respectFileFilters: true };
+  session.updateConfig(config, filtered);
+  respond();
+  const count = worker.requests.length;
+  assert.equal(publications.at(-1)?.count, 0);
+  session.change(uri(ignored), `${source}\n`, 3);
+  session.save(uri(ignored));
+  session.open(uri(outside), filename(outside), source, 1);
+  assert.equal(worker.requests.length, count);
+  session.open(uri(included), filename(included), source, 1);
+  assert.deepEqual(
+    respond().buffers.map((buffer) => buffer.relativePath),
+    [included],
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(live, []);
+
+  session.updateConfig({ include: config.include }, filtered);
+  const allowed = respond().buffers;
+  assert.deepEqual(
+    allowed.map((buffer) => buffer.relativePath).sort(),
+    [ignored, included].sort(),
+  );
+  assert.equal(
+    allowed.find((buffer) => buffer.relativePath === ignored)?.source,
+    `${source}\n`,
+  );
+  session.updateConfig(config, settings);
+  assert.deepEqual(
+    respond()
+      .buffers.map((buffer) => buffer.relativePath)
+      .sort(),
+    [ignored, outside, included].sort(),
+  );
+});
+
 test("byte columns map to UTF-16 editor positions", () => {
   const positions = new SourcePositions("a😀漢e\r\nβ😀z");
   assert.deepEqual(positions.position(1, 6), { line: 0, character: 3 });

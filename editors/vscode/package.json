@@ -83,6 +83,11 @@
           "type": "boolean",
           "default": false,
           "description": "Scan unopened project files in the background, after open-file work"
+        },
+        "reactLuauDoctor.respectFileFilters": {
+          "type": "boolean",
+          "default": false,
+          "description": "Apply project include/ignore filters to open files"
         }
       }
     }

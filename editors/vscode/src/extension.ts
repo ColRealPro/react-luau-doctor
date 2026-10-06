@@ -29,6 +29,7 @@ function settings() {
     liveDebounceMs: config.get("liveDebounceMs", 250),
     deepOnSave: config.get("deepOnSave", true),
     workspaceScan: config.get("workspaceScan", false),
+    respectFileFilters: config.get("respectFileFilters", false),
   };
 }
 
