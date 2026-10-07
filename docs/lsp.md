@@ -1,20 +1,18 @@
 # VS Code extension
 
-Doctor shows findings in your code and the Problems panel as you edit `.luau` and `.lua` files. You don't need Bun or the CLI to use the installed extension
+Doctor provides a VS Code extension that analyzes your code as you write, allowing you to catch problems much quicker, and giving you quick fixes and easier to find guidance for fixing findings. 
 
 ## Install
 
-In the Extensions panel, open the menu and choose "Install from VSIX...". Select the Doctor `.vsix`, then reload VS Code
+Install [React-Luau Doctor from the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=colrealpro.react-luau-doctor)
 
-Open your project folder and a Luau file to start Doctor
-
-To build the VSIX yourself, see [development](development.md#run-locally)
+Open your project folder and a Luau file for doctor to start analyzing
 
 ## Quick fixes
 
-Hover a finding for its explanation and code example. Quick Fix lets you open the explanation in the Doctor terminal, suppress the rule for that line, or disable it for the project
+You can hover a finding for a quick explanation and code example. Quick Fix lets you open the explanation with the `why` command in the cli (no cli needed though), suppress the rule for that line, or disable it for the entire project
 
-Disabling a rule opens your project config with the change. Save the config to apply it
+Disabling a rule opens your project config with the change. It does not save the file automatically, so if you want to keep it, save it yourself
 
 ## Settings
 
