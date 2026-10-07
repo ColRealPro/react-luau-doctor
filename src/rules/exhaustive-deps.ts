@@ -4,6 +4,7 @@ import { nodeKey, normalizeExpressionText, parameterBindingNames, rootIdentifier
 import { mutableDependencyBase } from "../roblox-semantics";
 import { declarationNames, dependencyExpressions, tableStartNode } from "./helpers";
 import { HOOK_ARGUMENTS, resolveDependencyTable } from "./dependency-tables";
+import { resolveLocalValue } from "../ast/local-values";
 
 const GLOBALS = new Set([
   "game", "workspace", "script", "shared", "Enum", "Instance", "task", "coroutine", "debug", "os", "utf8", "buffer", "bit32",
@@ -170,8 +171,16 @@ function capturedDependencyPaths(
   available: Set<string>,
   stableVariables: Set<string>,
   externallyMutableRoots: Set<string>,
+  context: RuleContext,
 ): Set<string> {
   const captured = new Set<string>();
+  const owner = context.nearestFunction(callback);
+
+  const isRenderBinding = (identifier: SyntaxNode): boolean => {
+    const resolved = resolveLocalValue(context, identifier);
+
+    return !resolved || context.nearestFunction(resolved.value) === owner;
+  };
 
   for (const node of runtimeDescendants(callback)) {
     if (node.type === "dot_index_expression" && outermostDotPath(node)) {
@@ -179,6 +188,7 @@ function capturedDependencyPaths(
       if (!root || !available.has(root) || GLOBALS.has(root) || stableVariables.has(root)) continue;
       const rootNode = rootIdentifierNode(node, root);
       if (!rootNode || isLocallyBoundOccurrence(rootNode, callback, root)) continue;
+      if (!isRenderBinding(rootNode)) continue;
       const capture = normalizeCapturedPath(node.text, stableVariables, externallyMutableRoots);
       if (capture) captured.add(capture);
       continue;
@@ -190,6 +200,7 @@ function capturedDependencyPaths(
     const name = node.text;
     if (!available.has(name) || GLOBALS.has(name) || stableVariables.has(name)) continue;
     if (isLocallyBoundOccurrence(node, callback, name)) continue;
+    if (!isRenderBinding(node)) continue;
     captured.add(name);
   }
 
@@ -233,7 +244,7 @@ function expandLocalFunctionCaptures(
     }
 
     visiting.add(capture);
-    const inner = capturedDependencyPaths(fn, available, stableVariables, externallyMutableRoots);
+    const inner = capturedDependencyPaths(fn, available, stableVariables, externallyMutableRoots, context);
     for (const dependency of inner) addCapture(dependency);
     visiting.delete(capture);
   };
@@ -376,7 +387,7 @@ function derivedLocalDependencies(
       const name = names[index];
       const expression = expressions[index] ?? expressions[0];
       if (!expression || mutated.has(name) || !isPureDerivedExpression(expression, context)) continue;
-      derived.set(name, capturedDependencyPaths(expression, available, stableVariables, externallyMutableRoots));
+      derived.set(name, capturedDependencyPaths(expression, available, stableVariables, externallyMutableRoots, context));
     }
   }
 
@@ -622,7 +633,7 @@ export const exhaustiveDeps: RuleDefinition = {
       const stableVariables = context.model.stableVariablesByFunction.get(ownerKey) ?? new Set<string>();
       const externallyMutableRoots = context.model.externalMutableVariablesByFunction.get(ownerKey) ?? new Set<string>();
       const functionExpandedCaptures = expandLocalFunctionCaptures(
-        capturedDependencyPaths(callback, available, stableVariables, externallyMutableRoots),
+        capturedDependencyPaths(callback, available, stableVariables, externallyMutableRoots, context),
         owner,
         available,
         stableVariables,

@@ -70,6 +70,37 @@ return Component`,
   );
 });
 
+test("dependency analysis resolves shadowed module locals inside initializers without hiding later reactive reads", async (t) => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "doctor-dependency-scope-"),
+  );
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "Component.luau"),
+    `local React = require(script.Parent.React)
+local catalog = require(script.Parent.Catalog)
+local function Component(props)
+    local catalog = React.useMemo(function()
+        return catalog[props.id]
+    end, { props.id })
+    React.useEffect(function()
+        consume(catalog)
+    end, {})
+    return React.createElement("Frame")
+end
+return Component`,
+  );
+  const report = await scanPath(root, { cache: false });
+  const findings = report.diagnostics.filter(
+    (item) => item.rule === "react-luau/exhaustive-deps",
+  );
+  assert.equal(findings.length, 1);
+  assert.match(
+    findings[0].message,
+    /React\.useEffect dependency table is missing catalog/,
+  );
+});
+
 test("dependency table aliases match inline analysis while uncertain contents remain conservative", async (t) => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "doctor-dependency-tables-"),
