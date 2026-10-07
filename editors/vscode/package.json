@@ -4,6 +4,7 @@
   "description": "Live and deep diagnostics for React-Luau projects",
   "version": "0.20.0",
   "publisher": "colrealpro",
+  "icon": "Icon.png",
   "license": "MIT",
   "repository": {
     "type": "git",
