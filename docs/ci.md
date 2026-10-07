@@ -1,72 +1,49 @@
 # CI setup
 
-React-Luau Doctor can install and manage CI for GitHub Actions and GitLab.
-
 ## GitHub Actions
 
-From your Roblox repository, run:
+From your project folder:
 
 ```bash
-react-luau-doctor ci install --yes
+react-luau-doctor ci install
 ```
 
-Then commit `.github/workflows/react-luau-doctor.yml`.
+The setup asks which findings should fail the check and whether to post PR comments. Add `--yes` to use the defaults
 
-By default, pull requests scan changed files and report findings without blocking merges. Pushes to `main` run a full advisory scan. The generated workflow pins the Doctor version that created it so CI stays reproducible.
+Commit the generated `.github/workflows/react-luau-doctor.yml`
 
-### Configure CI
+By default, PRs report newly introduced findings without failing the check. Pushes to `main` run a full scan. The workflow pins the Doctor version used to create it
 
-Use `ci config` to change the generated workflow. For example:
+## Change the settings
+
+To fail the check when a PR introduces errors:
 
 ```bash
 react-luau-doctor ci config --blocking error --scope changed --yes
 ```
 
-Blocking levels are:
+| Blocking level | When findings fail the check       |
+| -------------- | ---------------------------------- |
+| `none`         | Findings do not fail the check     |
+| `error`        | Errors fail the check              |
+| `warning`      | Errors and warnings fail the check |
 
-- `none` - never fail the PR check
-- `error` - fail when errors are reported
-- `warning` - fail when warnings or errors are reported
+Use `--no-comment`, `--no-review-comments`, or `--no-commit-status` to disable the corresponding GitHub reports
 
-To disable GitHub reporting:
+GitHub reporting uses `GITHUB_TOKEN`. Fork PRs may have a read-only token, so Doctor can still scan them even when it cannot post comments or a status
 
-```bash
-react-luau-doctor ci config --no-comment --no-review-comments --no-commit-status --yes
-```
-
-### Permissions
-
-The generated GitHub workflow requests:
-
-```yaml
-permissions:
-  contents: read
-  pull-requests: write
-  statuses: write
-```
-
-Repository contents remain read-only. `pull-requests: write` is used for the PR summary and inline review comments, while `statuses: write` is used for the commit status.
-
-Fork pull requests commonly receive read-only tokens. In that case, reporting may be unavailable, but the scan and configured gate still run. Keep the `pull_request` trigger rather than switching to `pull_request_target` just to obtain write permissions.
-
-### Upgrade
-
-Regenerate the workflow with the latest Doctor release:
+## Upgrade Doctor in CI
 
 ```bash
 bunx @colrealpro/react-luau-doctor@latest ci upgrade --yes
 ```
 
-This preserves supported CI settings while updating the pinned package version. Review and commit the generated change.
-
-Both `ci install` and `ci upgrade` also support `--pr` to create a branch and open a pull request using GitHub CLI.
+This updates the pinned version and keeps your CI settings. Commit the workflow change
 
 ## GitLab
 
-Install a GitLab workflow with:
-
 ```bash
-react-luau-doctor ci install --provider gitlab --blocking error --yes
+react-luau-doctor ci install --provider gitlab --yes
 ```
 
-Then commit `.gitlab-ci.yml`. The generated job runs the pinned Doctor version and does not publish merge-request comments or commit statuses.
+Commit the generated `.gitlab-ci.yml`. GitLab runs the scan and uses the same blocking settings, but does not post merge request comments

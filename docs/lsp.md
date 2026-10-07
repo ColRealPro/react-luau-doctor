@@ -1,52 +1,35 @@
-# VS Code setup
+# VS Code extension
 
-React-Luau Doctor is **not on the VS Code Marketplace yet**. VS Code is currently the only editor with a bundled Doctor integration. Install the local `.vsix` file to try it. The installed extension does not require Bun.
+Doctor shows findings in your code and the Problems panel as you edit `.luau` and `.lua` files. You don't need Bun or the CLI to use the installed extension
 
 ## Install
 
-In VS Code, open **Extensions**, choose **… -> Install from VSIX…**, select the Doctor `.vsix`, and reload the window. Open your React-Luau project folder and then a `.luau` or `.lua` file. Diagnostics appear in the editor and **Problems** panel.
+In the Extensions panel, open the menu and choose "Install from VSIX...". Select the Doctor `.vsix`, then reload VS Code
 
-If you need to build the VSIX from this checkout, Bun is required for building:
+Open your project folder and a Luau file to start Doctor
 
-```bash
-bun install --frozen-lockfile
-npm --prefix editors/vscode ci
-bun run build:lsp
-```
+To build the VSIX yourself, see [development](development.md#run-locally)
 
-For automatic installation, replace `bun run build:lsp` with `bun run install:lsp` (requires the VS Code `code` command on PATH).
+## Quick fixes
 
-## Configure
+Hover a finding for its explanation and code example. Quick Fix lets you open the explanation in the Doctor terminal, suppress the rule for that line, or disable it for the project
 
-Search for **React-Luau Doctor** in VS Code Settings. The same settings can be added to `settings.json`:
+Disabling a rule opens your project config with the change. Save the config to apply it
 
-| Setting                          | Default | What it controls                                                         |
-| -------------------------------- | ------- | ------------------------------------------------------------------------ |
-| `reactLuauDoctor.enable`         | `true`  | Turn diagnostics on or off.                                              |
-| `reactLuauDoctor.liveDebounceMs` | `250`   | Delay in milliseconds after typing stops.                                |
-| `reactLuauDoctor.deepOnSave`     | `true`  | Refresh all Doctor findings for open files when you save.                |
-| `reactLuauDoctor.workspaceScan`  | `false` | Scan unopened project files in the background. Open files take priority. |
+## Settings
 
-Findings that need a fresh project analysis pause while you type, then return after about 1.5 seconds of inactivity without saving. Saving refreshes them immediately. Other findings stay visible until live analysis updates them. Closing a saved file keeps its findings visible in **Problems**.
+| Setting                              | Default | What it does                                      |
+| ------------------------------------ | ------- | ------------------------------------------------- |
+| `reactLuauDoctor.enable`             | `true`  | Turns Doctor on or off                            |
+| `reactLuauDoctor.liveDebounceMs`     | `250`   | Sets the delay after typing, in milliseconds      |
+| `reactLuauDoctor.deepOnSave`         | `true`  | Starts a project refresh when you save            |
+| `reactLuauDoctor.workspaceScan`      | `false` | Checks files you haven't opened in the background |
+| `reactLuauDoctor.respectFileFilters` | `false` | Applies your include/ignore filters to open files |
 
-Turn on `reactLuauDoctor.workspaceScan` to show findings for files you have not opened. Doctor scans those files one at a time, behind open-file analysis.
+Include/ignore filters apply to background scans. Enable `respectFileFilters` to apply them to open files too
 
-Hover a Doctor finding for its explanation, suggested fix, and an example from the rule. Finding-specific examples take precedence when the rule can provide one.
+## Configure rules
 
-To change rules, put `react-luau-doctor.config.json` in the folder you opened in VS Code:
+Put [react-luau-doctor.config.json](cli.md#configuration) in your project root to change rules
 
-```json
-{
-  "include": ["src/**/*.luau"],
-  "rules": {
-    "react-luau/exhaustive-deps": "error",
-    "react-luau/no-array-index-as-key": "off"
-  }
-}
-```
-
-Save the config file to refresh diagnostics. Rule values are `error`, `warning`, `suggestion`, or `off`. See the [configuration reference](cli.md#configuration) for include/ignore patterns and inline suppressions.
-
-## If diagnostics do not appear
-
-Check that the file's VS Code language mode is **Luau** or **Lua**, the intended project folder is open, and Doctor is enabled. Save the file, then check **View -> Output -> React-Luau Doctor** for errors.
+Save the config to refresh findings. In a workspace with multiple folders, each project uses the config in its own root folder
