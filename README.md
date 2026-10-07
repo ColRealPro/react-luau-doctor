@@ -1,6 +1,14 @@
-# React-Luau Doctor
+<p align="center">
+  <img src="editors/vscode/Icon.png" alt="React-Luau Doctor icon" width="128" />
+</p>
 
-Static analysis tool for React-Luau codebases. It helps identify potential issues, enforce best practices, and improve React code quality.
+<h1 align="center">React-Luau Doctor</h1>
+
+<p align="center">
+  Static analysis tool for React-Luau codebases. It helps identify potential issues, enforce best practices, and improve React code quality.
+</p>
+
+<br>
 
 React-Luau Doctor scans your codebase and finds mistakes in hooks, effects, state management, and performance. Rules are built specifically around React-Luau patterns, including problems that can't be caught by traditional typechecking or linting. It works as a CLI or CI tool. Editor diagnostics can also be provided through the [LSP](docs/lsp.md) extension
 
