@@ -21,9 +21,9 @@ Set rule severities in `react-luau-doctor.config.json` in your project root:
 }
 ```
 
-Rules accept `off`, `error`, `warning`, or `suggestion`, with autocomplete for rule IDs and config options. Save the config to apply changes, including project disables added through Quick Fix
+Rules accept `off`, `error`, `warning`, or `suggestion` for severities, the extension autocompletes rule IDs and config options for you.
 
-See the [rule list](https://github.com/colrealpro/react-luau-doctor/blob/main/docs/rules.md) for available checks
+See the [rule list](https://github.com/colrealpro/react-luau-doctor/blob/main/docs/rules.md) for a list of all rules
 
 ## Extension settings
 
