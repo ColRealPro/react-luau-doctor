@@ -2,7 +2,7 @@
   "name": "react-luau-doctor-vscode",
   "displayName": "React-Luau Doctor",
   "description": "Live and deep diagnostics for React-Luau projects",
-  "version": "0.1.0",
+  "version": "0.20.0",
   "publisher": "colrealpro",
   "license": "MIT",
   "repository": {
