@@ -15,3 +15,10 @@ export interface ExplainFindingParams {
 export const statusNotification = "reactLuauDoctor/status";
 export const rescanRequest = "reactLuauDoctor/rescan";
 export const explainFindingRequest = "reactLuauDoctor/explainFinding";
+export const openProjectConfigCommand = "reactLuauDoctor.openProjectConfig";
+
+export interface DisableProjectRuleData {
+  kind: "disableProjectRule";
+  uri: string;
+  rule: string;
+}

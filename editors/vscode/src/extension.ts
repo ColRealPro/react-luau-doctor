@@ -56,6 +56,7 @@ export async function activate(
     documentSelector: [
       { scheme: "file", language: "luau" },
       { scheme: "file", language: "lua" },
+      { scheme: "file", pattern: "**/react-luau-doctor.config.json" },
     ],
 
     initializationOptions: settings,

@@ -26,6 +26,7 @@ await build({
   platform: "node",
   format: "esm",
   target: "node20",
+  mainFields: ["module", "main"],
   external: ["web-tree-sitter", "vscode-languageserver/node"],
 });
 
@@ -47,6 +48,11 @@ fs.copyFileSync(
 fs.copyFileSync(
   path.join(root, "vendor", "tree-sitter-luau.LICENSE"),
   path.join(extension, "vendor", "tree-sitter-luau.LICENSE"),
+);
+
+fs.copyFileSync(
+  path.join(root, "node_modules", "jsonc-parser", "LICENSE.md"),
+  path.join(extension, "vendor", "jsonc-parser.LICENSE"),
 );
 
 fs.copyFileSync(

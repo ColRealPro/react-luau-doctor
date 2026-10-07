@@ -11,7 +11,7 @@ import type {
   Severity,
 } from "./types";
 
-const CONFIG_NAME = "react-luau-doctor.config.json";
+export const CONFIG_NAME = "react-luau-doctor.config.json";
 
 const SEVERITIES = new Set<RuleSetting>([
   "off",

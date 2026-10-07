@@ -16,3 +16,10 @@ The runtime parser is provided by `web-tree-sitter`, which is MIT licensed.
 Its license is installed with the npm dependency.
 
 Project: https://github.com/tree-sitter/tree-sitter
+
+## jsonc-parser
+
+Project config edits use Microsoft's MIT-licensed `jsonc-parser`
+Its license is installed with the npm dependency and included in the VS Code extension at `vendor/jsonc-parser.LICENSE`
+
+Project: https://github.com/microsoft/node-jsonc-parser

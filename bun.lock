@@ -5,6 +5,7 @@
     "": {
       "name": "react-luau-doctor",
       "dependencies": {
+        "jsonc-parser": "3.3.1",
         "web-tree-sitter": "0.26.11",
       },
       "devDependencies": {

@@ -1,3 +1,6 @@
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
 import {
   createConnection,
   ProposedFeatures,
@@ -8,6 +11,7 @@ import {
 } from "vscode-languageserver/node";
 
 import packageJson from "../../package.json";
+import { CONFIG_NAME } from "../config";
 import type { EditorSettings } from "./session";
 import { WorkspaceManager } from "./workspace-manager";
 
@@ -15,6 +19,7 @@ import {
   rescanRequest,
   explainFindingRequest,
   statusNotification,
+  openProjectConfigCommand,
   type ExplainFindingParams,
 } from "./editor-protocol";
 
@@ -27,6 +32,9 @@ const workspaces = new WorkspaceManager({
 });
 
 let supportsFolderChanges = false;
+let supportsActionResolve = false;
+let supportsConfigCreation = false;
+let supportsShowDocument = false;
 
 connection.onInitialize((params: InitializeParams): InitializeResult => {
   workspaces.initialize(
@@ -37,6 +45,19 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
 
   supportsFolderChanges =
     params.capabilities.workspace?.workspaceFolders === true;
+
+  supportsActionResolve =
+    params.capabilities.textDocument?.codeAction?.resolveSupport?.properties.includes(
+      "edit",
+    ) === true;
+
+  supportsConfigCreation =
+    params.capabilities.workspace?.workspaceEdit?.resourceOperations?.includes(
+      "create",
+    ) === true;
+
+  supportsShowDocument =
+    params.capabilities.window?.showDocument?.support === true;
 
   return {
     serverInfo: { name: "React-Luau Doctor", version: packageJson.version },
@@ -49,7 +70,14 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       },
 
       hoverProvider: true,
-      codeActionProvider: { codeActionKinds: [CodeActionKind.QuickFix] },
+
+      codeActionProvider: {
+        codeActionKinds: [CodeActionKind.QuickFix],
+        resolveProvider: true,
+      },
+
+      executeCommandProvider: { commands: [openProjectConfigCommand] },
+
       workspace: {
         workspaceFolders: { supported: true, changeNotifications: true },
       },
@@ -69,18 +97,46 @@ connection.onInitialized(() => {
     );
 });
 
-connection.onCodeAction(({ textDocument, range, context }) => {
+connection.onCodeAction(async ({ textDocument, range, context }) => {
   if (
     context.only &&
     !context.only.some((kind) => CodeActionKind.QuickFix.startsWith(kind))
   )
     return [];
 
-  return (
-    workspaces
-      .sessionForUri(textDocument.uri)
-      ?.codeActions(textDocument.uri, range) ?? []
-  );
+  const actions = await (workspaces
+    .sessionForUri(textDocument.uri)
+    ?.codeActions(textDocument.uri, range) ?? []);
+
+  return supportsActionResolve
+    ? actions
+    : Promise.all(
+        actions.map((action) =>
+          workspaces.resolveCodeAction(action, supportsConfigCreation),
+        ),
+      );
+});
+
+connection.onCodeActionResolve((action) =>
+  workspaces.resolveCodeAction(action, supportsConfigCreation),
+);
+
+connection.onExecuteCommand(({ command, arguments: args }) => {
+  if (
+    command !== openProjectConfigCommand ||
+    !supportsShowDocument ||
+    typeof args?.[0] !== "string"
+  )
+    return;
+
+  const session = workspaces.sessionForUri(args[0]);
+
+  if (!session) return;
+
+  return connection.window.showDocument({
+    uri: pathToFileURL(path.join(session.root, CONFIG_NAME)).href,
+    takeFocus: true,
+  });
 });
 
 connection.onRequest(rescanRequest, (params?: { uri?: string }) =>

@@ -1,12 +1,21 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type {
   FileEvent,
+  CodeAction,
   PublishDiagnosticsParams,
 } from "vscode-languageserver/node";
 
-import { loadConfigWithSource, validateKnownRules } from "../config";
+import {
+  CONFIG_NAME,
+  loadConfigWithSource,
+  validateKnownRules,
+} from "../config";
+
+import { rulesById } from "../rules";
+import { disableProjectRuleEdit } from "./project-config";
 
 import {
   WorkspaceSession,
@@ -14,7 +23,7 @@ import {
   type EditorSettings,
 } from "./session";
 
-import type { AnalysisStatus } from "./editor-protocol";
+import type { AnalysisStatus, DisableProjectRuleData } from "./editor-protocol";
 
 interface WorkspaceCallbacks {
   publish: (params: PublishDiagnosticsParams) => void;
@@ -44,6 +53,12 @@ export class WorkspaceManager {
   private readonly sessions = new Map<string, WorkspaceSession>();
   private readonly publishedOwners = new Map<string, WorkspaceSession>();
   private readonly documents = new Map<string, OpenDocument>();
+
+  private readonly configDocuments = new Map<
+    string,
+    { uri: string; source: string; version: number }
+  >();
+
   private settings = defaultEditorSettings;
   private fallbackRoot?: string;
 
@@ -154,6 +169,16 @@ export class WorkspaceManager {
 
     const absolutePath = fileURLToPath(document.uri);
 
+    if (path.basename(absolutePath) === CONFIG_NAME) {
+      this.configDocuments.set(this.configKey(absolutePath), {
+        uri: document.uri,
+        source: document.text,
+        version: document.version,
+      });
+
+      return;
+    }
+
     if (!/\.(?:luau|lua)$/i.test(absolutePath)) return;
 
     const buffer: OpenDocument = {
@@ -169,6 +194,21 @@ export class WorkspaceManager {
   }
 
   change(uri: string, source: string, version: number): void {
+    if (uri.startsWith("file:")) {
+      const config = this.configDocuments.get(
+        this.configKey(fileURLToPath(uri)),
+      );
+
+      if (config) {
+        if (version > config.version) {
+          config.source = source;
+          config.version = version;
+        }
+
+        return;
+      }
+    }
+
     const document = this.documents.get(uri);
 
     if (!document || version <= document.version) return;
@@ -189,6 +229,9 @@ export class WorkspaceManager {
   }
 
   close(uri: string): void {
+    if (uri.startsWith("file:"))
+      this.configDocuments.delete(this.configKey(fileURLToPath(uri)));
+
     this.documents.get(uri)?.session?.close(uri);
     this.documents.delete(uri);
   }
@@ -217,7 +260,90 @@ export class WorkspaceManager {
 
     this.sessions.clear();
     this.documents.clear();
+    this.configDocuments.clear();
     this.publishedOwners.clear();
+  }
+
+  async resolveCodeAction(
+    action: CodeAction,
+    canCreate = true,
+  ): Promise<CodeAction> {
+    const data = action.data as DisableProjectRuleData | undefined;
+
+    if (data?.kind !== "disableProjectRule") return action;
+
+    if (
+      typeof data.uri !== "string" ||
+      typeof data.rule !== "string" ||
+      !rulesById.has(data.rule)
+    )
+      return {
+        ...action,
+        edit: undefined,
+        disabled: { reason: "Unknown project or rule" },
+      };
+
+    const session = this.sessionForUri(data.uri);
+
+    if (!session)
+      return {
+        ...action,
+        edit: undefined,
+        disabled: { reason: "The project is no longer open" },
+      };
+
+    const filename = path.join(session.root, CONFIG_NAME);
+
+    try {
+      let source = "";
+      let create = false;
+
+      try {
+        source = await fs.readFile(filename, "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+
+        create = true;
+      }
+
+      if (create && !canCreate)
+        return {
+          ...action,
+          edit: undefined,
+
+          disabled: {
+            reason:
+              "This editor cannot create a project config through code actions",
+          },
+        };
+
+      const buffer = this.configDocuments.get(this.configKey(filename));
+
+      const edit = disableProjectRuleEdit(
+        buffer?.uri ?? pathToFileURL(filename).href,
+        buffer?.source ?? source,
+        buffer?.version ?? null,
+        data.rule,
+        create,
+      );
+
+      return { ...action, disabled: undefined, edit };
+    } catch (error) {
+      return {
+        ...action,
+        edit: undefined,
+
+        disabled: {
+          reason: `Cannot edit project config: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      };
+    }
+  }
+
+  private configKey(filename: string): string {
+    const absolute = path.resolve(filename);
+
+    return process.platform === "win32" ? absolute.toLowerCase() : absolute;
   }
 
   private log(

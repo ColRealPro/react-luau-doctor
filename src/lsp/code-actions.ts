@@ -6,6 +6,11 @@ import { parseLuau } from "../parser";
 import type { SyntaxNode } from "../syntax";
 import type { EditorDiagnosticData } from "./positions";
 
+import {
+  openProjectConfigCommand,
+  type DisableProjectRuleData,
+} from "./editor-protocol";
+
 function compare(left: Range["start"], right: Range["start"]): number {
   return left.line - right.line || left.character - right.character;
 }
@@ -30,6 +35,7 @@ export async function diagnosticCodeActions(
   const actions: CodeAction[] = [];
   const seen = new Set<string>();
   const explained = new Set<string>();
+  const projectRules = new Map<string, Diagnostic>();
   const lines = source.split(/\r\n|\n|\r/);
   const eol = source.match(/\r\n|\n|\r/)?.[0] ?? "\n";
   const tree = respectInlineDisables ? await parseLuau(source) : undefined;
@@ -40,8 +46,12 @@ export async function diagnosticCodeActions(
 
       if (!rulesById.has(rule)) continue;
 
-      const line = (diagnostic.data as EditorDiagnosticData | undefined)
-        ?.suppressionLine ?? diagnostic.range.start.line;
+      projectRules.set(rule, diagnostic);
+
+      const line =
+        (diagnostic.data as EditorDiagnosticData | undefined)
+          ?.suppressionLine ?? diagnostic.range.start.line;
+
       const key = `${rule}:${line}`;
 
       const finding = (diagnostic.data as EditorDiagnosticData | undefined)?.finding;
@@ -117,5 +127,24 @@ export async function diagnosticCodeActions(
     tree?.delete?.();
   }
 
-  return actions;
+  return [
+    ...actions,
+    ...[...projectRules].map(([rule, diagnostic]) => ({
+      title: `Disable ${rule.replace(/^react-luau\//, "")} for this project`,
+      kind: CodeActionKind.QuickFix,
+      diagnostics: [diagnostic],
+
+      data: {
+        kind: "disableProjectRule",
+        uri,
+        rule,
+      } satisfies DisableProjectRuleData,
+
+      command: {
+        title: "Open project config",
+        command: openProjectConfigCommand,
+        arguments: [uri],
+      },
+    })),
+  ];
 }

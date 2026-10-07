@@ -32,6 +32,7 @@ import { SourcePositions, toLspDiagnostics } from "../src/lsp/positions";
 import { buildProjectModel } from "../src/project-model";
 import { scanPath } from "../src/scanner";
 import { diagnosticCodeActions } from "../src/lsp/code-actions";
+import { disableProjectRuleEdit } from "../src/lsp/project-config";
 import { WorkspaceSession, defaultEditorSettings } from "../src/lsp/session";
 import {
   rescanRequest,
@@ -81,6 +82,28 @@ function applyAction(source: string, action: CodeAction): string {
     source.slice(offset(edit.range.end))
   );
 }
+
+test("disabling a project rule preserves the existing config", () => {
+  const rule = "react-luau/no-prop-mutation";
+  const source = JSON.stringify({
+    ignore: ["vendor"],
+    rules: { [rule]: "warning" },
+  });
+  const edit = disableProjectRuleEdit(
+    "file:///project/react-luau-doctor.config.json",
+    source,
+    null,
+    rule,
+    false,
+  );
+  assert.deepEqual(
+    JSON.parse(applyAction(source, { title: "Disable", edit })),
+    {
+      ignore: ["vendor"],
+      rules: { [rule]: "off" },
+    },
+  );
+});
 
 test("deep editor overlays agree with a normal Doctor scan", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-lsp-deep-"));
@@ -1378,6 +1401,10 @@ test(
       actions.some(
         (action) => action.command?.command === "reactLuauDoctor.explainRule",
       ),
+    );
+    assert.ok(
+      actions.find((action) => action.data?.kind === "disableProjectRule")
+        ?.edit,
     );
     const explainParams = actions.find((action) => action.command)?.command
       ?.arguments?.[0];
