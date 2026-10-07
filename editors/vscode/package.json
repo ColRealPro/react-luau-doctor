@@ -10,6 +10,19 @@
     "type": "git",
     "url": "https://github.com/colrealpro/react-luau-doctor.git"
   },
+  "keywords": [
+    "react",
+    "react-luau",
+    "luau",
+    "lua",
+    "roblox",
+    "linter",
+    "static analysis"
+  ],
+  "categories": [
+    "Linters",
+    "Programming Languages"
+  ],
   "type": "module",
   "engines": {
     "vscode": "^1.95.0"
