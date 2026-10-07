@@ -32,8 +32,6 @@ import { diagnosticHover } from "./hover";
 import { diagnosticCodeActions } from "./code-actions";
 
 const MAX_RECENT_DEEP_FILES = 32;
-const UNSAVED_DEEP_IDLE_MS = 1500;
-const UNSAVED_DEEP_MIN_INTERVAL_MS = 3000;
 const WORKSPACE_EDIT_QUIET_MS = 2000;
 const liveRuleCodes = new Set(liveRules.map((rule) => rule.id));
 
@@ -100,7 +98,6 @@ export class WorkspaceSession {
   private workspaceResumeAt = 0;
   private unsavedDeepTimer?: ReturnType<typeof setTimeout>;
   private unsavedDeepSerial = 0;
-  private lastUnsavedDeepStartedAt = 0;
   private statusError?: string;
   private deepStartedAt = 0;
   private workspaceStartedAt = 0;
@@ -572,10 +569,7 @@ export class WorkspaceSession {
 
     const serial = this.unsavedDeepSerial;
 
-    const delay = Math.max(
-      UNSAVED_DEEP_IDLE_MS,
-      this.lastUnsavedDeepStartedAt + UNSAVED_DEEP_MIN_INTERVAL_MS - Date.now(),
-    );
+    const delay = Math.max(0, this.settings.liveDebounceMs);
 
     this.workspaceResumeAt = Math.max(
       this.workspaceResumeAt,
@@ -641,7 +635,6 @@ export class WorkspaceSession {
       )
         return;
 
-      this.lastUnsavedDeepStartedAt = Date.now();
       this.refresh(true, true);
     } catch (error) {
       this.reportError(
