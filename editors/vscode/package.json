@@ -19,6 +19,12 @@
     "onLanguage:lua"
   ],
   "contributes": {
+    "jsonValidation": [
+      {
+        "fileMatch": "react-luau-doctor.config.json",
+        "url": "./config.schema.json"
+      }
+    ],
     "commands": [
       {
         "command": "reactLuauDoctor.rescan",

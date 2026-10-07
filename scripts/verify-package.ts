@@ -14,10 +14,37 @@ function run(command: string[], cwd = temporary): string {
 }
 try {
   const npm = Bun.which("npm") ? ["npm"] : ["bunx", "--bun", "npm"];
-  const output = JSON.parse(run([...npm, "pack", "--ignore-scripts", "--json", "--pack-destination", temporary], root));
-  const entry = Array.isArray(output) ? output[0] : Object.values(output)[0] as any;
+
+  const output = JSON.parse(
+    run(
+      [
+        ...npm,
+        "pack",
+        "--ignore-scripts",
+        "--json",
+        "--pack-destination",
+        temporary,
+      ],
+      root,
+    ),
+  );
+
+  const entry = Array.isArray(output)
+    ? output[0]
+    : (Object.values(output)[0] as any);
+
   const files = new Set(entry.files.map((file: { path: string }) => file.path));
-  for (const required of ["dist/cli.js", "vendor/tree-sitter-luau.wasm", "vendor/tree-sitter-luau.LICENSE", "LICENSE", "THIRD_PARTY_NOTICES.md", "README.md", "CHANGELOG.md"]) {
+
+  for (const required of [
+    "dist/cli.js",
+    "dist/config.schema.json",
+    "vendor/tree-sitter-luau.wasm",
+    "vendor/tree-sitter-luau.LICENSE",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "README.md",
+    "CHANGELOG.md",
+  ]) {
     assert.ok(files.has(required), `Missing ${required}`);
   }
   assert.ok([...files].every(file => !/^(skills|src|tests|node_modules)\//.test(String(file))), "Unexpected development or removed files in package");

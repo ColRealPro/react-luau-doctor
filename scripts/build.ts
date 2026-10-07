@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { configSchema } from "../src/config";
 
 const root = path.resolve(import.meta.dir, "..");
 const outdir = path.join(root, "dist");
@@ -19,5 +20,9 @@ if (!result.success) {
   process.exit(1);
 }
 
-console.log(`Built ${result.outputs.length} files with Bun ${Bun.version}`);
+fs.writeFileSync(
+  path.join(outdir, "config.schema.json"),
+  `${JSON.stringify(configSchema(), null, 2)}\n`,
+);
 
+console.log(`Built ${result.outputs.length} files with Bun ${Bun.version}`);

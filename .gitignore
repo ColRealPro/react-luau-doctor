@@ -3,6 +3,7 @@ node_modules/
 .vscode/
 dist/
 editors/vscode/extension.cjs
+editors/vscode/config.schema.json
 editors/vscode/extension.js
 editors/vscode/server/
 editors/vscode/vendor/

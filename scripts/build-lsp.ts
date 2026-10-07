@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { build } from "esbuild";
+import { configSchema } from "../src/config";
 
 const root = path.resolve(import.meta.dir, "..");
 const extension = path.join(root, "editors", "vscode");
@@ -8,6 +9,11 @@ const server = path.join(extension, "server");
 
 fs.mkdirSync(server, { recursive: true });
 fs.mkdirSync(path.join(extension, "vendor"), { recursive: true });
+
+fs.writeFileSync(
+  path.join(extension, "config.schema.json"),
+  `${JSON.stringify(configSchema(), null, 2)}\n`,
+);
 
 await build({
   entryPoints: [

@@ -32,6 +32,99 @@ const CATEGORIES = new Set<Category>([
   "Architecture",
 ]);
 
+export function configSchema() {
+  const strings = { type: "array", items: { type: "string" } };
+
+  return {
+    $schema: "http://json-schema.org/draft-07/schema#",
+    title: "React-Luau Doctor project config",
+    type: "object",
+    additionalProperties: false,
+
+    properties: {
+      $schema: {
+        type: "string",
+        description: "JSON schema used by your editor",
+      },
+
+      include: {
+        ...strings,
+        description: "File globs to include in project scans",
+      },
+
+      ignore: {
+        ...strings,
+        description: "File globs and directories to exclude from project scans",
+      },
+
+      projects: { ...strings, description: "Project directories to scan" },
+
+      rules: {
+        type: "object",
+        description: "Override a rule severity or turn it off for this project",
+        additionalProperties: false,
+
+        properties: Object.fromEntries(
+          [...rulesById.values()].map((rule) => [
+            rule.id,
+            {
+              type: "string",
+              enum: [...SEVERITIES],
+              default: rule.severity,
+              description: rule.description.replace(/\.$/, ""),
+            },
+          ]),
+        ),
+      },
+
+      categories: {
+        type: "array",
+        items: { type: "string", enum: [...CATEGORIES] },
+        description: "Limit findings to these categories",
+      },
+
+      scope: {
+        type: "string",
+        enum: [...SCOPES],
+        description: "Choose which files or changed lines to report",
+      },
+
+      diff: {
+        type: ["boolean", "string"],
+
+        description:
+          "Report introduced findings against HEAD or a specific Git ref",
+      },
+
+      base: {
+        type: "string",
+        description: "Git ref used as the baseline for changed scope",
+      },
+
+      verbose: {
+        type: "boolean",
+        description: "Include detailed findings in CLI output",
+      },
+
+      blocking: {
+        type: "string",
+        enum: [...BLOCKING_LEVELS],
+        description: "Minimum severity that fails the CLI exit gate",
+      },
+
+      warnings: {
+        type: "boolean",
+        description: "Include warning findings in CLI output",
+      },
+
+      respectInlineDisables: {
+        type: "boolean",
+        description: "Honor inline suppression comments",
+      },
+    },
+  };
+}
+
 export interface LoadedConfig {
   config: DoctorConfig;
   filename: string | null;
