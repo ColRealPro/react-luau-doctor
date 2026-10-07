@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.20.0
+
+### Added
+
+- VS Code extension with live diagnostics and hover explanations, requiring no CLI or Bun installation
+- Quick fixes to explain findings, add inline disables, or disable rules in project config
+- Optional background scanning of unopened files
+- Autocomplete and validation for `react-luau-doctor.config.json`, with a schema in both packages
+
+### New rules
+
+- `react-luau/no-mutating-state-updater` catches mutations of previous state in updater callbacks
+- `react-luau/no-call-component-as-function` catches direct calls to component functions
+- `react-luau/no-create-binding-in-render` catches bindings recreated during render
+- `react-luau/no-binding-getvalue-in-render` catches binding snapshots read during render, except for ref initialization
+- `react-luau/usememo-must-return` catches memo callbacks that return no value
+- `react-luau/no-static-name-prop` suggests child table keys instead of static Roblox `Name` props
+
+### Fixed
+
+- Restored per-file CLI progress while parsing effects and sped up worker shutdown
+- `no-set-state-in-render` catches setters in prop expressions and local initializers, including aliases
+- `exhaustive-deps` follows dependency table aliases and handles shadowed module locals correctly
+- `no-prop-mutation` catches prop mutations in nested functions and callbacks
+- `no-array-index-as-key` uses collection shapes and types to distinguish array positions from dictionary keys
+- `rules-of-hooks` accepts loops over provably static module tables
+- `prefer-binding-over-state` skips custom component props proven incompatible with bindings
+
 ## 0.19.1
 
 ### Changed
