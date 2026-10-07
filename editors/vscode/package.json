@@ -110,6 +110,7 @@
     "typescript": "^5.8.3"
   },
   "scripts": {
+    "vscode:prepublish": "bun run ../../scripts/build-lsp.ts",
     "check": "tsc -p tsconfig.json"
   }
 }
