@@ -1,5 +1,5 @@
 {
-  "name": "react-luau-doctor-vscode",
+  "name": "react-luau-doctor",
   "displayName": "React-Luau Doctor",
   "description": "Live and deep diagnostics for React-Luau projects",
   "version": "0.20.0",
