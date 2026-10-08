@@ -16,13 +16,16 @@ import type {
 } from "../types";
 
 import { nodeKey } from "../ast/walk";
+import { reactApiPath, resolveLocalFunction, unwrapExpression } from "../ast/local-values";
 
 import {
   callNameNode,
   CONDITIONAL_TYPES,
   declarationNames,
   findAncestorBetween,
+  isBindingShadowedBetween,
   isHookPath,
+  isNameShadowedBetween,
   isNestedInsideFunction,
 } from "./helpers";
 
@@ -117,39 +120,35 @@ function controlledParameterIndex(
   controlFlow: SyntaxNode,
   fn: FunctionInfo,
   summary: ConditionalHookModeSummary,
+  node: SyntaxNode,
 ): number | null {
   if (controlFlow.type !== "if_statement") return null;
 
-  const header = (controlFlow.text.split(/\bthen\b/s, 1)[0] ?? "").trim();
+  const conditions = guardConditions(controlFlow, node);
+  if (conditions.length === 0) return null;
 
-  for (const [conditionName, index] of Object.entries(
-    summary.conditionVariables,
-  )) {
-    const escaped = conditionName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-    const patterns = [
-      new RegExp(`^if\\s+${escaped}\\s*$`),
-      new RegExp(`^if\\s+not\\s+${escaped}\\s*$`),
-      new RegExp(`^if\\s+${escaped}\\s*(?:==|~=)\\s*(?:true|false|nil)\\s*$`),
-      new RegExp(`^if\\s+(?:true|false|nil)\\s*(?:==|~=)\\s*${escaped}\\s*$`),
-    ];
-
-    if (patterns.some((pattern) => pattern.test(header))) return index;
-  }
-
-  // Keep a direct parameter fallback for older or externally constructed summaries.
+  const variables = { ...summary.conditionVariables };
+  // Keep a direct parameter fallback for older or externally constructed summaries
   for (const index of summary.parameterIndexes) {
     const name = fn.parameters[index];
-
-    if (!name) continue;
-
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-    if (new RegExp(`^if\\s+(?:not\\s+)?${escaped}\\s*$`).test(header))
-      return index;
+    if (name) variables[name] ??= index;
   }
 
-  return null;
+  const indexes = conditions.map((condition) => {
+    for (const [name, index] of Object.entries(variables)) {
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const patterns = [
+        new RegExp(`^(?:not\\s+)?${escaped}\\s*$`),
+        new RegExp(`^${escaped}\\s*(?:==|~=)\\s*(?:true|false|nil)\\s*$`),
+        new RegExp(`^(?:true|false|nil)\\s*(?:==|~=)\\s*${escaped}\\s*$`),
+      ];
+      if (patterns.some((pattern) => pattern.test(condition.text.trim())))
+        return index;
+    }
+    return null;
+  });
+
+  return indexes.every((index) => index !== null) ? indexes[0] : null;
 }
 
 function dynamicHookModeFixPreview(
@@ -459,17 +458,70 @@ function staticModuleTables(context: RuleContext): Set<string> {
   return candidates;
 }
 
-function simpleConditionRoot(controlFlow: SyntaxNode): string | null {
-  if (
-    controlFlow.type !== "if_statement" &&
-    controlFlow.type !== "if_expression"
-  )
-    return null;
+function containsNode(container: SyntaxNode, node: SyntaxNode): boolean {
+  return (
+    node.startIndex >= container.startIndex &&
+    node.endIndex <= container.endIndex
+  );
+}
 
+function branchContaining(
+  controlFlow: SyntaxNode,
+  node: SyntaxNode,
+): SyntaxNode | null {
+  return controlFlow.namedChildren.find((child) => containsNode(child, node)) ?? null;
+}
+
+function guardConditions(controlFlow: SyntaxNode, node: SyntaxNode): SyntaxNode[] {
   const condition = controlFlow.namedChildren[0];
+  if (!condition) return [];
 
-  if (!condition) return null;
+  if (controlFlow.type !== "if_statement" && controlFlow.type !== "if_expression")
+    return [condition];
 
+  if (containsNode(condition, node)) return [];
+
+  const conditions = [condition];
+  for (const clause of controlFlow.namedChildren.slice(1)) {
+    if (clause.startIndex > node.startIndex) break;
+    if (clause.type !== "elseif_statement" && clause.type !== "elseif_clause")
+      continue;
+    const clauseCondition = clause.namedChildren[0];
+    if (clauseCondition && !containsNode(clauseCondition, node))
+      conditions.push(clauseCondition);
+  }
+  return conditions;
+}
+
+function conditionallyContains(controlFlow: SyntaxNode, node: SyntaxNode): boolean {
+  if (
+    controlFlow.type === "if_statement" ||
+    controlFlow.type === "if_expression"
+  )
+    return guardConditions(controlFlow, node).length > 0;
+
+  if (controlFlow.type === "for_statement")
+    return controlFlow.namedChildren.some(
+      (child) => child.type === "block" && containsNode(child, node),
+    );
+
+  if (CONDITIONAL_TYPES.has(controlFlow.type)) return true;
+
+  if (
+    controlFlow.type !== "binary_expression" ||
+    !controlFlow.children.some(
+      (child) => child.type === "and" || child.type === "or",
+    )
+  )
+    return false;
+
+  const right =
+    controlFlow.childForFieldName("right") ?? controlFlow.namedChildren[1];
+
+  return Boolean(right && containsNode(right, node));
+}
+
+function simpleConditionRoot(condition: SyntaxNode): string | null {
   const text = condition.text.trim();
 
   const match = text.match(
@@ -479,28 +531,90 @@ function simpleConditionRoot(controlFlow: SyntaxNode): string | null {
   return match?.[1] ?? null;
 }
 
+const unstableLocalNamesCache = new WeakMap<FunctionInfo, Set<string>>();
+
+function unstableLocalNames(fn: FunctionInfo, context: RuleContext): Set<string> {
+  const cached = unstableLocalNamesCache.get(fn);
+  if (cached) return cached;
+
+  // The model stores stability by name, so redeclarations and writes invalidate that proof
+  const declared = new Set<string>();
+  const unstable = new Set<string>();
+  for (const node of context.walk(fn.node)) {
+    if (
+      node.type === "variable_declaration" &&
+      context.nearestFunction(node) === fn
+    ) {
+      for (const name of declarationNames(node)) {
+        if (declared.has(name)) unstable.add(name);
+        declared.add(name);
+      }
+    }
+    if (
+      node.type !== "assignment_statement" ||
+      node.parent?.type === "variable_declaration"
+    )
+      continue;
+    const variables = node.namedChildren.find(
+      (child) => child.type === "variable_list",
+    );
+    for (const target of variables?.namedChildren ?? []) {
+      if (target.type === "identifier") unstable.add(target.text);
+    }
+  }
+  unstableLocalNamesCache.set(fn, unstable);
+  return unstable;
+}
+
+function moduleNameIsUnshadowed(
+  name: string,
+  node: SyntaxNode,
+  fn: FunctionInfo,
+  context: RuleContext,
+): boolean {
+  let owner: FunctionInfo | null = fn;
+  while (owner) {
+    if (
+      owner.parameters.includes(name) ||
+      isBindingShadowedBetween(node, owner, name)
+    )
+      return false;
+    owner = context.nearestFunction(owner.node);
+  }
+  return true;
+}
+
 function conditionIsProvablyInvariant(
   controlFlow: SyntaxNode,
   fn: FunctionInfo,
   context: RuleContext,
   moduleInvariants: Set<string>,
+  node: SyntaxNode = controlFlow,
 ): boolean {
-  const condition = controlFlow.namedChildren[0];
+  if (!["if_statement", "if_expression", "binary_expression"].includes(controlFlow.type))
+    return false;
 
-  if (!condition) return false;
+  const conditions = guardConditions(controlFlow, node);
+  if (conditions.length === 0) return false;
 
-  if (["true", "false", "nil", "number", "string"].includes(condition.type))
-    return true;
+  return conditions.every((condition) => {
+    if (["true", "false", "nil", "number", "string"].includes(condition.type))
+      return true;
 
-  const root = simpleConditionRoot(controlFlow);
+    const root = simpleConditionRoot(condition);
 
-  if (!root) return false;
+    if (!root) return false;
 
-  if (moduleInvariants.has(root)) return true;
+    if (moduleInvariants.has(root) && moduleNameIsUnshadowed(root, condition, fn, context))
+      return true;
 
-  return Boolean(
-    context.model.stableVariablesByFunction.get(nodeKey(fn.node))?.has(root),
-  );
+    if (isNameShadowedBetween(condition, fn, root)) return false;
+    if (unstableLocalNames(fn, context).has(root)) return false;
+
+    return Boolean(
+      context.model.stableVariablesByFunction.get(nodeKey(fn.node))?.has(root),
+    );
+  });
 }
 
 function branchHookSequence(
@@ -526,11 +640,13 @@ function branchHookSequence(
     // Nested control flow inside a branch needs its own stability proof, so do
     // not call the outer branches equivalent merely because their flattened
     // hook names happen to match.
-    const nestedControl = findAncestorBetween(node, branch, (ancestor) =>
-      CONDITIONAL_TYPES.has(ancestor.type),
-    );
+    const nestedControl = node.id === branch.id
+      ? null
+      : findAncestorBetween(node, branch, (ancestor) =>
+          conditionallyContains(ancestor, node),
+        );
 
-    if (nestedControl) return null;
+    if (nestedControl || conditionallyContains(branch, node)) return null;
 
     hooks.push(path);
   }
@@ -543,35 +659,56 @@ function ifBranchesHaveEquivalentBuiltInTopology(
   fn: FunctionInfo,
   context: RuleContext,
 ): boolean {
-  if (controlFlow.type !== "if_statement") return false;
-
-  const thenBlock = controlFlow.namedChildren.find(
-    (child) => child.type === "block",
-  );
-
-  const elseStatement = controlFlow.namedChildren.find(
-    (child) => child.type === "else_statement",
-  );
-
-  const elseBlock = elseStatement?.namedChildren.find(
-    (child) => child.type === "block",
-  );
-
-  if (!thenBlock || !elseBlock) return false;
-
-  const thenHooks = branchHookSequence(thenBlock, fn, context);
-  const elseHooks = branchHookSequence(elseBlock, fn, context);
-
-  if (!thenHooks || !elseHooks || thenHooks.length !== elseHooks.length)
+  const isStatement = controlFlow.type === "if_statement";
+  if (!isStatement && controlFlow.type !== "if_expression")
     return false;
 
-  if (!thenHooks.every((path, index) => path === elseHooks[index]))
+  const firstBranch = isStatement
+    ? controlFlow.namedChildren.find((child) => child.type === "block")
+    : controlFlow.namedChildren[1];
+  const elseClause = controlFlow.namedChildren.find(
+    (child) => child.type === "else_statement" || child.type === "else_clause",
+  );
+  const lastBranch = isStatement
+    ? elseClause?.namedChildren.find((child) => child.type === "block")
+    : elseClause?.namedChildren[0];
+  if (!firstBranch || !lastBranch) return false;
+
+  const branches = [firstBranch];
+  for (const clause of controlFlow.namedChildren) {
+    if (clause.type !== "elseif_statement" && clause.type !== "elseif_clause")
+      continue;
+    const condition = clause.namedChildren[0];
+    if (!condition) return false;
+    const conditionHooks = branchHookSequence(condition, fn, context);
+    if (!conditionHooks || conditionHooks.length > 0) return false;
+    const branch = isStatement
+      ? clause.namedChildren.find((child) => child.type === "block")
+      : clause.namedChildren[1];
+    if (!branch) return false;
+    branches.push(branch);
+  }
+  branches.push(lastBranch);
+
+  const sequences = branches.map((branch) =>
+    branchHookSequence(branch, fn, context),
+  );
+  const first = sequences[0];
+  if (!first) return false;
+
+  if (
+    !sequences.every((sequence) =>
+      sequence &&
+      sequence.length === first.length &&
+      sequence.every((path, index) => path === first[index]),
+    )
+  )
     return false;
 
   // Built-in React hooks have topology that is independent of their arguments.
   // For custom hooks, identical call names can still select different internal
   // hooks based on different arguments, so keep those conservative.
-  return thenHooks.every((path) => path.startsWith("React."));
+  return first.every((path) => path.startsWith("React."));
 }
 
 function stateModeStability(
@@ -770,7 +907,33 @@ function loopIterationIsProvablyStable(
   owner: FunctionInfo,
   stableShapes: Map<number, Set<string>>,
   moduleTables: Set<string>,
+  context: RuleContext,
+  moduleInvariants: Set<string>,
 ): boolean {
+  // A fixed collection does not fix hook count when iterations can exit or skip hooks
+  for (const node of context.walk(loop)) {
+    if (
+      !["break_statement", "continue_statement", "return_statement"].includes(
+        node.type,
+      )
+    )
+      continue;
+    if (context.nearestFunction(node) !== owner) continue;
+
+    if (node.type !== "return_statement") {
+      const targetLoop = findAncestorBetween(node, owner.node, (ancestor) =>
+        ["for_statement", "while_statement", "repeat_statement"].includes(ancestor.type),
+      );
+      if (targetLoop?.id !== loop.id) continue;
+    }
+
+    const dynamicGuard = findAncestorBetween(node, loop, (ancestor) =>
+      conditionallyContains(ancestor, node) &&
+      !conditionIsProvablyInvariant(ancestor, owner, context, moduleInvariants, node),
+    );
+    if (dynamicGuard) return false;
+  }
+
   const numeric = loop.namedChildren.find(
     (child) => child.type === "for_numeric_clause",
   );
@@ -901,7 +1064,17 @@ function reachableReturnsBefore(
     cache.set(key, returns);
   }
 
-  return returns.filter((node) => node.endIndex <= call.startIndex);
+  return returns.filter((node) => {
+    if (node.endIndex > call.startIndex) return false;
+
+    // Returns from sibling branches cannot precede this hook on the same execution path
+    return !findAncestorBetween(node, fn.node, (ancestor) => {
+      if (ancestor.type !== "if_statement") return false;
+      const returnBranch = branchContaining(ancestor, node);
+      const callBranch = branchContaining(ancestor, call);
+      return Boolean(returnBranch && callBranch && returnBranch.id !== callBranch.id);
+    });
+  });
 }
 
 function returnIsControlledByStableTopologyMode(
@@ -912,25 +1085,38 @@ function returnIsControlledByStableTopologyMode(
   moduleInvariants: Set<string>,
 ): boolean {
   let current = node.parent;
+  let sawStableGuard = false;
 
   while (current && current !== fn.node) {
-    if (current.type === "if_statement" || current.type === "if_expression") {
-      if (summary && controlledParameterIndex(current, fn, summary) !== null)
-        return true;
-
-      if (conditionIsProvablyInvariant(current, fn, context, moduleInvariants))
-        return true;
-
+    if (["for_statement", "while_statement", "repeat_statement"].includes(current.type))
       return false;
+
+    if (current.type === "if_statement" || current.type === "if_expression") {
+      if (summary && controlledParameterIndex(current, fn, summary, node) !== null)
+        sawStableGuard = true;
+      else if (
+        conditionIsProvablyInvariant(current, fn, context, moduleInvariants, node)
+      )
+        sawStableGuard = true;
+      else return false;
     }
 
     current = current.parent;
   }
 
-  return false;
+  return sawStableGuard;
 }
 
 function conditionalFixPreview(kind: string, hookName: string): FixPreview {
+  if (kind === "short-circuit expression") {
+    return {
+      kind: "pattern",
+      before: `local result = enabled and renderChild(${hookName}())`,
+      after: `local value = ${hookName}()\nlocal result = enabled and renderChild(value)`,
+      note: "Call the hook before the short-circuit expression, then branch on its result",
+    };
+  }
+
   if (hookName === "React.useEffect" && kind === "if statement") {
     return {
       kind: "pattern",
@@ -975,6 +1161,48 @@ function earlyReturnFixPreview(hookName: string): FixPreview {
   };
 }
 
+function callbackFunctions(context: RuleContext): Set<number> {
+  const callbacks = new Set<number>();
+  const addCallback = (expression: SyntaxNode) => {
+    const fn = resolveLocalFunction(context, expression);
+    if (fn) callbacks.add(fn.node.id);
+  };
+
+  for (const call of context.findCalls()) {
+    const path = reactApiPath(context, call);
+    const args = context.callArguments(call);
+    for (const [index, argument] of args.entries()) {
+      if (
+        index === 0 &&
+        ["React.memo", "React.forwardRef", "React.createElement"].includes(
+          path ?? "",
+        )
+      )
+        continue;
+      if (
+        path?.startsWith("React.use") ||
+        path === "React.memo" ||
+        unwrapExpression(argument).type === "function_definition"
+      )
+        addCallback(argument);
+    }
+
+    // Custom component props may carry component types rather than callbacks
+    if (
+      path !== "React.createElement" ||
+      args[0]?.type !== "string" ||
+      args[1]?.type !== "table_constructor"
+    )
+      continue;
+    for (const field of args[1].namedChildren) {
+      if (field.type !== "field") continue;
+      const value = field.namedChildren.at(-1);
+      if (value) addCallback(value);
+    }
+  }
+  return callbacks;
+}
+
 export const rulesOfHooks: RuleDefinition = {
   id: "react-luau/rules-of-hooks",
   category: "Hooks",
@@ -1000,6 +1228,7 @@ export const rulesOfHooks: RuleDefinition = {
     const modeImports = conditionalHookModeImports(context);
     const ignoredHookImports = nonReactHookImports(context);
     const currentModeSummary = currentConditionalHookMode(context);
+    const callbacks = callbackFunctions(context);
     const reachableReturns = new Map<number, SyntaxNode[]>();
 
     for (const call of context.findCalls()) {
@@ -1015,17 +1244,21 @@ export const rulesOfHooks: RuleDefinition = {
 
       const fn = context.nearestFunction(call);
 
-      if (!fn || (!fn.isComponent && !fn.isHook)) {
+      if (
+        !fn ||
+        (!fn.isComponent && !fn.isHook) ||
+        callbacks.has(fn.node.id)
+      ) {
         diagnostics.push({
           node: callNameNode(call),
-          message: `Hook ${path} is called outside a React component or custom hook.`,
-          help: "Move the hook into a component or a custom hook whose name starts with use.",
+          message: `Hook ${path} is called outside a React component or custom hook`,
+          help: "Move the hook into a component or a custom hook whose name starts with use",
 
           fixPreview: {
             kind: "pattern",
             before: `local value = ${path}()\n\nlocal function helper()\n\treturn value\nend`,
             after: `local function useHelper()\n\tlocal value = ${path}()\n\treturn value\nend`,
-            note: "Hooks need a React-owned component or custom-hook call stack.",
+            note: "Hooks need a React-owned component or custom-hook call stack",
           },
         });
 
@@ -1101,43 +1334,50 @@ export const rulesOfHooks: RuleDefinition = {
         }
       }
 
-      const controlFlow = findAncestorBetween(call, fn.node, (node) =>
-        CONDITIONAL_TYPES.has(node.type),
-      );
+      const controlFlow = findAncestorBetween(call, fn.node, (node) => {
+        if (!conditionallyContains(node, call)) return false;
 
-      if (controlFlow) {
         if (
           currentModeSummary &&
-          controlledParameterIndex(controlFlow, fn, currentModeSummary) !== null
+          controlledParameterIndex(node, fn, currentModeSummary, call) !== null
         )
-          continue;
+          return false;
 
         if (
           conditionIsProvablyInvariant(
-            controlFlow,
+            node,
             fn,
             context,
             moduleInvariants,
+            call,
           )
         )
-          continue;
+          return false;
 
-        if (ifBranchesHaveEquivalentBuiltInTopology(controlFlow, fn, context))
-          continue;
+        if (ifBranchesHaveEquivalentBuiltInTopology(node, fn, context))
+          return false;
 
         if (
-          controlFlow.type === "for_statement" &&
+          node.type === "for_statement" &&
           loopIterationIsProvablyStable(
-            controlFlow,
+            node,
             staticImports,
             fn,
             stableShapes,
             moduleTables,
+            context,
+            moduleInvariants,
           )
         )
-          continue;
+          return false;
 
-        const kind = controlFlow.type.replaceAll("_", " ");
+        return true;
+      });
+
+      if (controlFlow) {
+        const kind = controlFlow.type === "binary_expression"
+          ? "short-circuit expression"
+          : controlFlow.type.replaceAll("_", " ");
 
         const loopLike =
           controlFlow.type === "for_statement" ||
@@ -1148,20 +1388,20 @@ export const rulesOfHooks: RuleDefinition = {
           node: callNameNode(call),
 
           message: loopLike
-            ? `Hook ${path} is called inside ${kind} whose size or iteration order may change between renders. If that happens, React will see a different hook sequence.`
-            : `Hook ${path} is called inside ${kind}, so the hook may be skipped on some renders.`,
+            ? `Hook ${path} is called inside ${kind} whose size or iteration order may change between renders. If that happens, React will see a different hook sequence`
+            : `Hook ${path} is called inside ${kind}, so the hook may be skipped on some renders`,
 
           summary: loopLike
-            ? `${path} may run a different number of times between renders.`
-            : `${path} may be skipped on some renders.`,
+            ? `${path} may run a different number of times between renders`
+            : `${path} may be skipped on some renders`,
 
           explanation: loopLike
-            ? `This ${kind} may change how many times ${path} is called.`
-            : `This ${kind} can skip ${path} on some renders.`,
+            ? `This ${kind} may change how many times ${path} is called`
+            : `This ${kind} can skip ${path} on some renders`,
 
           help: loopLike
-            ? "Keep hook count independent of runtime collection size or loop iterations. A common fix is to render a child component per item and call the hook inside that child."
-            : "Call the hook unconditionally at the top level, then branch on the returned value.",
+            ? "Keep hook count independent of runtime collection size or loop iterations. A common fix is to render a child component per item and call the hook inside that child"
+            : "Call the hook unconditionally at the top level, then branch on the returned value",
 
           fixPreview: conditionalFixPreview(kind, path),
         });

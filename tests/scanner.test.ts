@@ -2959,6 +2959,100 @@ return Component`);
   );
 });
 
+test("rules of hooks detects short-circuited hooks through nested expressions", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-short-circuit-hooks-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Component.luau"), `local React = require(script.Parent.React)
+local useState = React.useState
+local enabled = getMode()
+local function useValue()
+  return React.useState(0)
+end
+local function Component(props)
+  local first = props.enabled and useState(0)
+  local second = props.enabled or useValue()
+  local left = React.useState(0) and props.enabled
+  local sum = React.useState(0) + props.offset
+  local stable = enabled and React.useState(0)
+  local nested = props.enabled and (true and React.useState(0))
+  return React.createElement("Frame", {}, {
+    child = props.enabled and React.createElement("TextButton", {
+      Activated = React.useCallback(function() end, {}),
+    }),
+  })
+end
+return Component`);
+
+  const report = await scanPath(root, { cache: false });
+  const findings = report.diagnostics.filter(
+    (diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks",
+  );
+  assert.deepEqual(findings.map((diagnostic) => diagnostic.location.line), [8, 9, 13, 16]);
+  assert.ok(findings.every((diagnostic) => diagnostic.message.includes("short-circuit expression")));
+});
+
+test("rules of hooks checks every guard and reachable exit in Luau control flow", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-hook-control-flow-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const cases = [
+    { name: "Inline", body: "local value = if props.enabled then React.useState(0) else nil", lines: [5] },
+    { name: "InlineEquivalent", body: "local value = if props.enabled then React.useState(0) else React.useState(1)", lines: [] },
+    { name: "TableKey", body: "local value = { [props.enabled and React.useState(0)] = true }", lines: [5] },
+    { name: "NestedStatement", body: "if props.enabled then\n  if mode then React.useState(0) end\nend", lines: [6] },
+    { name: "NestedLoop", body: "if props.enabled then\n  for i = 1, 2 do React.useState(0) end\nend", lines: [6] },
+    { name: "ElseIf", body: "if mode then\n  consume()\nelseif props.enabled then\n  React.useState(0)\nend", lines: [8] },
+    { name: "HookModeElseIf", functionName: "useValue", parameter: "mode", body: "local enabled, setEnabled = React.useState(false)\nif mode then\n  consume()\nelseif enabled then\n  React.useState(0)\nend\nReact.useEffect(function() setEnabled(true) end, {})", lines: [9] },
+    { name: "ElseIfTopology", body: "if props.first then\n  React.useState(0)\nelseif props.second then\n  React.useBinding(0)\nelse\n  React.useState(0)\nend", lines: [6, 8, 10] },
+    { name: "ElseIfEquivalent", body: "if props.first then\n  React.useState(0)\nelseif props.second then\n  React.useState(1)\nelse\n  React.useState(2)\nend", lines: [] },
+    { name: "ElseIfConditionHook", body: "if props.first then\n  React.useState(0)\nelseif React.useState(false) then\n  React.useState(1)\nelse\n  React.useState(2)\nend", lines: [6, 7, 8, 10] },
+    { name: "InlineElseIf", body: "local value = if mode then nil elseif props.enabled then React.useState(0) else nil", lines: [5] },
+    { name: "NestedReturn", body: "if props.enabled then\n  if mode then return nil end\nend\nReact.useState(0)", lines: [8] },
+    { name: "LoopGuardedReturn", body: "for _, item in props.items do\n  if mode then return nil end\nend\nReact.useState(0)", lines: [8] },
+    { name: "ShadowedModule", body: "local mode = props.enabled\nif mode then React.useState(0) end", lines: [6] },
+    { name: "ShadowedParameter", parameter: "mode", body: "if mode then React.useState(0) end", lines: [5] },
+    { name: "ReassignedLocal", body: "local enabled = true\nenabled = props.enabled\nif enabled then React.useState(0) end", lines: [7] },
+    { name: "RedeclaredLocal", body: "local enabled = true\nlocal enabled = props.enabled\nif enabled then React.useState(0) end", lines: [7] },
+    { name: "CapturedShadow", body: "local mode = props.enabled\nlocal function Child()\n  if mode then React.useState(0) end\n  return React.createElement(\"Frame\")\nend\nconsume(React.createElement(Child))", lines: [7] },
+    { name: "Break", body: "for i = 1, 2 do\n  React.useState(0)\n  if props.enabled then break end\nend", lines: [6] },
+    { name: "Continue", body: "for i = 1, 2 do\n  if props.enabled then continue end\n  React.useState(0)\nend", lines: [7] },
+    { name: "LoopReturn", body: "for i = 1, 2 do\n  React.useState(0)\n  if props.enabled then return nil end\nend", lines: [6] },
+    { name: "EffectCallback", body: "React.useEffect(function()\n  React.useState(0)\nend, {})", lines: [6] },
+    { name: "MemoCallback", body: "local value = React.useMemo(function()\n  return React.useState(0)\nend, {})", lines: [6] },
+    { name: "NamedCallback", body: "local function calculate()\n  return React.useState(0)\nend\nlocal alias = calculate\nReact.useMemo(alias, {})", lines: [6] },
+    { name: "DeferredCallback", body: "task.defer(function()\n  React.useState(0)\nend)", lines: [6] },
+    { name: "EventCallback", body: "local child = React.createElement(\"TextButton\", {\n  [React.Event.Activated] = function()\n    React.useState(0)\n  end,\n})", lines: [7] },
+    { name: "MemoComponent", body: "local Child = React.memo(function()\n  React.useState(0)\n  return React.createElement(\"Frame\")\nend)", lines: [] },
+    { name: "ForwardRef", body: "local Child = React.forwardRef(function()\n  React.useState(0)\n  return React.createElement(\"Frame\")\nend)\nconsume(React.createElement(Child))", lines: [] },
+    { name: "ComponentProp", body: "local function Child()\n  React.useState(0)\n  return React.createElement(\"Frame\")\nend\nconsume(React.createElement(Wrapper, { component = Child }))\nregister(Child)", lines: [] },
+    { name: "Conditions", body: "if React.useState(false) then consume() end\nlocal choice = if React.useState(false) then 1 else 0\nfor i = React.useState(0), 2 do consume() end", lines: [] },
+    { name: "ExclusiveReturn", body: "if props.enabled then return nil else React.useState(0) end", lines: [5] },
+    { name: "While", body: "while props.enabled do React.useState(0) end", lines: [5] },
+    { name: "Repeat", body: "repeat React.useState(0) until props.enabled", lines: [5] },
+  ];
+
+  for (const entry of cases) {
+    fs.writeFileSync(path.join(root, `${entry.name}.luau`), `local React = require(script.Parent.React)
+local mode = getMode()
+local function ${entry.functionName ?? "Component"}(${entry.parameter ?? "props"})
+  consume()
+${entry.body}
+  return React.createElement("Frame")
+end
+return ${entry.functionName ?? "Component"}`);
+  }
+
+  const report = await scanPath(root, { cache: false });
+  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/parse-error"), false);
+  for (const entry of cases) {
+    const findings = report.diagnostics.filter(
+      (diagnostic) => diagnostic.file === `${entry.name}.luau` && diagnostic.rule === "react-luau/rules-of-hooks",
+    );
+    assert.deepEqual(findings.map((diagnostic) => diagnostic.location.line), entry.lines, entry.name);
+  }
+});
+
 test("rules of hooks accepts module-invariant conditions", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-module-invariant-hook-mode-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
