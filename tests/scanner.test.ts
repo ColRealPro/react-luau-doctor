@@ -7,6 +7,213 @@ import { scanPath } from "../src/scanner";
 
 const fixtures = path.resolve(import.meta.dir, "fixtures");
 
+test("memo props follow reference allocations, result branches, aliases, and local factories", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-value-identity-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "Child.luau"),
+    `local React = require(script.Parent.React)
+return React.memo(function() return React.createElement("Frame") end)`,
+  );
+
+  const expressions = {
+    tableAlias: "alias",
+    callback: "callback",
+    conditional: "props.enabled and {} or {}",
+    optional: "props.enabled and {}",
+    choice:
+      "if props.enabled then props.value elseif props.other then {} else nil",
+    wrapped: "(({} :: any))",
+    cloned: "clone(props.value)",
+    created: "tables.create(2)",
+    packed: "table.pack(props.value)",
+    frozen: "table.freeze({})",
+    factory: "build()",
+    factoryAlias: "factory()",
+    captured: "captured()",
+    multiple: "second",
+    returnedFunction: "makeCallback()",
+    params: "newParams()",
+    overlap: "OverlapParams.new()",
+    random: "Random.new()",
+    buffer: "buffer.create(4)",
+    split: 'string.split(props.text, ",")',
+    children: "target:GetChildren()",
+    descendants: "workspace:GetDescendants()",
+    attributes: "script:GetAttributes()",
+    instance: 'Instance.new("Folder")',
+    cloneInstance: "workspace:Clone()",
+  };
+
+  fs.writeFileSync(
+    path.join(root, "Component.luau"),
+    `local React = require(script.Parent.React)
+local Child = require(script.Parent.Child)
+local ChildAlias = Child
+local LocalChild = React.memo(function() return React.createElement("Frame") end)
+local clone = table.clone
+local tables = table
+local newParams = RaycastParams.new
+local target = workspace
+local function build() local result = {} return result end
+local factory = build
+local function makeCallback() return function() end end
+local function pair() return nil, {} end
+local function Component(props)
+    local value = {}
+    local alias = value
+    local function captured() return alias end
+    local function callback() end
+    local first, second = pair()
+    return React.createElement("Frame", nil, {
+        imported = React.createElement(ChildAlias, {
+${Object.entries(expressions)
+  .map(([name, expression]) => `            ${name} = ${expression},`)
+  .join("\n")}
+        }),
+        localChild = React.createElement(LocalChild, { config = build() }),
+    })
+end
+return Component`,
+  );
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter(
+    (entry) => entry.rule === "react-luau/rerender-unstable-memo-props",
+  );
+  assert.equal(diagnostics.length, 2);
+  assert.ok(
+    diagnostics[0].message.includes(
+      `fresh ${Object.keys(expressions).join(", ")} props`,
+    ),
+    diagnostics[0].message,
+  );
+  assert.equal(
+    diagnostics[0].highlights?.length,
+    Object.keys(expressions).length,
+  );
+  assert.ok(diagnostics[1].message.includes("fresh config prop"));
+});
+
+test("identity rules keep value datatypes, stable lifetimes, shadowed APIs, and unknown calls conservative", async (t) => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "doctor-stable-identity-"),
+  );
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "Component.luau"),
+    `local React = require(script.Parent.React)
+local Child = React.memo(function() return React.createElement("Frame") end)
+local Custom = React.memo(function() return React.createElement("Frame") end, function() return true end)
+local Context = React.createContext(nil)
+local constant = {}
+local constantProps = { value = {} }
+local function singleton() return constant end
+local function recursive() return recursive() end
+local function Component(props)
+    local state = React.useState({})
+    local memo = React.useMemo(function() return {} end, {})
+    local callback = React.useCallback(function() end, {})
+    local ref = React.useRef({})
+    local gradient = props.enabled and ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromHex("ffffff")),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(0, 0, 0)),
+    }) or ColorSequence.new(Color3.new(0, 0, 0))
+    local localApi = { GetChildren = function() return constant end }
+    local factory = props.factory
+    React.useEffect(function() consume(gradient) end, { gradient, state, memo, callback, constant })
+    return React.createElement("Frame", nil, {
+        child = React.createElement(Child, {
+            gradient = gradient,
+            dimension = UDim2.fromScale(1, 1),
+            vector = Vector3.new(1, 2, 3),
+            sequence = NumberSequence.new(1),
+            stable = constant,
+            singleton = singleton(),
+            state = state,
+            memo = memo,
+            callback = callback,
+            ref = ref,
+            frozen = table.freeze(constant),
+            unknown = factory({}),
+            result = localApi:GetChildren(),
+            recursive = recursive(),
+            conditionOnly = {} ~= props.value,
+            forwarded = setmetatable({}, props.metatable),
+        }),
+        constantProps = React.createElement(Child, constantProps),
+        custom = React.createElement(Custom, { config = {} }),
+        provider = React.createElement(Context.Provider, { value = gradient }),
+    })
+end
+return Component`,
+  );
+  fs.writeFileSync(
+    path.join(root, "Shadowed.luau"),
+    `local React = require(script.Parent.React)
+local Child = React.memo(function() return React.createElement("Frame") end)
+local function Component(RaycastParams, table, workspace)
+    return React.createElement(Child, {
+        params = RaycastParams.new(),
+        config = table.clone({}),
+        children = workspace:GetChildren(),
+    })
+end
+return Component`,
+  );
+  fs.writeFileSync(
+    path.join(root, "ShadowedChild.luau"),
+    `local React = require(script.Parent.React)
+local Child = React.memo(function() return React.createElement("Frame") end)
+local function Component(Child)
+    return React.createElement(Child, { config = {} })
+end
+return Component`,
+  );
+  const report = await scanPath(root);
+  const identityRules = new Set([
+    "react-luau/rerender-unstable-memo-props",
+    "react-luau/no-effect-with-fresh-deps",
+    "react-luau/unstable-context-value",
+  ]);
+  assert.deepEqual(
+    report.diagnostics.filter((entry) => identityRules.has(entry.rule)),
+    [],
+  );
+});
+
+test("hook dependencies and context values share render reference analysis", async (t) => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "doctor-shared-identity-"),
+  );
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "Component.luau"),
+    `local React = require(script.Parent.React)
+local Context = React.createContext(nil)
+local function build() return table.create(0) end
+local function Component(props)
+    local params = RaycastParams.new()
+    local value = build()
+    local alias = value
+    React.useEffect(function() consume(alias, params) end, { alias, params, props.enabled and {} })
+    return React.createElement(Context.Provider, { value = if props.enabled then alias else props.value })
+end
+return Component`,
+  );
+  const report = await scanPath(root);
+  const dependencies = report.diagnostics.filter(
+    (entry) => entry.rule === "react-luau/no-effect-with-fresh-deps",
+  );
+  assert.equal(dependencies.length, 3);
+  assert.ok(dependencies.some((entry) => entry.message.includes("new object")));
+  assert.equal(
+    report.diagnostics.filter(
+      (entry) => entry.rule === "react-luau/unstable-context-value",
+    ).length,
+    1,
+  );
+});
+
 test("render setter analysis follows expressions and aliases without warning for deferred or conditional updates", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-render-setters-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

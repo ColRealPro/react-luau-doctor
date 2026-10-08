@@ -10,6 +10,22 @@ interface LocalValue {
 const valueCache = new WeakMap<RuleContext, Map<number, LocalValue | null>>();
 const apiCache = new WeakMap<RuleContext, Map<number, string | null>>();
 
+export function isUnboundIdentifier(
+  context: RuleContext,
+  node: SyntaxNode,
+): boolean {
+  return (
+    node.type === "identifier" && visibleValue(context, node) === undefined
+  );
+}
+
+export function localValueBinding(
+  context: RuleContext,
+  node: SyntaxNode,
+): LocalValue | null | undefined {
+  return node.type === "identifier" ? visibleValue(context, node) : null;
+}
+
 export function unwrapExpression(node: SyntaxNode): SyntaxNode {
   while (
     ["parenthesized_expression", "cast_expression"].includes(node.type) &&

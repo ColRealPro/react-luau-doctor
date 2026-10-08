@@ -1,6 +1,7 @@
 import type { SyntaxNode } from "../syntax";
 import type { FunctionInfo, RuleContext, RuleDefinition } from "../types";
 import { nodeKey, rootIdentifier } from "../ast/walk";
+import { freshValueKind } from "../ast/value-identity";
 
 import {
   callNameNode,
@@ -120,41 +121,6 @@ function hasExternalSubscription(
   return false;
 }
 
-function directLocalInitializer(
-  owner: FunctionInfo,
-  name: string,
-): SyntaxNode | null {
-  if (!owner.body) return null;
-
-  for (const statement of owner.body.namedChildren) {
-    if (statement.type !== "variable_declaration") continue;
-
-    const assignment = statement.namedChildren.find(
-      (child) => child.type === "assignment_statement",
-    );
-
-    const variableList = assignment?.namedChildren.find(
-      (child) => child.type === "variable_list",
-    );
-
-    const expressionList = assignment?.namedChildren.find(
-      (child) => child.type === "expression_list",
-    );
-
-    const names =
-      variableList?.namedChildren.filter(
-        (child) => child.type === "identifier",
-      ) ?? [];
-
-    const expressions = expressionList?.namedChildren ?? [];
-    const index = names.findIndex((child) => child.text === name);
-
-    if (index >= 0) return expressions[index] ?? expressions[0] ?? null;
-  }
-
-  return null;
-}
-
 function setterCalledOutsideCallback(
   context: RuleContext,
   owner: FunctionInfo,
@@ -240,25 +206,6 @@ function guaranteedRepeatedStateChange(
   }
 
   return false;
-}
-
-function freshDependencyKind(
-  node: SyntaxNode,
-  owner: FunctionInfo,
-): string | null {
-  if (node.type === "table_constructor") return "table";
-
-  if (node.type === "function_definition") return "function";
-
-  if (node.type === "identifier") {
-    const initializer = directLocalInitializer(owner, node.text);
-
-    if (initializer?.type === "table_constructor") return "table";
-
-    if (initializer?.type === "function_definition") return "function";
-  }
-
-  return null;
 }
 
 export const noDerivedStateEffect: RuleDefinition = {
@@ -428,7 +375,7 @@ export const noEffectWithFreshDeps: RuleDefinition = {
   severity: "error",
 
   description:
-    "Dependency tables should not contain tables or functions recreated on every render.",
+    "Dependency tables should not contain reference values recreated during render",
 
   run(context) {
     const diagnostics = [];
@@ -444,7 +391,7 @@ export const noEffectWithFreshDeps: RuleDefinition = {
       if (!owner || !parts) continue;
 
       for (const dependency of dependencyExpressions(parts.deps)) {
-        const kind = freshDependencyKind(dependency, owner);
+        const kind = freshValueKind(context, dependency, owner);
 
         if (!kind) continue;
 
@@ -453,8 +400,8 @@ export const noEffectWithFreshDeps: RuleDefinition = {
 
         diagnostics.push({
           node: dependency,
-          message: `${path} depends on${label || " an inline value"} that is a new ${kind} on every render.`,
-          help: "Move the value inside the hook callback and depend on its simple inputs, or intentionally stabilize the value with useMemo/useCallback when identity is part of the contract.",
+          message: `${path} depends on${label || " an inline value"} that can be a new ${kind} when the component renders`,
+          help: "Move the value inside the hook callback and depend on its simple inputs, or intentionally stabilize the value with useMemo/useCallback when identity is part of the contract",
         });
       }
     }

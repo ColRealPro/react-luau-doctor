@@ -14,6 +14,8 @@ import type {
 } from "../types";
 
 import { normalizeExpressionText, sameNode } from "../ast/walk";
+import { reactApiPath, resolveLocalValue } from "../ast/local-values";
+import { freshValueKind } from "../ast/value-identity";
 import { isHighFrequencyRunServiceCall } from "../roblox-semantics";
 
 import {
@@ -247,41 +249,39 @@ function componentRenderCost(
   return parts;
 }
 
-function memoizedImports(
+function memoizedComponentKind(
   context: RuleContext,
-): Map<string, "shallow" | "custom"> {
-  const result = new Map<string, "shallow" | "custom">();
+  expression: SyntaxNode,
+): "shallow" | "custom" | null {
+  const binding = resolveLocalValue(context, expression);
 
-  for (const node of context.walk(context.root)) {
-    if (node.type !== "variable_declaration") continue;
+  if (
+    !binding ||
+    binding.returnIndex !== 0 ||
+    binding.value.type !== "function_call"
+  )
+    return null;
 
-    const match = node.text.match(
-      /^\s*local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)\s*$/s,
-    );
+  const call = binding.value;
 
-    if (!match) continue;
-
-    const localName = match[1];
-
-    const memoKind = resolveModuleReference(
-      normalizeRequireTarget(match[2]),
-      context.project.memoizedModules,
-    );
-
-    if (memoKind) result.set(localName, memoKind);
+  if (reactApiPath(context, call) === "React.memo") {
+    return context.callArguments(call).length > 1 ? "custom" : "shallow";
   }
 
-  return result;
+  const target = context.callArguments(call)[0];
+
+  if (context.getCallPath(call) !== "require" || !target) return null;
+
+  return (
+    resolveModuleReference(
+      normalizeRequireTarget(target.text),
+      context.project.memoizedModules,
+    ) ?? null
+  );
 }
 
 function fieldLabel(field: SyntaxNode): string {
   return fieldName(field) ?? field.childForFieldName("name")?.text ?? "prop";
-}
-
-function isInlineFreshValue(node: SyntaxNode | null): boolean {
-  return (
-    node?.type === "table_constructor" || node?.type === "function_definition"
-  );
 }
 
 export const rerenderUnstableMemoProps: RuleDefinition = {
@@ -290,20 +290,16 @@ export const rerenderUnstableMemoProps: RuleDefinition = {
   severity: "warning",
 
   description:
-    "Warn when fresh table or function props defeat shallow React.memo comparisons.",
+    "Warn when props created during render can defeat shallow React.memo comparisons",
 
   guidance: {
     explanation:
-      "A new function or table has a new identity, so a shallow memo comparison cannot skip this child.",
+      "New tables, functions, and reference objects compare unequal even when their contents match",
 
-    help: "Stabilize props that change each render if this child is expensive, move construction into the child, or remove ineffective memoization.",
+    help: "Stabilize props that change each render if this child is expensive, move construction into the child, or remove ineffective memoization",
   },
 
   run(context) {
-    const imports = memoizedImports(context);
-
-    if (imports.size === 0) return [];
-
     const diagnostics: DiagnosticInput[] = [];
 
     for (const call of context.findCalls()) {
@@ -320,15 +316,24 @@ export const rerenderUnstableMemoProps: RuleDefinition = {
       const args = context.callArguments(call);
       const childName = args[0]?.text.trim() ?? "";
 
-      if (imports.get(childName) !== "shallow") continue;
+      if (!args[0] || memoizedComponentKind(context, args[0]) !== "shallow")
+        continue;
 
-      const props = args[1];
+      const propsBinding = args[1] && resolveLocalValue(context, args[1]);
+      const props = propsBinding?.returnIndex === 0 ? propsBinding.value : null;
 
-      if (!props || props.type !== "table_constructor") continue;
+      if (
+        !props ||
+        props.type !== "table_constructor" ||
+        context.nearestFunction(props) !== component
+      )
+        continue;
 
       const unstableFields = props.namedChildren
         .filter((node) => node.type === "field")
-        .filter((field) => isInlineFreshValue(fieldValue(field)));
+        .filter((field) =>
+          freshValueKind(context, fieldValue(field), component),
+        );
 
       if (unstableFields.length === 0) continue;
 
@@ -339,15 +344,15 @@ export const rerenderUnstableMemoProps: RuleDefinition = {
         node: highlights[0],
         highlights,
         severity: "warning",
-        message: `Memoized ${childName} receives fresh ${unstable.join(", ")} prop${unstable.length === 1 ? "" : "s"} on every parent render.`,
-        summary: `${childName} gets ${unstable.length} fresh ${unstable.length === 1 ? "prop" : "props"} each render. Memoization cannot skip it.`,
+        message: `Memoized ${childName} can receive fresh ${unstable.join(", ")} prop${unstable.length === 1 ? "" : "s"} when its parent renders`,
+        summary: `${childName} gets ${unstable.length} ${unstable.length === 1 ? "prop" : "props"} created during render that can prevent memoization from skipping it`,
 
         editorRanges: highlights.map((node, index) => ({
           node,
-          summary: `${childName} gets a fresh ${unstable[index]} prop each render. Memoization cannot skip it.`,
+          summary: `${childName} gets a ${unstable[index]} prop created during render that can prevent memoization from skipping it`,
         })),
 
-        help: "Fresh table or function identity prevents the shallow memo comparison from skipping this child. Stabilize the prop only when the parent rerenders frequently, move construction into the child, or remove ineffective memoization.",
+        help: "Fresh reference identity can prevent the shallow memo comparison from skipping this child. Stabilize the prop when the parent rerenders frequently, move construction into the child, or remove ineffective memoization",
       });
     }
 
