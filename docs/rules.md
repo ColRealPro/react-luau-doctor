@@ -17,7 +17,7 @@ Add `react-luau/` before the names below when using them in your [config](cli.md
 | --------------------------------- | ---------- | ---------------------------------------------------------- |
 | `rules-of-hooks`                  | error      | Hooks run in a different order between renders             |
 | `exhaustive-deps`                 | warning    | A hook callback reads values missing from its dependencies |
-| `no-effect-with-fresh-deps`       | error      | A dependency is a new table or function on each render     |
+| `no-effect-with-fresh-deps`       | error      | A dependency can be a new reference value during render    |
 | `no-mutable-in-deps`              | error      | A dependency reads a mutable `ref.current` value           |
 | `prefer-use-ref-for-mutable-cell` | suggestion | `useMemo` creates a table used like a ref                  |
 
@@ -57,7 +57,7 @@ Add `react-luau/` before the names below when using them in your [config](cli.md
 | ------------------------------------- | ---------- | ------------------------------------------------------------------------------ |
 | `prefer-binding-over-state`           | warning    | Frequent external state updates only change properties that could use bindings |
 | `prefer-binding-over-state-candidate` | suggestion | A state value might suit a binding, but its consumers need a closer look       |
-| `rerender-unstable-memo-props`        | warning    | Fresh tables or functions prevent a memoized child from skipping renders       |
+| `rerender-unstable-memo-props`        | warning    | Fresh reference props can prevent a memoized child from skipping renders       |
 | `rerender-high-frequency-state`       | warning    | Frame callbacks update state that rerenders an expensive component tree        |
 | `rerender-unnecessary-usememo`        | warning    | `useMemo` caches a simple calculation                                          |
 | `rerender-unnecessary-usecallback`    | warning    | Nothing uses the stable identity of a `useCallback` result                     |
@@ -68,7 +68,7 @@ Add `react-luau/` before the names below when using them in your [config](cli.md
 | `rerender-lazy-state-init`            | warning    | Render repeats expensive work passed to `useState`                             |
 | `rerender-lazy-ref-init`              | warning    | Render repeats expensive work passed to `useRef`                               |
 | `rerender-state-only-in-handlers`     | warning    | Only callbacks read a state value                                              |
-| `unstable-context-value`              | warning    | A provider creates a new context value table each render                       |
+| `unstable-context-value`              | warning    | A provider can receive a reference value created during render                 |
 
 ## Architecture
 
