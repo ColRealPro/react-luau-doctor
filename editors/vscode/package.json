@@ -2,7 +2,7 @@
   "name": "react-luau-doctor",
   "displayName": "React-Luau Doctor",
   "description": "Live and deep diagnostics for React-Luau projects",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "publisher": "colrealpro",
   "icon": "Icon.png",
   "license": "MIT",
