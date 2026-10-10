@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `no-binding-getvalue-in-render` now allows snapshots in initialization arguments to `useState`, `useBinding`, and `useReducer`, alongside `useRef`
+
 ## 0.20.1
 
 ### Fixed

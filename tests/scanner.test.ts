@@ -671,6 +671,68 @@ return Component`,
   );
 });
 
+test("binding snapshots may initialize state, bindings, and reducers without exempting other arguments or shadowed hooks", async (t) => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "doctor-binding-hook-init-"),
+  );
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const cases = [
+    {
+      hook: "useState",
+      prefix: "",
+      invalid: "nil, value:getValue()",
+      lines: [9, 10, 12, 13],
+    },
+    {
+      hook: "useBinding",
+      prefix: "",
+      invalid: "nil, value:getValue()",
+      lines: [9, 10, 12, 13],
+    },
+    {
+      hook: "useReducer",
+      prefix: "reducer, ",
+      invalid: "value:getValue(), nil, value:getValue()",
+      lines: [9, 10, 10, 12, 13],
+    },
+  ];
+
+  for (const { hook, prefix, invalid, lines } of cases) {
+    fs.writeFileSync(
+      path.join(root, "Component.luau"),
+      `local React = require(script.Parent.React)
+local initialize = React.${hook}
+local function reducer(state) return state end
+local function Component()
+    local value = React.useBinding(0)
+    local direct = React.${hook}(${prefix}value:getValue())
+    local aliased = initialize(${prefix}{ previous = value:getValue() })
+    local formatted = React.${hook}(${prefix}tostring(value:getValue()))
+    local snapshot = value:getValue()
+    local invalid = React.${hook}(${invalid})
+    local initialize = function(...) return nil end
+    local unrelated = initialize(${prefix}value:getValue())
+    return React.createElement("TextLabel", { Text = value:getValue() })
+end
+return Component`,
+    );
+    const report = await scanPath(root, { cache: false });
+    assert.equal(
+      report.diagnostics.some((item) => item.rule === "react-luau/parse-error"),
+      false,
+    );
+    const findings = report.diagnostics.filter(
+      (item) => item.rule === "react-luau/no-binding-getvalue-in-render",
+    );
+    assert.deepEqual(
+      findings.map((item) => item.location.line),
+      lines,
+      hook,
+    );
+  }
+});
+
 test("memo callbacks must return a value but nested returns do not count and explicit nil remains allowed", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-memo-return-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

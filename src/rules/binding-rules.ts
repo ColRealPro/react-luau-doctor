@@ -105,7 +105,14 @@ function isLazyRefInitialization(
   return false;
 }
 
-function isRefInitializer(context: RuleContext, call: SyntaxNode): boolean {
+const hookInitializerArguments = new Map([
+  ["React.useRef", 0],
+  ["React.useState", 0],
+  ["React.useBinding", 0],
+  ["React.useReducer", 1],
+]);
+
+function isHookInitializer(context: RuleContext, call: SyntaxNode): boolean {
   let node = call;
 
   while (node.parent) {
@@ -117,12 +124,17 @@ function isRefInitializer(context: RuleContext, call: SyntaxNode): boolean {
     if (parent.type === "arguments") {
       const hook = parent.parent;
 
-      if (
-        hook?.type === "function_call" &&
-        reactApiPath(context, hook) === "React.useRef" &&
-        context.callArguments(hook)[0]?.id === node.id
-      )
-        return true;
+      if (hook?.type === "function_call") {
+        const argumentIndex = hookInitializerArguments.get(
+          reactApiPath(context, hook) ?? "",
+        );
+
+        if (
+          argumentIndex !== undefined &&
+          context.callArguments(hook)[argumentIndex]?.id === node.id
+        )
+          return true;
+      }
     }
 
     node = parent;
@@ -172,7 +184,7 @@ export const noBindingGetValueInRender: RuleDefinition = {
   category: "Correctness",
   severity: "warning",
   description:
-    "Do not read binding snapshots during render except to initialize a ref",
+    "Do not read binding snapshots during render except in hook initialization arguments",
 
   guidance: {
     explanation:
@@ -180,7 +192,7 @@ export const noBindingGetValueInRender: RuleDefinition = {
 
     help: "Pass the binding directly to the prop or use binding:map(function(value) return ... end)",
     caveat:
-      "A snapshot used to initialize React.useRef is allowed because the initial value is intentionally preserved",
+      "Snapshots in the first argument to React.useRef, React.useState, or React.useBinding, or the second argument to React.useReducer, are allowed because those arguments are used only for initialization",
   },
 
   run(context) {
@@ -196,7 +208,7 @@ export const noBindingGetValueInRender: RuleDefinition = {
         name.namedChildren.at(-1)?.text !== "getValue" ||
         !receiver ||
         !isBinding(context, receiver) ||
-        isRefInitializer(context, call)
+        isHookInitializer(context, call)
       )
         return [];
 

@@ -38,7 +38,7 @@ Add `react-luau/` before the names below when using them in your [config](cli.md
 | `no-mutating-state-updater`     | error      | A state updater changes the previous state table in place                                |
 | `no-call-component-as-function` | warning    | Code calls a component directly instead of creating an element                           |
 | `no-create-binding-in-render`   | warning    | `createBinding` creates a new binding on each render                                     |
-| `no-binding-getvalue-in-render` | warning    | Render reads a binding snapshot instead of subscribing, except when initializing a ref   |
+| `no-binding-getvalue-in-render` | warning    | Render reads a binding snapshot instead of subscribing, except for hook initialization   |
 | `usememo-must-return`           | warning    | A `useMemo` callback has no value to return                                              |
 | `no-direct-state-mutation`      | warning    | Code changes a state table in place                                                      |
 | `no-ref-current-in-render`      | warning    | Render changes `ref.current`, beyond initialization and latest-value mirrors             |
