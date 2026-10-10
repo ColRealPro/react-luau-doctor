@@ -19,7 +19,7 @@ Project: https://github.com/tree-sitter/tree-sitter
 
 ## jsonc-parser
 
-Project config edits use Microsoft's MIT-licensed `jsonc-parser`
-Its license is installed with the npm dependency and included in the VS Code extension at `vendor/jsonc-parser.LICENSE`
+The VS Code extension's project config edits use Microsoft's MIT-licensed `jsonc-parser`
+It is bundled into the language server, with its license included at `vendor/jsonc-parser.LICENSE` in the extension
 
 Project: https://github.com/microsoft/node-jsonc-parser
