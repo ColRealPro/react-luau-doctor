@@ -1127,16 +1127,63 @@ async function runCiJob(argv: string[]): Promise<void> {
 
     if (settings.reviewComments && snapshot && base && !stale) {
       try {
+        // New inline comments use the latest push, while the summary keeps the PR baseline
+        const reviewBase = event.action === "synchronize" ? event.before : base;
+
+        if (
+          event.action === "synchronize" &&
+          (!reviewBase ||
+            !/^[a-f0-9]{40}$/i.test(reviewBase) ||
+            gitResult(scan.repoRoot, ["merge-base", "--is-ancestor", reviewBase, head]) === null)
+        ) {
+          throw new Error(
+            "Previous PR head is unavailable or history was rewritten; new inline comments were skipped",
+          );
+        }
+
         const lines = createGitScopePlan(path.resolve(settings.directory), {
           scope: "lines",
-          base,
+          base: reviewBase,
         }).changedLines;
-        const latestSnapshot = await reviewSnapshot(client);
-        inlineCount = await reconcileReviews(client, latestSnapshot, analysis, (diagnostic) =>
+        const canInline = (diagnostic: Diagnostic) =>
           (lines.get(diagnostic.file) ?? []).some(
             (range) =>
               diagnostic.location.line >= range.start && diagnostic.location.line <= range.end,
-          ),
+          );
+        let introduced = !event.action || event.action === "opened" ? analysis.introduced : [];
+
+        if (
+          analysis.complete &&
+          event.action === "synchronize" &&
+          analysis.introduced.some(({ diagnostic }) => canInline(diagnostic))
+        ) {
+          const update = await scanForCi({ ...settings, scope: "changed" }, true, reviewBase, head);
+
+          if (!update.analysis.complete) {
+            throw new Error(
+              "Previous PR head analysis was incomplete; new inline comments were skipped",
+            );
+          }
+
+          const fresh = new Set(
+            update.comparison.diagnostics.map(
+              (diagnostic) => diagnostic.file + "\0" + diagnostic.id,
+            ),
+          );
+          introduced = analysis.introduced.filter(({ diagnostic }) =>
+            fresh.has(diagnostic.file + "\0" + diagnostic.id),
+          );
+        }
+
+        const latestSnapshot = await reviewSnapshot(client);
+        inlineCount = await reconcileReviews(
+          client,
+          latestSnapshot,
+          {
+            ...analysis,
+            introduced,
+          },
+          canInline,
         );
       } catch (error) {
         stale ||= error instanceof StalePublication;

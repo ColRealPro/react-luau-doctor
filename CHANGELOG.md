@@ -5,6 +5,7 @@
 ### Fixed
 
 - Improved PR summary footer wording
+- Inline reviews are now scoped to only findings introduced by the latest PR push again
 
 ## 0.20.2
 

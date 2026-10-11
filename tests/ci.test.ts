@@ -611,12 +611,17 @@ async function runWithApi(
   root: string,
   base: string,
   api: string,
-  options: { args?: string[]; env?: NodeJS.ProcessEnv } = {},
+  options: {
+    args?: string[];
+    env?: NodeJS.ProcessEnv;
+    event?: { action: string; before?: string };
+  } = {},
 ): Promise<Result> {
   const eventPath = path.join(root, "event.json");
   fs.writeFileSync(
     eventPath,
     JSON.stringify({
+      ...options.event,
       pull_request: {
         number: 7,
         base: { sha: base, ref: "main" },
@@ -651,11 +656,13 @@ async function runWithApi(
   return { stdout, stderr, status };
 }
 
-test("PR reporting posts a summary, inline review, and blocking status", async (t) => {
+test("PR reporting keeps summaries PR-wide and new inline reviews scoped to the latest push", async (t) => {
   const root = createRepo(VALID_COMPONENT);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const base = git(root, "rev-parse", "HEAD");
   fs.writeFileSync(path.join(root, "Component.luau"), INVALID_COMPONENT);
+  git(root, "add", "Component.luau");
+  git(root, "commit", "-m", "introduce finding");
 
   const requests: Array<{ method: string; path: string; body: any }> = [];
   const server = Bun.serve({
@@ -691,7 +698,7 @@ test("PR reporting posts a summary, inline review, and blocking status", async (
   });
   t.after(() => server.stop(true));
 
-  const result = await runWithApi(root, base, server.url.toString());
+  const result = await runWithApi(root, base, server.url.toString(), { event: { action: "opened" } });
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stdout, /no-prop-mutation/);
   assert.ok(
@@ -708,6 +715,46 @@ test("PR reporting posts a summary, inline review, and blocking status", async (
       (request) => request.path.includes("/statuses/") && request.body?.state === "failure",
     ),
   );
+
+  const synchronize = async (before: string): Promise<Result> => {
+    requests.length = 0;
+    return runWithApi(root, base, server.url.toString(), {
+      event: { action: "synchronize", before },
+    });
+  };
+  const reviewRequests = () =>
+    requests.filter(
+      (request) => request.method === "POST" && request.path.endsWith("/pulls/7/reviews"),
+    );
+
+  let before = git(root, "rev-parse", "HEAD");
+  git(root, "commit", "--allow-empty", "-m", "update CI");
+  assert.equal((await synchronize(before)).status, 1);
+  assert.equal(reviewRequests().length, 0);
+
+  before = git(root, "rev-parse", "HEAD");
+  fs.writeFileSync(path.join(root, "Component.luau"), `\n${INVALID_COMPONENT}`);
+  git(root, "add", "Component.luau");
+  git(root, "commit", "-m", "edit without new findings");
+  assert.equal((await synchronize(before)).status, 1);
+  assert.equal(reviewRequests().length, 0);
+
+  before = git(root, "rev-parse", "HEAD");
+  fs.writeFileSync(path.join(root, "NewComponent.luau"), INVALID_COMPONENT);
+  git(root, "add", "NewComponent.luau");
+  git(root, "commit", "-m", "introduce another finding");
+  assert.equal((await synchronize(before)).status, 1);
+  assert.equal(reviewRequests().length, 1);
+  assert.deepEqual(
+    reviewRequests()[0]?.body.comments.map((comment: any) => comment.path),
+    ["NewComponent.luau"],
+  );
+  assert.match(fs.readFileSync(path.join(root, "outputs.txt"), "utf8"), /total-issues=2/);
+
+  const unavailable = await synchronize("0".repeat(40));
+  assert.equal(unavailable.status, 1);
+  assert.match(unavailable.stderr, /new inline comments were skipped/);
+  assert.equal(reviewRequests().length, 0);
 });
 
 test("suppressed syntax failures cannot produce clean CI results, success statuses, or review cleanup", async (t) => {
