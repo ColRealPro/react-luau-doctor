@@ -71,6 +71,7 @@ interface SerializedProjectModel {
 }
 
 export interface CachedReportData {
+  unverifiedFiles?: string[];
   scannedFiles: number;
   candidateFiles: number;
   diagnostics: Diagnostic[];
@@ -595,6 +596,7 @@ export function previousCachedReport(
     scannedFiles: report.scannedFiles,
     candidateFiles: report.candidateFiles,
     diagnostics: report.diagnostics,
+    unverifiedFiles: report.unverifiedFiles,
   };
 }
 
@@ -612,6 +614,7 @@ export function cachedReport(
     scannedFiles: report.scannedFiles,
     candidateFiles: report.candidateFiles,
     diagnostics: report.diagnostics,
+    unverifiedFiles: report.unverifiedFiles,
   };
 }
 

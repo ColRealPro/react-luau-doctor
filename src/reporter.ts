@@ -30,7 +30,7 @@ function severityPaint(severity: Severity, value: string): string {
   return paint(value, ANSI.bold, ANSI.magenta);
 }
 
-function scoreLabel(score: number): string {
+export function scoreLabel(score: number): string {
   if (score >= 90) return "Excellent";
   if (score >= 75) return "Good";
   if (score >= 50) return "Needs work";

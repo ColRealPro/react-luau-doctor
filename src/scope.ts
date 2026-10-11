@@ -30,7 +30,11 @@ export interface ScopedScanOptions {
   cache?: boolean;
   parallel?: boolean;
   analysisSession?: ScanAnalysisSession;
-  onDelta?: (current: Diagnostic[], baseline: Diagnostic[]) => void;
+  onDelta?: (
+    current: Diagnostic[],
+    baseline: Diagnostic[],
+    context: { current: ScanReport; baseline: ScanReport; plan: GitScopePlan },
+  ) => void;
 }
 
 function diagnosticFingerprint(diagnostic: Diagnostic): string {
@@ -129,13 +133,14 @@ export async function scanProjectWithScope(projectRoot: string, options: ScopedS
   let diagnostics = current.diagnostics;
   let partial = current.partial;
   let skippedFiles = current.skippedFiles;
+  let unverifiedFiles = current.unverifiedFiles;
 
   if (effectiveScope === "changed") {
     const baseline = await scanPath(targetRoot, {
       ...sharedScanOptions(scanOptions, projectRoot, "baseline"),
       files: plan.baselineFiles,
     });
-    options.onDelta?.(current.diagnostics, baseline.diagnostics);
+    options.onDelta?.(current.diagnostics, baseline.diagnostics, { current, baseline, plan });
     const baselineSkipped = new Set(baseline.skippedFiles ?? []);
     const baselinePaths = new Set(plan.baselineFiles.map((file) => file.relativePath ?? ""));
     const comparableCurrent = current.diagnostics.filter(
@@ -144,6 +149,9 @@ export async function scanProjectWithScope(projectRoot: string, options: ScopedS
     diagnostics = introducedDiagnostics(comparableCurrent, baseline.diagnostics);
     partial = partial || Boolean(baseline.partial);
     skippedFiles = [...new Set([...(current.skippedFiles ?? []), ...(baseline.skippedFiles ?? [])])].sort();
+    unverifiedFiles = [
+      ...new Set([...(current.unverifiedFiles ?? []), ...(baseline.unverifiedFiles ?? [])]),
+    ].sort();
   } else if (effectiveScope === "lines") {
     diagnostics = current.diagnostics.filter((diagnostic) =>
       touchesChangedLines(diagnostic, plan.changedLines.get(diagnostic.file) ?? []),
@@ -153,6 +161,7 @@ export async function scanProjectWithScope(projectRoot: string, options: ScopedS
   return rebuildReport(current, diagnostics, {
     partial,
     skippedFiles,
+    unverifiedFiles,
     scope: options.staged ? "staged" : effectiveScope,
     base: plan.base,
     changedFiles: plan.changedFiles,
@@ -172,6 +181,7 @@ export function aggregateReports(root: string, reports: Array<{ projectRoot: str
   const startedDuration = reports.reduce((total, entry) => total + entry.report.durationMs, 0);
   const diagnostics: Diagnostic[] = [];
   const skippedFiles: string[] = [];
+  const unverifiedFiles: string[] = [];
   const changedFiles: string[] = [];
   const notes: string[] = [];
   const projects: string[] = [];
@@ -187,6 +197,11 @@ export function aggregateReports(root: string, reports: Array<{ projectRoot: str
     partial = partial || Boolean(report.partial);
     diagnostics.push(...report.diagnostics.map((diagnostic) => prefixDiagnostic(diagnostic, prefix)));
     skippedFiles.push(...(report.skippedFiles ?? []).map((file) => (prefix ? normalize(path.posix.join(prefix, file)) : file)));
+    unverifiedFiles.push(
+      ...(report.unverifiedFiles ?? []).map((file) =>
+        prefix ? normalize(path.posix.join(prefix, file)) : file,
+      ),
+    );
     changedFiles.push(...(report.changedFiles ?? []).map((file) => (prefix ? normalize(path.posix.join(prefix, file)) : file)));
     notes.push(...(report.notes ?? []));
   }
@@ -211,6 +226,7 @@ export function aggregateReports(root: string, reports: Array<{ projectRoot: str
     diagnostics,
     partial,
     skippedFiles: [...new Set(skippedFiles)].sort(),
+    unverifiedFiles: unverifiedFiles.length ? [...new Set(unverifiedFiles)].sort() : undefined,
     scope: scopes.size === 1 ? [...scopes][0] : undefined,
     base: bases.size === 1 ? [...bases][0] : undefined,
     changedFiles: [...new Set(changedFiles)].sort(),

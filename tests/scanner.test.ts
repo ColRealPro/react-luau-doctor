@@ -7,6 +7,23 @@ import { scanPath } from "../src/scanner";
 
 const fixtures = path.resolve(import.meta.dir, "fixtures");
 
+test("syntax verification survives diagnostic suppression and cached reports without changing configured findings", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-syntax-verification-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const filename = path.join(root, "Component.luau");
+  fs.writeFileSync(filename, 'local React = require(script.Parent.React)\nreturn React.createElement("Frame", {');
+  const config = { rules: { "react-luau/parse-error": "off" as const } };
+  const first = await scanPath(root, { config, parallel: false });
+  assert.deepEqual(first.unverifiedFiles, ["Component.luau"]);
+  assert.ok(!first.diagnostics.some((entry) => entry.rule === "react-luau/parse-error"));
+  const cached = await scanPath(root, { config, parallel: false });
+  assert.deepEqual(cached.unverifiedFiles, first.unverifiedFiles);
+  fs.writeFileSync(filename, 'local React = require(script.Parent.React)\nreturn React.createElement("Frame")');
+  const fixed = await scanPath(root, { config, parallel: false });
+  assert.equal(fixed.unverifiedFiles, undefined);
+  assert.equal(fixed.diagnostics.length, 0);
+});
+
 test("memo props follow reference allocations, result branches, aliases, and local factories", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-value-identity-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

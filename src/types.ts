@@ -257,6 +257,7 @@ export interface ScanReport {
   diagnostics: Diagnostic[];
   partial?: boolean;
   skippedFiles?: string[];
+  unverifiedFiles?: string[];
   scope?: ScanScope | "staged";
   base?: string;
   changedFiles?: string[];

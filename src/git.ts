@@ -31,6 +31,7 @@ export interface GitScopePlan {
   currentFiles: ScanFileInput[];
   baselineFiles: ScanFileInput[];
   changedLines: Map<string, LineRange[]>;
+  baselinePaths: Map<string, string>;
 }
 
 interface GitResult {
@@ -100,16 +101,20 @@ function mergeBase(repoRoot: string, left: string, right = "HEAD"): string | nul
 }
 
 export function resolveGitBase(repoRoot: string, requested?: string): string {
-  if (requested) {
-    if (requested.startsWith("-")) throw new Error(`Invalid git ref: ${requested}`);
-    const base = mergeBase(repoRoot, requested);
+  const gitLab = process.env.GITLAB_CI === "true";
+  const baseRef = requested ?? (gitLab ? process.env.CI_MERGE_REQUEST_DIFF_BASE_SHA?.trim() : undefined);
+
+  if (baseRef) {
+    if (baseRef.startsWith("-")) throw new Error(`Invalid git ref: ${baseRef}`);
+    const base = mergeBase(repoRoot, baseRef);
     if (base) return base;
-    const commit = verifyCommit(repoRoot, requested);
-    if (!commit) throw new Error(`Could not resolve git base ref: ${requested}`);
+    const commit = verifyCommit(repoRoot, baseRef);
+    if (!commit) throw new Error(`Could not resolve git base ref: ${baseRef}`);
     return commit;
   }
 
-  const environmentBase = process.env.GITHUB_BASE_REF?.trim();
+  const environmentBase = process.env.GITHUB_BASE_REF?.trim()
+    || (gitLab ? process.env.CI_DEFAULT_BRANCH?.trim() : undefined);
   const candidates = [
     environmentBase ? `origin/${environmentBase}` : null,
     environmentBase ?? null,
@@ -324,6 +329,7 @@ export function createGitScopePlan(scanRootInput: string, options: GitScopeOptio
   const baselineFiles: ScanFileInput[] = [];
   const changedLines = new Map<string, LineRange[]>();
   const changedFiles: string[] = [];
+  const baselinePaths = new Map<string, string>();
   const stagedSources = options.staged
     ? readGitObjects(repoRoot, repoFiles.map((file) => `:${file.currentPath}`))
     : new Map<string, string | null>();
@@ -346,12 +352,23 @@ export function createGitScopePlan(scanRootInput: string, options: GitScopeOptio
       ? stagedSources.get(`:${repoRelativePath}`) ?? null
       : currentSource(repoRoot, repoRelativePath, false);
     const relativePath = normalize(path.relative(relativeRoot, absolutePath));
+    if (repoFile.baselinePath !== null) {
+      baselinePaths.set(
+        relativePath,
+        normalize(path.relative(relativeRoot, path.resolve(repoRoot, repoFile.baselinePath))),
+      );
+    }
+
     changedFiles.push(relativePath);
     if (source !== null) currentFiles.push({ absolutePath, relativePath, source, forceScan: false });
 
     const baseline = options.scope !== "changed" || repoFile.baselinePath === null
       ? null
       : baselineSources.get(`${base}:${repoFile.baselinePath}`) ?? null;
+    if (options.scope === "changed" && repoFile.baselinePath !== null && baseline === null) {
+      throw new Error(`Could not read baseline source for ${repoFile.baselinePath}`);
+    }
+
     if (baseline !== null) baselineFiles.push({ absolutePath, relativePath, source: baseline, forceScan: false });
 
     if (options.scope === "lines" && source !== null) {
@@ -367,5 +384,6 @@ export function createGitScopePlan(scanRootInput: string, options: GitScopeOptio
     currentFiles,
     baselineFiles,
     changedLines,
+    baselinePaths,
   };
 }

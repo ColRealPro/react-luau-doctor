@@ -300,6 +300,7 @@ export async function scanPath(
         diagnostics: reportHit.diagnostics,
         partial: false,
         skippedFiles: [],
+        unverifiedFiles: reportHit.unverifiedFiles,
       };
     }
   }
@@ -428,6 +429,7 @@ export async function scanPath(
 
     const diagnostics: Diagnostic[] = [];
     const skippedFiles: string[] = [];
+    const unverifiedFiles: string[] = [];
     let scannedFiles = 0;
     let scanCandidates = candidates;
     let incrementalReuse = false;
@@ -453,6 +455,11 @@ export async function scanPath(
         ...previousReport.diagnostics.filter(
           (diagnostic) =>
             !affectedFiles.has(normalizeRelative(diagnostic.file)),
+        ),
+      );
+      unverifiedFiles.push(
+        ...(previousReport.unverifiedFiles ?? []).filter(
+          (file) => !affectedFiles.has(normalizeRelative(file)),
         ),
       );
 
@@ -481,6 +488,7 @@ export async function scanPath(
       if (result.scanned) scannedFiles += 1;
 
       diagnostics.push(...result.diagnostics);
+      if (result.unverified) unverifiedFiles.push(result.relativePath);
     };
 
     const prepareCandidate = (
@@ -661,6 +669,7 @@ export async function scanPath(
       diagnostics,
       partial: skippedFiles.length > 0,
       skippedFiles,
+      unverifiedFiles: unverifiedFiles.length ? [...new Set(unverifiedFiles)].sort() : undefined,
     };
 
     if (canPersistCache)
@@ -674,6 +683,7 @@ export async function scanPath(
               scannedFiles: report.scannedFiles,
               candidateFiles: report.candidateFiles ?? candidates.length,
               diagnostics: report.diagnostics,
+              unverifiedFiles: report.unverifiedFiles,
             }
           : undefined,
       );

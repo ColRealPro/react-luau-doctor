@@ -6,6 +6,7 @@ import { effectiveSeverity } from "./config";
 import { createInlineSuppressionChecker } from "./inline-disables";
 import { parseLuau } from "./parser";
 import { rules } from "./rules";
+import { parseErrors } from "./rules/parse-errors";
 
 import type {
   Category,
@@ -42,6 +43,7 @@ export interface ReactFileAnalysisResult {
   isReactFile: boolean;
   scanned: boolean;
   diagnostics: Diagnostic[];
+  unverified?: boolean;
 }
 
 function diagnosticId(
@@ -154,6 +156,7 @@ export async function analyzeReactFile(
     };
 
     const context = createRuleContext(file);
+    const syntaxFindings = parsedTree.rootNode.hasError ? parseErrors.run(context) : [];
 
     const categorySet =
       input.categories && input.categories.length > 0
@@ -174,7 +177,7 @@ export async function analyzeReactFile(
 
       if (!severity) continue;
 
-      const findings = rule.run(context);
+      const findings = rule.id === parseErrors.id ? syntaxFindings : rule.run(context);
 
       for (const finding of findings) {
         const configuredSeverity = input.config.rules?.[rule.id];
@@ -214,6 +217,7 @@ export async function analyzeReactFile(
       isReactFile: model.isReactFile,
       scanned: true,
       diagnostics: filteredDiagnostics,
+      unverified: syntaxFindings.length > 0,
     };
   } finally {
     if (!tree) parsedTree.delete?.();
