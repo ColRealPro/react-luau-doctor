@@ -2,9 +2,14 @@
 
 ## Unreleased
 
+### Changed
+
+- Cleaned up existing CI reporting, added individual fixed issues to PR summaries, and improved inline review progress and reliability
+
 ### Fixed
 
 - `no-binding-getvalue-in-render` now allows snapshots in initialization arguments to `useState`, `useBinding`, and `useReducer`, alongside `useRef`
+- Fixed GitLab changed-scope scans by installing Git in generated jobs and using the merge-request diff baseline
 
 ## 0.20.1
 
