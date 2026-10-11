@@ -235,10 +235,10 @@ export function renderSummaryComment(report: ScanReport, options: SummaryOptions
     },
   ];
   const inlineNote =
-    options.inlineCount > 0 ? "See inline comments for fixes" : "See this report for findings";
+    total > 0 && options.inlineCount > 0 ? " · See inline comments for fixes" : "";
   const footer =
     "\n\n<sub>Reviewed by [React-Luau Doctor](https://github.com/ColRealPro/react-luau-doctor)" +
-    ` for commit ${inlineCode(options.sha.slice(0, 7))} · ${inlineNote}</sub>\n`;
+    ` for commit ${inlineCode(options.sha.slice(0, 7))}${inlineNote}</sub>\n`;
   const reportLink = options.runUrl
     ? `[the full workflow report](${options.runUrl})`
     : "the workflow summary and logs";

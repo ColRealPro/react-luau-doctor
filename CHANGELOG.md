@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Improved PR summary footer wording
+
 ## 0.20.2
 
 ### Changed
