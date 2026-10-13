@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.20.4
+
+### New rules
+
+- `react-luau/no-memo-without-deps` catches `useMemo` and `useCallback` calls without a dependency table, which recompute or return a new function on every render
+- `react-luau/no-setter-as-event-handler` catches state and binding setters passed directly as `React.Change` or `React.Event` handlers, which store the Instance instead of a value
+
 ## 0.20.2
 
 ### Fixed
