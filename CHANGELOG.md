@@ -4,12 +4,20 @@
 
 > TODO: update `docs/rules.md`
 
+### Added
+
+- `--max-annotations` CI setting to limit or disable annotations
+- `--max-review-comments` CI setting to change the inline review comment limit from the default of 20, up to 50
+
 ### Changed
 
+- GitHub CI annotations are no longer limited to 10 per step. Run `ci upgrade` to grant the new `checks: write` permission
+- GitHub CI follows GitHub's request guidance to avoid rate limits
 - `react-luau/prefer-binding-over-state-candidate` is now off by default because its findings were mostly low-value
 
 ### Fixed
 
+- CI annotations and file links on push runs now point to the right files when `--directory` scans a subfolder
 - `react-luau/prefer-binding-over-state-candidate` no longer suggests splitting measurement state when an analyzed child component still needs the value through React state, such as in effect dependencies or hook arguments
 
 ## 0.20.4

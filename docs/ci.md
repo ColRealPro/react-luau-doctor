@@ -30,6 +30,8 @@ react-luau-doctor ci config --blocking error --scope changed --yes
 
 Use `--no-comment`, `--no-review-comments`, or `--no-commit-status` to disable the corresponding GitHub reports
 
+Use `--max-annotations <n>` (default `unlimited`) and `--max-review-comments <n>` (default `20`, at most `50` to avoid GitHub rate limits) to limit annotations and new inline review comments, where `0` disables them
+
 GitHub reporting uses `GITHUB_TOKEN`. Fork PRs may have a read-only token, so Doctor can still scan them even when it cannot post comments or a status
 
 ## Upgrade Doctor in CI

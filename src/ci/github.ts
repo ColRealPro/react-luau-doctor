@@ -11,7 +11,8 @@ import {
 import type { Diagnostic } from "../types";
 
 const STATE_PREFIX = "<!-- react-luau-doctor:state:";
-const MAX_REVIEW_COMMENTS = 20;
+const CHECK_RUN_NAME = "React-Luau Doctor findings";
+const MAX_CHECK_ANNOTATIONS_PER_REQUEST = 50;
 
 export interface ReviewFinding {
   file: string;
@@ -156,8 +157,7 @@ export function readReviewState(body: string): ReviewState | null {
       typeof state.commit !== "string" ||
       typeof state.signature !== "string" ||
       !Array.isArray(state.findings) ||
-      state.findings.length === 0 ||
-      state.findings.length > MAX_REVIEW_COMMENTS
+      state.findings.length === 0
     ) {
       return null;
     }
@@ -236,6 +236,8 @@ export interface Publication {
 export class StalePublication extends Error {}
 
 export class GitHubClient {
+  private lastMutation = 0;
+
   constructor(
     readonly repo: string,
     readonly pullNumber: number,
@@ -255,12 +257,24 @@ export class GitHubClient {
     const url = graphql
       ? `${base.replace(/\/api\/v3$/, "/api")}/graphql`
       : `${base}/repos/${this.repo}${endpoint}`;
+    const method = options.method ?? "GET";
+    const mutation = !graphql && method !== "GET";
+    // GitHub asks integrations to space out mutative requests to avoid secondary rate limits
+    const interval = Number(process.env.DOCTOR_GITHUB_MUTATION_INTERVAL_MS ?? 1000);
 
     for (let attempt = 0; ; attempt += 1) {
       if (attempt > 0 && options.guarded) await this.assertCurrent();
 
+      if (mutation) {
+        const wait = this.lastMutation + interval - Date.now();
+
+        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+
+        this.lastMutation = Date.now();
+      }
+
       const response = await fetch(url, {
-        method: options.method ?? "GET",
+        method,
         headers: {
           Accept: "application/vnd.github+json",
           Authorization: `Bearer ${token}`,
@@ -296,10 +310,10 @@ export class GitHubClient {
           : Date.parse(retryAfter) - Date.now()
         : response.headers.get("x-ratelimit-remaining") === "0" && reset
           ? Math.max(0, reset * 1000 - Date.now() + 1000)
-          : 60_000;
+          : 60_000 * 2 ** attempt;
 
       // Only retry explicit rate-limit rejections, never ambiguous publication failures
-      if (!rateLimited || attempt >= 2 || !Number.isFinite(delay) || delay > 60_000) {
+      if (!rateLimited || attempt >= 2 || !Number.isFinite(delay) || delay > 300_000) {
         throw new Error(`GitHub API ${response.status}: ${responseText}`);
       }
 
@@ -486,6 +500,71 @@ export class GitHubClient {
   }
 }
 
+export interface CheckAnnotation {
+  path: string;
+  start_line: number;
+  end_line: number;
+  start_column?: number;
+  end_column?: number;
+  annotation_level: "notice" | "warning" | "failure";
+  title: string;
+  message: string;
+}
+
+export interface CheckRunResult {
+  conclusion: "success" | "neutral";
+  title: string;
+  summary: string;
+  annotations: CheckAnnotation[];
+}
+
+export async function publishCheckRun(
+  client: GitHubClient,
+  sha: string,
+  result: CheckRunResult,
+): Promise<void> {
+  const output = { title: result.title, summary: result.summary };
+  const completed = { status: "completed", conclusion: result.conclusion };
+  // GitHub accepts 50 annotations per request and appends each update to the run
+  const size = MAX_CHECK_ANNOTATIONS_PER_REQUEST;
+  const [first, ...rest] = Array.from(
+    { length: Math.max(1, Math.ceil(result.annotations.length / size)) },
+    (_, index) => result.annotations.slice(index * size, (index + 1) * size),
+  );
+  const run = await client.request<{ id: number }>("/check-runs", {
+    method: "POST",
+    body: {
+      name: CHECK_RUN_NAME,
+      head_sha: sha,
+      ...(rest.length ? { status: "in_progress" } : completed),
+      output: { ...output, annotations: first },
+    },
+  });
+  const update = (body: unknown) =>
+    client.request(`/check-runs/${run.id}`, { method: "PATCH", body });
+
+  try {
+    for (const [index, annotations] of rest.entries()) {
+      await update({
+        ...(index === rest.length - 1 ? completed : {}),
+        output: { ...output, annotations },
+      });
+    }
+  } catch (error) {
+    // Avoid leaving a run stuck in progress
+    await update({
+      status: "completed",
+      conclusion: "neutral",
+      output: {
+        ...output,
+        summary: `${result.summary}\n\nSome annotations could not be published`,
+      },
+    }).catch(() => undefined);
+
+    throw error;
+  }
+}
+
 export function commentFingerprint(comment: ReviewComment): string | null {
   if (
     comment.user?.type !== "Bot" ||
@@ -539,7 +618,7 @@ function recoverReviewState(review: Review, comments: ReviewComment[]): ReviewSt
     (comment) => comment.pull_request_review_id === review.id && !comment.in_reply_to_id,
   );
 
-  if (!count || count > MAX_REVIEW_COMMENTS || roots.length !== count) return null;
+  if (!count || roots.length !== count) return null;
 
   const commit = review.commit_id ?? roots[0]?.original_commit_id ?? roots[0]?.commit_id;
 
@@ -604,10 +683,9 @@ function prioritizedFindings(
 }
 
 export async function reviewSnapshot(client: GitHubClient): Promise<ReviewSnapshot> {
-  const [reviews, comments] = await Promise.all([
-    client.list<Review>(`/pulls/${client.pullNumber}/reviews`),
-    client.list<ReviewComment>(`/pulls/${client.pullNumber}/comments`),
-  ]);
+  // GitHub recommends serial requests to avoid secondary rate limits
+  const reviews = await client.list<Review>(`/pulls/${client.pullNumber}/reviews`);
+  const comments = await client.list<ReviewComment>(`/pulls/${client.pullNumber}/comments`);
 
   return { reviews, comments };
 }
@@ -617,6 +695,7 @@ export async function reconcileReviews(
   snapshot: ReviewSnapshot,
   analysis: ReviewAnalysis,
   canInline: (diagnostic: Diagnostic) => boolean,
+  limit: number,
 ): Promise<number> {
   if (!analysis.complete) return snapshot.comments.filter((c) => commentFingerprint(c)).length;
 
@@ -799,7 +878,7 @@ export async function reconcileReviews(
   for (const candidate of prioritizedFindings(candidates)) {
     const key = findingFingerprint(candidate.finding);
 
-    if (selected.length + alreadyPublished >= MAX_REVIEW_COMMENTS) break;
+    if (selected.length + alreadyPublished >= limit) break;
 
     const current = analysis.current.find(
       (finding) =>
