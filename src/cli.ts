@@ -52,6 +52,7 @@ import type {
   Diagnostic,
   DoctorConfig,
   RuleDefinition,
+  RuleSetting,
   ScanProgress,
   ScanReport,
   ScanScope,
@@ -938,7 +939,7 @@ function runRulesCommand(argv: string[]): void {
     if (!requested) throw new Error("rules enable requires a rule id");
 
     const rule = findRule(requested);
-    let severity: Severity = rule.severity;
+    let severity: RuleSetting = rule.severity;
     const severityIndex = remaining.indexOf("--severity");
 
     if (severityIndex >= 0) {

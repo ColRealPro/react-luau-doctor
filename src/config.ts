@@ -231,13 +231,11 @@ function validateConfig(config: DoctorConfig, filename: string): void {
 }
 
 export function effectiveSeverity(
-  defaultSeverity: Severity,
+  defaultSeverity: RuleSetting,
   ruleId: string,
   config: DoctorConfig,
 ): Severity | null {
-  const configured = config.rules?.[ruleId];
-
-  if (!configured) return defaultSeverity;
+  const configured = config.rules?.[ruleId] ?? defaultSeverity;
 
   return configured === "off" ? null : configured;
 }

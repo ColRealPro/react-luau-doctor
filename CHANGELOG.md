@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+> TODO: update `docs/rules.md`
+
+### Changed
+
+- `react-luau/prefer-binding-over-state-candidate` is now off by default because its findings were mostly low-value
+
+### Fixed
+
+- `react-luau/prefer-binding-over-state-candidate` no longer suggests splitting measurement state when an analyzed child component still needs the value through React state, such as in effect dependencies or hook arguments
+
 ## 0.20.4
 
 ### New rules

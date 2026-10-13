@@ -6,6 +6,7 @@ import test from "node:test";
 import { scanPath } from "../src/scanner";
 
 const fixtures = path.resolve(import.meta.dir, "fixtures");
+const bindingCandidateConfig = { rules: { "react-luau/prefer-binding-over-state-candidate": "suggestion" as const } };
 
 test("syntax verification survives diagnostic suppression and cached reports without changing configured findings", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-syntax-verification-"));
@@ -1338,7 +1339,7 @@ end
 
 return Component`);
 
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   assert.ok(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rerender-high-frequency-state"));
   assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/prefer-binding-over-state"), false);
   assert.ok(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/prefer-binding-over-state-candidate"));
@@ -1804,7 +1805,7 @@ end
 return Consumer
 `);
 
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   assert.equal(
     report.diagnostics.some((entry) => entry.file === "Consumer.luau" && entry.rule === "react-luau/prefer-binding-over-state"),
     false,
@@ -1987,7 +1988,7 @@ end
 return Consumer
 `);
 
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
   const candidates = report.diagnostics.filter((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate");
   assert.equal(candidates.length, 1);
@@ -2044,7 +2045,7 @@ end
 return Consumer
 `);
 
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
   const candidate = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate");
   assert.ok(candidate);
@@ -2142,7 +2143,7 @@ end
 return Consumer
 `);
 
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   const warnings = report.diagnostics.filter((entry) => entry.rule === "react-luau/prefer-binding-over-state");
   const candidates = report.diagnostics.filter((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate");
   assert.equal(warnings.length, 1);
@@ -2184,7 +2185,7 @@ end
 return Consumer
 `);
 
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate"), false);
 });
@@ -2225,7 +2226,7 @@ end
 return Consumer
 `);
 
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state" && entry.file === "Consumer.luau"), false);
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate" && entry.file === "Consumer.luau"), false);
 });
@@ -2246,14 +2247,14 @@ local function Consumer()
 end
 return Consumer
 `);
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
   const candidate = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate");
   assert.ok(candidate);
   assert.equal(candidate.severity, "suggestion");
 });
 
-test("binding candidate follows derived measurements into memoized child effects", async (t) => {
+test("binding candidate ignores mixed consumers when an analyzed child prop still needs reconciliation", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-binding-child-effect-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.writeFileSync(path.join(root, "useProperty.luau"), `local React = require(script.Parent.React)
@@ -2286,6 +2287,7 @@ local function MeasuredPanel(props)
   end, { props.Width })
   return React.createElement("Frame", { Size = UDim2.fromOffset(props.Width, 24) }, {
     indicator = React.createElement("Frame", { Size = UDim2.fromOffset(width, 4) }),
+    layout = React.createElement("UIListLayout", { Padding = UDim.new(0, props.Gap or 0) }),
   })
 end
 return React.memo(MeasuredPanel)
@@ -2301,19 +2303,29 @@ local function Consumer()
 end
 return Consumer
 `;
+  const consumerReturn = "return React.createElement(MeasuredPanel, { Width = paddedWidth })";
   fs.writeFileSync(path.join(root, "Consumer.luau"), consumer);
-  fs.writeFileSync(path.join(root, "MixedConsumer.luau"), consumer.replace(
-    'return React.createElement(MeasuredPanel, { Width = paddedWidth })',
+  fs.writeFileSync(path.join(root, "HostConsumer.luau"), consumer.replace(
+    consumerReturn,
     `return React.createElement("Frame", { Size = UDim2.fromOffset(paddedWidth, 24) }, {
     panel = React.createElement(MeasuredPanel, { Width = paddedWidth }),
   })`,
   ));
-  const report = await scanPath(root);
+  fs.writeFileSync(path.join(root, "PropConsumer.luau"), consumer.replace(
+    consumerReturn,
+    "return React.createElement(MeasuredPanel, { Width = paddedWidth, Gap = measuredSize.Y * 0.1 })",
+  ));
+  fs.writeFileSync(path.join(root, "StructuralConsumer.luau"), consumer.replace(
+    consumerReturn,
+    `return React.createElement("Frame", { Size = UDim2.fromOffset(paddedWidth, 24) }, {
+    wide = if measuredSize.X > 100 then React.createElement("Frame") else nil,
+  })`,
+  ));
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   const recommendations = report.diagnostics.filter((entry) => entry.rule.startsWith("react-luau/prefer-binding-over-state"));
-  assert.equal(recommendations.some((entry) => entry.file === "Consumer.luau"), false);
-  const mixed = recommendations.filter((entry) => entry.file === "MixedConsumer.luau");
-  assert.equal(mixed.length, 1);
-  assert.ok(mixed.every((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate"));
+  assert.deepEqual(recommendations.map((entry) => [entry.file, entry.rule]), [
+    ["StructuralConsumer.luau", "react-luau/prefer-binding-over-state-candidate"],
+  ]);
 });
 
 test("binding candidate rule surfaces mixed visual and structural state but ignores structural-only state", async (t) => {
@@ -2340,7 +2352,7 @@ end
 return Consumer
 `);
 
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   const candidates = report.diagnostics.filter((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate");
   assert.equal(candidates.length, 1);
   assert.match(candidates[0].message, /position/);
@@ -2367,7 +2379,7 @@ end
 return Consumer
 `);
 
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate"), false);
 });
@@ -2520,7 +2532,7 @@ end
 return Component
 `);
 
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
   const candidate = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate");
   assert.ok(candidate);
@@ -2563,7 +2575,7 @@ end
 return Consumer
 `);
 
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
   const candidate = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate");
   assert.ok(candidate);
@@ -2595,7 +2607,7 @@ end
 return Consumer
 `);
 
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
   const candidate = report.diagnostics.find((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate");
   assert.ok(candidate);
@@ -2777,7 +2789,7 @@ end
 return Component
 `);
 
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
   assert.ok(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate"));
 });
@@ -2799,7 +2811,7 @@ end
 return Component
 `);
 
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   assert.equal(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state"), false);
   assert.ok(report.diagnostics.some((entry) => entry.rule === "react-luau/prefer-binding-over-state-candidate"));
 });
@@ -3042,7 +3054,7 @@ end
 return Component
 `);
 
-  const report = await scanPath(root);
+  const report = await scanPath(root, { config: bindingCandidateConfig });
   assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rerender-high-frequency-state"), false);
   assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/prefer-binding-over-state"), false);
   assert.ok(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/prefer-binding-over-state-candidate"));

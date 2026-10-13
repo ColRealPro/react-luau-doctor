@@ -1,20 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { rulesById } from "../src/rules";
-import type { Severity } from "../src/types";
+import type { RuleSetting } from "../src/types";
 
-function severity(ruleId: string): Severity {
+function severity(ruleId: string): RuleSetting {
   const rule = rulesById.get(ruleId);
   assert.ok(rule, `missing ${ruleId}`);
   return rule.severity;
 }
 
 test("default rule severities follow the documented severity policy", () => {
-  const expected: Record<string, Severity> = {
+  const expected: Record<string, RuleSetting> = {
     "react-luau/no-derived-state-effect": "warning",
     "react-luau/rerender-state-only-in-handlers": "warning",
     "react-luau/no-array-index-as-key": "suggestion",
-    "react-luau/prefer-binding-over-state-candidate": "suggestion",
+    "react-luau/prefer-binding-over-state-candidate": "off",
     "react-luau/prefer-use-ref-for-mutable-cell": "suggestion",
     "react-luau/unstable-context-value": "warning",
     "react-luau/no-effect-with-fresh-deps": "error",

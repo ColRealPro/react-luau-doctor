@@ -50,6 +50,12 @@ function createGitRepo(): string {
   return root;
 }
 
+function enableBindingCandidate(root: string): void {
+  fs.writeFileSync(path.join(root, "react-luau-doctor.config.json"), JSON.stringify({
+    rules: { "react-luau/prefer-binding-over-state-candidate": "suggestion" },
+  }));
+}
+
 test("default output is compact while --verbose shows per-file help text", () => {
   const compact = run([path.join(fixtures, "bad-component.luau"), "--blocking", "none"]);
   const verbose = run([path.join(fixtures, "bad-component.luau"), "--verbose", "--blocking", "none"]);
@@ -232,6 +238,8 @@ end
 return Consumer
 `);
 
+  enableBindingCandidate(root);
+
   const scan = run([".", "--json", "--blocking", "none"], root);
   assert.equal(scan.status, 0, scan.stderr);
   const report = JSON.parse(scan.stdout) as ScanReport;
@@ -289,6 +297,8 @@ local function Component()
 end
 return Component
 `);
+
+  enableBindingCandidate(root);
 
   const result = run(["why", "Component.luau:4", "--cwd", root, "--no-color"], root);
   assert.equal(result.status, 0, result.stderr);

@@ -1574,6 +1574,7 @@ interface BindingUsageSummary {
   compatible: number;
   customComponent: number;
   visualCustomComponent: number;
+  reconciledCustomComponent: number;
   effect: number;
   structural: number;
   unknown: number;
@@ -1747,6 +1748,7 @@ function bindingUsageSummary(
     compatible: 0,
     customComponent: 0,
     visualCustomComponent: 0,
+    reconciledCustomComponent: 0,
     effect: 0,
     structural: 0,
     unknown: 0,
@@ -1785,6 +1787,8 @@ function bindingUsageSummary(
           summary.compatible += derived.compatible;
           summary.customComponent += derived.customComponent;
           summary.visualCustomComponent += derived.visualCustomComponent;
+          summary.reconciledCustomComponent +=
+            derived.reconciledCustomComponent;
           summary.effect += derived.effect;
           summary.structural += derived.structural;
           summary.unknown += derived.unknown;
@@ -1816,6 +1820,8 @@ function bindingUsageSummary(
           summary.compatible += derived.compatible;
           summary.customComponent += derived.customComponent;
           summary.visualCustomComponent += derived.visualCustomComponent;
+          summary.reconciledCustomComponent +=
+            derived.reconciledCustomComponent;
           summary.effect += derived.effect;
           summary.structural += derived.structural;
           summary.unknown += derived.unknown + 1;
@@ -1834,7 +1840,11 @@ function bindingUsageSummary(
 
       if (
         customComponentUsage &&
-        !compatibleComponentProps.has(customComponentUsage.component) &&
+        compatibleComponentProps.has(customComponentUsage.component)
+      ) {
+        summary.reconciledCustomComponent += 1;
+      } else if (
+        customComponentUsage &&
         LIKELY_VISUAL_PROP.test(customComponentUsage.property)
       ) {
         summary.visualCustomComponent += 1;
@@ -2023,6 +2033,7 @@ function importedHookRecommendation(
   if (
     strongHostFeedback &&
     usage.effect > 0 &&
+    usage.reconciledCustomComponent === 0 &&
     effectOnlyDerivesPresentation(
       localName,
       owner,
@@ -2038,7 +2049,14 @@ function importedHookRecommendation(
 
   if (summary.highFrequency || likelyContinuousProperty) return "candidate";
 
-  if (strongHostFeedback && explicitBindingMode && usage.effect === 0)
+  // An analyzed child that reads the prop outside host properties still needs
+  // every measurement through React state, so a split saves no rerenders
+  if (
+    strongHostFeedback &&
+    explicitBindingMode &&
+    usage.effect === 0 &&
+    usage.reconciledCustomComponent === 0
+  )
     return "candidate";
 
   return null;
@@ -2271,7 +2289,7 @@ export const preferBindingOverState: RuleDefinition = {
 export const preferBindingOverStateCandidate: RuleDefinition = {
   id: "react-luau/prefer-binding-over-state-candidate",
   category: "Performance",
-  severity: "suggestion",
+  severity: "off",
 
   description:
     "Surface lower-confidence state-to-Binding opportunities that need developer review.",
@@ -2573,7 +2591,10 @@ export const preferBindingOverStateCandidate: RuleDefinition = {
         update.highFrequency || likelyContinuousProperty;
 
       const mixedHostFeedback =
-        strongHostFeedback && usage.structural > 0 && usage.effect === 0;
+        strongHostFeedback &&
+        usage.structural > 0 &&
+        usage.effect === 0 &&
+        usage.reconciledCustomComponent === 0;
 
       if (!mixedHighFrequency && !mixedHostFeedback) continue;
 
