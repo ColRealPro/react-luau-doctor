@@ -750,6 +750,41 @@ return Component`,
   }
 });
 
+test("state and binding setters passed directly as Change or Event handlers are reported", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-setter-handler-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "Component.luau"),
+    `local React = require(script.Parent.React)
+local Change = React.Change
+local function Component(props)
+    local text, setText = React.useState("")
+    local size, setSize = React.useBinding(0)
+    local open, setOpen = React.useState(false)
+    return React.createElement("TextBox", {
+        Text = text,
+        Size = size,
+        Visible = open,
+        [React.Change.Text] = setText,
+        [Change.AbsoluteSize] = setSize,
+        [React.Event.Focused] = setOpen,
+        [React.Event.FocusLost] = props.onFocusLost,
+        [React.Change.Position] = function(rbx) setOpen(rbx.Visible) end,
+        [props.key] = setText,
+    })
+end
+return Component`,
+  );
+  const report = await scanPath(root, { cache: false });
+  const findings = report.diagnostics.filter(
+    (item) => item.rule === "react-luau/no-setter-as-event-handler",
+  );
+  assert.deepEqual(
+    findings.map((item) => item.location.line),
+    [11, 12, 13],
+  );
+});
+
 test("memo hooks without a dependency table are reported unless arguments may expand", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-memo-deps-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

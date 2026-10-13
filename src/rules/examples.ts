@@ -54,6 +54,18 @@ end, { items })`,
     note: "List every value the callback reads so the result only changes when they do",
   },
 
+  "react-luau/no-setter-as-event-handler": {
+    before: `return React.createElement("TextBox", {
+\t[React.Change.Text] = setText,
+})`,
+    after: `return React.createElement("TextBox", {
+\t[React.Change.Text] = function(rbx)
+\t\tsetText(rbx.Text)
+\tend,
+})`,
+    note: "React-Luau passes the Instance as the first handler argument",
+  },
+
   "react-luau/parse-error": {
     before: `return React.createElement("Frame", {
 \tVisible = true,

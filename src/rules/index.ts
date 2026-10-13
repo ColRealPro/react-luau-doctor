@@ -25,6 +25,7 @@ import { noPropMutation } from "./no-prop-mutation";
 import { noStaticNameProp } from "./no-static-name-prop";
 import { noRandomKey } from "./no-random-key";
 import { noSetStateInRender } from "./no-set-state-in-render";
+import { noSetterAsEventHandler } from "./no-setter-as-event-handler";
 import { parseErrors } from "./parse-errors";
 
 import {
@@ -90,6 +91,7 @@ const definitions: RuleDefinition[] = [
   rerenderStateOnlyInHandlers,
   noSetStateInRender,
   noMutatingStateUpdater,
+  noSetterAsEventHandler,
   noCallComponentAsFunction,
   noCreateBindingInRender,
   noBindingGetValueInRender,
