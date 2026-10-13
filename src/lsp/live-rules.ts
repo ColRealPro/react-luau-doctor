@@ -5,6 +5,7 @@ import type { RuleDefinition } from "../types";
 // Rules that consult project-derived hooks, source effects, module summaries, or parse
 // errors stay deep-only. Adding a rule to Doctor never adds it here automatically.
 const LIVE_IDS = [
+  "react-luau/no-memo-without-deps",
   "react-luau/no-derived-state-effect",
   "react-luau/no-self-updating-effect",
   "react-luau/no-effect-with-fresh-deps",

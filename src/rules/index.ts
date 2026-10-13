@@ -19,6 +19,7 @@ import {
 import { exhaustiveDeps } from "./exhaustive-deps";
 import { noArrayIndexAsKey } from "./no-array-index-as-key";
 import { noCreateContextInRender } from "./no-create-context-in-render";
+import { noMemoWithoutDeps } from "./no-memo-without-deps";
 import { noNestedComponentDefinition } from "./no-nested-component-definition";
 import { noPropMutation } from "./no-prop-mutation";
 import { noStaticNameProp } from "./no-static-name-prop";
@@ -67,6 +68,7 @@ const definitions: RuleDefinition[] = [
   parseErrors,
   rulesOfHooks,
   exhaustiveDeps,
+  noMemoWithoutDeps,
   effectNeedsCleanup,
   noDerivedStateEffect,
   noSelfUpdatingEffect,

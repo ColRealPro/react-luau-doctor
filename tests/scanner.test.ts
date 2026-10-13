@@ -750,6 +750,34 @@ return Component`,
   }
 });
 
+test("memo hooks without a dependency table are reported unless arguments may expand", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-memo-deps-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(root, "Component.luau"),
+    `local React = require(script.Parent.React)
+local useCallback = React.useCallback
+local function Component(props, ...)
+    local first = React.useMemo(function() return props.value * 2 end)
+    local second = useCallback(function() print(props.value) end, nil)
+    local third = React.useMemo(function() return props.value * 2 end, { props.value })
+    local fourth = React.useCallback(...)
+    local fifth = React.useMemo(table.unpack(props.args))
+    React.useEffect(function() print(first, second, third, fourth, fifth) end)
+    return React.createElement("Frame")
+end
+return Component`,
+  );
+  const report = await scanPath(root, { cache: false });
+  const findings = report.diagnostics.filter(
+    (item) => item.rule === "react-luau/no-memo-without-deps",
+  );
+  assert.deepEqual(
+    findings.map((item) => item.location.line),
+    [4, 5],
+  );
+});
+
 test("memo callbacks must return a value but nested returns do not count and explicit nil remains allowed", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-memo-return-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

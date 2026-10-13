@@ -19,6 +19,7 @@ Add `react-luau/` before the names below when using them in your [config](cli.md
 | `exhaustive-deps`                 | warning    | A hook callback reads values missing from its dependencies |
 | `no-effect-with-fresh-deps`       | error      | A dependency can be a new reference value during render    |
 | `no-mutable-in-deps`              | error      | A dependency reads a mutable `ref.current` value           |
+| `no-memo-without-deps`            | warning    | `useMemo` or `useCallback` has no dependency table         |
 | `prefer-use-ref-for-mutable-cell` | suggestion | `useMemo` creates a table used like a ref                  |
 
 ## Effects

@@ -44,6 +44,16 @@ end, { input })`,
     note: "Return the calculated value instead of discarding it",
   },
 
+  "react-luau/no-memo-without-deps": {
+    before: `local sorted = React.useMemo(function()
+\treturn sortItems(items)
+end)`,
+    after: `local sorted = React.useMemo(function()
+\treturn sortItems(items)
+end, { items })`,
+    note: "List every value the callback reads so the result only changes when they do",
+  },
+
   "react-luau/parse-error": {
     before: `return React.createElement("Frame", {
 \tVisible = true,
