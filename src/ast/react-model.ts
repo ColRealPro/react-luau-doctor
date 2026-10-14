@@ -1,7 +1,7 @@
 import { normalizeRequireTarget, resolveModuleReference } from "../module-resolution";
 import type { SyntaxNode } from "../syntax";
 import type { FunctionInfo, ProjectModel, ReactModel, StateBinding } from "../types";
-import { nodeKey, normalizeExpressionText, parameterBindingNames, sameNode, walk } from "./walk";
+import { nodeKey, normalizeExpressionText, parameterBindingNames, sameNode, variableListTargets, walk } from "./walk";
 
 const REACT_HOOKS = new Set([
   "useState",
@@ -198,7 +198,7 @@ function declarationNames(node: SyntaxNode): string[] {
   if (node.type !== "variable_declaration") return [];
   const assignment = node.namedChildren.find((child) => child.type === "assignment_statement");
   const variableList = assignment?.namedChildren.find((child) => child.type === "variable_list");
-  return variableList?.namedChildren.filter((child) => child.type === "identifier").map((child) => child.text) ?? [];
+  return variableListTargets(variableList).filter((child) => child.type === "identifier").map((child) => child.text);
 }
 
 function declarationExpressions(node: SyntaxNode): SyntaxNode[] {
@@ -509,7 +509,7 @@ export function buildReactModel(root: SyntaxNode, project?: ProjectModel): React
     if (!owner || (!owner.isComponent && !owner.isHook)) continue;
     const variableList = assignment.namedChildren.find((child) => child.type === "variable_list");
     const expressionList = assignment.namedChildren.find((child) => child.type === "expression_list");
-    const names = variableList?.namedChildren.filter((child) => child.type === "identifier").map((child) => child.text) ?? [];
+    const names = variableListTargets(variableList).filter((child) => child.type === "identifier").map((child) => child.text);
     const expression = expressionList?.namedChildren[0];
     if (!expression || expression.type !== "function_call") continue;
     const rawPath = expression.childForFieldName("name")?.text ?? "";

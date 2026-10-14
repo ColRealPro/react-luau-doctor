@@ -1,7 +1,7 @@
 import type { SyntaxNode } from "../syntax";
 import type { FunctionInfo, RuleContext } from "../types";
 import { requireTargetIsReact } from "./react-model";
-import { normalizeExpressionText, parameterBindingNames } from "./walk";
+import { normalizeExpressionText, parameterBindingNames, variableListTargets } from "./walk";
 
 interface LocalValue {
   value: SyntaxNode;
@@ -58,7 +58,7 @@ function assignedValue(
       ?.namedChildren ?? [];
 
   const index =
-    variables?.namedChildren.findIndex(
+    variableListTargets(variables).findIndex(
       (child) => child.type === "identifier" && child.text === name,
     ) ?? -1;
 

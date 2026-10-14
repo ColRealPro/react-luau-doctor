@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { SyntaxNode, SyntaxTree } from "./syntax";
+import { variableListTargets } from "./ast/walk";
 import {
   buildUniqueFeatureAliases,
   moduleKeys,
@@ -187,7 +188,7 @@ function declarationParts(node: SyntaxNode): { names: string[]; expressions: Syn
   const variables = assignment ? child(assignment, "variable_list") : child(node, "variable_list");
   const expressions = assignment ? child(assignment, "expression_list") : null;
   return {
-    names: variables?.namedChildren.filter((candidate) => candidate.type === "identifier").map((candidate) => candidate.text) ?? [],
+    names: variableListTargets(variables).filter((candidate) => candidate.type === "identifier").map((candidate) => candidate.text),
     expressions: expressions?.namedChildren ?? [],
   };
 }

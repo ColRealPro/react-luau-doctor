@@ -4572,3 +4572,23 @@ return Component
   assert.equal(report.scannedFiles, 1);
   assert.ok(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks"));
 });
+
+test("type annotations in multi-name locals are not treated as declared names", async (t) => {
+  const root = tempProject(t, "annotated-locals", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component()
+  local value: Value, setValue = React.useState(0)
+  local increment = React.useCallback(function()
+    setValue(1)
+  end, {})
+  return React.createElement("TextButton", { Text = tostring(value), [React.Event.Activated] = increment })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(report.diagnostics.map((diagnostic) => diagnostic.rule), []);
+});

@@ -2,7 +2,7 @@ import type { SyntaxNode } from "../syntax";
 import { resolveLocalValue, unwrapExpression } from "../ast/local-values";
 import { isNameShadowedBetween } from "./helpers";
 import { moduleKeys, normalizeRequireTarget, resolveModuleReference } from "../module-resolution";
-import { normalizeExpressionText, parameterBindingNames, rootIdentifier, sameNode } from "../ast/walk";
+import { normalizeExpressionText, parameterBindingNames, rootIdentifier, sameNode, variableListTargets } from "../ast/walk";
 import type { FunctionInfo, RuleContext, SourceEffectModuleSummary, StateBinding } from "../types";
 
 export type MutationValueOrigin =
@@ -40,7 +40,7 @@ function declarationParts(node: SyntaxNode): { names: string[]; expressions: Syn
     ?? node.namedChildren.find((child) => child.type === "variable_list");
   const expressions = assignment?.namedChildren.find((child) => child.type === "expression_list");
   return {
-    names: variables?.namedChildren.filter((child) => child.type === "identifier").map((child) => child.text) ?? [],
+    names: variableListTargets(variables).filter((child) => child.type === "identifier").map((child) => child.text),
     expressions: expressions?.namedChildren ?? [],
   };
 }
@@ -52,7 +52,7 @@ function assignmentParts(node: SyntaxNode): { names: string[]; expressions: Synt
   const variables = node.namedChildren.find((child) => child.type === "variable_list");
   const expressions = node.namedChildren.find((child) => child.type === "expression_list");
   return {
-    names: variables?.namedChildren.filter((child) => child.type === "identifier").map((child) => child.text) ?? [],
+    names: variableListTargets(variables).filter((child) => child.type === "identifier").map((child) => child.text),
     expressions: expressions?.namedChildren ?? [],
   };
 }

@@ -1,4 +1,5 @@
 import type { SyntaxNode } from "../syntax";
+import { variableListTargets } from "../ast/walk";
 
 import type {
   RuleContext,
@@ -46,10 +47,9 @@ function declarationParts(node: SyntaxNode): {
   );
 
   return {
-    names:
-      variables?.namedChildren
-        .filter((child) => child.type === "identifier")
-        .map((child) => child.text) ?? [],
+    names: variableListTargets(variables)
+      .filter((child) => child.type === "identifier")
+      .map((child) => child.text),
 
     expressions: expressions?.namedChildren ?? [],
   };
