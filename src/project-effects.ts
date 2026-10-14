@@ -23,7 +23,8 @@ export type CachedMutationOrigin =
   | { kind: "receiver" }
   | { kind: "parameter"; index: number }
   | { kind: "external" }
-  | { kind: "local" };
+  | { kind: "local" }
+  | { kind: "result"; targetId: string; argumentOrigins: Array<CachedMutationOrigin | null> };
 
 export interface CachedMutationCall {
   targetId: string;
@@ -42,6 +43,9 @@ export interface CachedSourceEffectFunction {
   mutatedParameterIndexes: number[];
   dependencies: string[];
   mutationCalls: CachedMutationCall[];
+  /** Call results this function mutates, resolved through each callee's returns */
+  mutatedOrigins?: CachedMutationOrigin[];
+  returnOrigins?: CachedMutationOrigin[];
 }
 
 export interface CachedSourceEffectModule {
@@ -105,6 +109,11 @@ interface MutationCall {
   argumentRoots: Array<string | null>;
 }
 
+interface ResultRoot {
+  targetId: string;
+  argumentRoots: Array<string | null>;
+}
+
 interface FunctionRecord {
   id: string;
   moduleId: string;
@@ -124,6 +133,9 @@ interface FunctionRecord {
   externalRoots: Set<string>;
   ownedRoots: Set<string>;
   localNames: Set<string>;
+  resultRoots: Map<string, ResultRoot>;
+  mutatedResults: ResultRoot[];
+  returnOrigins: CachedMutationOrigin[];
 }
 
 export interface EffectWorkerState {
@@ -194,7 +206,7 @@ function declarationParts(node: SyntaxNode): { names: string[]; expressions: Syn
 }
 
 function assignmentSides(node: SyntaxNode): { left: SyntaxNode[]; right: SyntaxNode[] } {
-  if (node.type !== "assignment_statement") return { left: [], right: [] };
+  if (node.type !== "assignment_statement" && node.type !== "update_statement") return { left: [], right: [] };
   return {
     left: child(node, "variable_list")?.namedChildren ?? [],
     right: child(node, "expression_list")?.namedChildren ?? [],
@@ -207,8 +219,17 @@ function callPath(node: SyntaxNode): string | null {
   return name ? name.text.replace(/\s+/g, "") : null;
 }
 
-function rootIdentifier(node: SyntaxNode | null | undefined): string | null {
-  if (!node) return null;
+function unwrapExpression(node: SyntaxNode): SyntaxNode {
+  let current = node;
+  while ((current.type === "cast_expression" || current.type === "parenthesized_expression") && current.namedChildren[0]) {
+    current = current.namedChildren[0];
+  }
+  return current;
+}
+
+function rootIdentifier(input: SyntaxNode | null | undefined): string | null {
+  if (!input) return null;
+  const node = unwrapExpression(input);
   if (node.type === "identifier") return node.text;
   if (
     node.type === "dot_index_expression" ||
@@ -218,8 +239,12 @@ function rootIdentifier(node: SyntaxNode | null | undefined): string | null {
     return rootIdentifier(node.namedChildren[0]);
   }
   const text = node.text.trim();
-  return text.match(/^([A-Za-z_][A-Za-z0-9_]*)/)?.[1] ?? null;
+  const root = text.match(/^([A-Za-z_][A-Za-z0-9_]*)/)?.[1] ?? null;
+  // Literals such as `nil` and operators such as `not` never name a value
+  return root && LUAU_KEYWORDS.has(root) ? null : root;
 }
+
+const LUAU_KEYWORDS = new Set(["nil", "true", "false", "not"]);
 
 function callArguments(node: SyntaxNode): SyntaxNode[] {
   if (node.type !== "function_call") return [];
@@ -245,7 +270,8 @@ function builtinMutatedArgumentIndexes(path: string, argumentCount: number): num
   }
 }
 
-function expressionCreatesOwnedValue(node: SyntaxNode, owned: Set<string>): boolean {
+function expressionCreatesOwnedValue(input: SyntaxNode, owned: Set<string>): boolean {
+  const node = unwrapExpression(input);
   if (node.type === "table_constructor" || node.type === "function_definition") return true;
   if (node.type !== "function_call") return false;
 
@@ -304,6 +330,9 @@ function topLevelFunctionRecords(record: ParsedRecord): FunctionRecord[] {
       externalRoots: new Set<string>(),
       ownedRoots: new Set<string>(),
       localNames: new Set<string>(),
+      resultRoots: new Map<string, ResultRoot>(),
+      mutatedResults: [],
+      returnOrigins: [],
     });
   };
 
@@ -390,6 +419,89 @@ function moduleLevelInstanceAliases(record: ParsedRecord, summariesByModuleId: M
   return result;
 }
 
+function resolveCallTarget(
+  node: SyntaxNode,
+  record: ParsedRecord,
+  localFunctions: Map<string, string>,
+  memberFunctions: Map<string, string>,
+  instanceAliases: Map<string, string>,
+  exportedFunctions: Map<string, string>,
+  locals: Set<string>,
+  parameters: Set<string>,
+): { targetId: string; receiverRoot: string | null } | null {
+  const path = callPath(node);
+  if (!path) return null;
+
+  const localTarget = !locals.has(path) && !parameters.has(path) ? localFunctions.get(path) : null;
+  if (localTarget) return { targetId: localTarget, receiverRoot: null };
+
+  const member = path.match(/^([A-Za-z_][A-Za-z0-9_]*)([:.])([A-Za-z_][A-Za-z0-9_]*)$/);
+  if (member) {
+    const receiver = member[1];
+    if (receiver === "self" || (receiver === record.exportName && !locals.has(receiver) && !parameters.has(receiver))) {
+      const target = memberFunctions.get(member[3]);
+      if (target) return { targetId: target, receiverRoot: member[2] === ":" ? receiver : null };
+    }
+
+    const moduleId = instanceAliases.get(receiver)
+      ?? (!locals.has(receiver) && !parameters.has(receiver) ? record.imports.get(receiver) : undefined);
+    if (moduleId) {
+      return {
+        targetId: `${moduleId}::member:${member[3]}`,
+        receiverRoot: member[2] === ":" ? receiver : null,
+      };
+    }
+    return null;
+  }
+
+  if (locals.has(path) || parameters.has(path)) return null;
+  const moduleId = record.imports.get(path);
+  const target = moduleId ? exportedFunctions.get(moduleId) : null;
+  return target ? { targetId: target, receiverRoot: null } : null;
+}
+
+// Values reassigned to a fresh table earlier in the same block are owned at
+// this point even when the variable started as an alias of a parameter
+function latestBlockAssignmentIsOwned(root: string, node: SyntaxNode, owned: Set<string>, boundary: SyntaxNode): boolean {
+  let statement = node;
+  while (statement.id !== boundary.id && statement.parent) {
+    const parent = statement.parent;
+    if (parent.type === "block" || parent.type === "chunk") {
+      const siblings = parent.namedChildren;
+      for (let index = siblings.findIndex((sibling) => sibling.id === statement.id) - 1; index >= 0; index -= 1) {
+        const sibling = siblings[index];
+        if (sibling.type === "variable_declaration") {
+          if (declarationParts(sibling).names.includes(root)) return false;
+          continue;
+        }
+        if (sibling.type === "assignment_statement") {
+          const { left, right } = assignmentSides(sibling);
+          const targetIndex = left.findIndex((target) => target.type === "identifier" && target.text === root);
+          if (targetIndex >= 0) {
+            const value = right[targetIndex];
+            return Boolean(value && expressionCreatesOwnedValue(value, owned));
+          }
+        }
+        const reassignsLater = directNodes(sibling).some((candidate) =>
+          candidate.type === "assignment_statement" &&
+          assignmentSides(candidate).left.some((target) => target.type === "identifier" && target.text === root),
+        );
+        if (reassignsLater) return false;
+      }
+    }
+    if (parent.id === boundary.id) break;
+    statement = parent;
+  }
+  return false;
+}
+
+function iteratedCollection(clause: SyntaxNode): SyntaxNode | null {
+  const collection = child(clause, "expression_list")?.namedChildren[0] ?? null;
+  if (collection?.type !== "function_call") return collection;
+  const path = callPath(collection);
+  return path === "pairs" || path === "ipairs" ? callArguments(collection)[0] ?? null : collection;
+}
+
 function analyzeFunction(
   fn: FunctionRecord,
   record: ParsedRecord,
@@ -408,9 +520,21 @@ function analyzeFunction(
   const locals = new Set<string>();
   const owned = new Set<string>();
   const externalAliases = new Set<string>();
+  const resultRoots = new Map<string, ResultRoot>();
   const refLocals = new Set<string>();
   const instanceAliases = new Map(moduleInstances);
   const nodes = directNodes(fn.body);
+  const returnedNodes: Array<SyntaxNode | null> = [];
+  const callTarget = (node: SyntaxNode) => resolveCallTarget(
+    node,
+    record,
+    localFunctions,
+    memberFunctions,
+    instanceAliases,
+    exportedFunctions,
+    locals,
+    parameters,
+  );
 
   for (const node of nodes) {
     if (node.type === "function_declaration" && node.id !== fn.node.id) {
@@ -418,21 +542,44 @@ function analyzeFunction(
       if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(declared)) locals.add(declared);
       continue;
     }
+    if (node.type === "for_generic_clause") {
+      // Iterating a parameter yields its contents, so mutating an item mutates the argument
+      const root = rootIdentifier(iteratedCollection(node));
+      const parameterOrigin = root ? parameterOrigins.get(root) : undefined;
+      if (parameterOrigin === undefined) continue;
+      for (const target of variableListTargets(child(node, "variable_list"))) {
+        locals.add(target.text);
+        parameterOrigins.set(target.text, parameterOrigin);
+      }
+      continue;
+    }
     if (node.type !== "variable_declaration") continue;
     const { names, expressions } = declarationParts(node);
     for (let index = 0; index < names.length; index += 1) {
       const name = names[index];
-      const expression = expressions[index] ?? expressions[0];
+      const declared = expressions[index] ?? expressions[0];
+      const expression = declared && unwrapExpression(declared);
       locals.add(name);
       if (!expression) continue;
       const createsOwnedValue = expressionCreatesOwnedValue(expression, owned);
       if (createsOwnedValue) owned.add(name);
       const root = rootIdentifier(expression);
       const parameterOrigin = root ? parameterOrigins.get(root) : undefined;
-      if (!createsOwnedValue && root && parameterOrigin !== undefined) {
+      // A call's first result follows the callee's returned value instead of the callee name
+      const target = !createsOwnedValue && index === 0 && expressions[index] && expression.type === "function_call"
+        ? callTarget(expression)
+        : null;
+      if (target) {
+        resultRoots.set(name, {
+          targetId: target.targetId,
+          argumentRoots: callArguments(expression).map((argument) => rootIdentifier(argument)),
+        });
+      } else if (!createsOwnedValue && root && parameterOrigin !== undefined) {
         // Keep argument/receiver mutation conditional. A caller may pass a fresh
         // render-local value, so it must not become an unconditional effect.
         parameterOrigins.set(name, parameterOrigin);
+      } else if (!createsOwnedValue && root && resultRoots.has(root)) {
+        resultRoots.set(name, resultRoots.get(root)!);
       } else if (!createsOwnedValue && root && (externalAliases.has(root) || (!locals.has(root) && root !== name))) {
         // Module/global state is externally observable regardless of call-site
         // ownership, so aliases of it remain safe to classify as effects.
@@ -458,13 +605,14 @@ function analyzeFunction(
   fn.externalRoots = externalAliases;
   fn.ownedRoots = owned;
   fn.localNames = locals;
+  fn.resultRoots = resultRoots;
 
   // Luau locals are lexically scoped from their declaration onward, so the
   // source-order pass above is enough to propagate aliases through local
   // declarations. Repeated fixed-point rescans of every function body were
   // redundant and particularly expensive on large modules.
   for (const node of nodes) {
-    if (node.type === "assignment_statement" && node.parent?.type !== "variable_declaration") {
+    if ((node.type === "assignment_statement" || node.type === "update_statement") && node.parent?.type !== "variable_declaration") {
       const { left } = assignmentSides(node);
       for (const target of left) {
         if (target.type === "identifier") {
@@ -475,14 +623,15 @@ function analyzeFunction(
         if (!root) continue;
         if (owned.has(root)) continue;
         if (refLocals.has(root) && target.text.replace(/\s+/g, "") === `${root}.current`) continue;
-        const parameterOrigin = parameterOrigins.get(root);
-        if (parameterOrigin !== undefined) {
-          if (parameterOrigin === -1) fn.mutatesReceiver = true;
-          else fn.mutatedParameterIndexes.add(parameterOrigin);
-          continue;
-        }
-        if (externalAliases.has(root) || !locals.has(root)) fn.directEffect = true;
+        if (locals.has(root) && latestBlockAssignmentIsOwned(root, node, owned, fn.body)) continue;
+        markMutationThroughRoot(fn, root);
       }
+      continue;
+    }
+
+    if (node.type === "return_statement") {
+      const returned = child(node, "expression_list")?.namedChildren[0];
+      returnedNodes.push(returned ?? null);
       continue;
     }
 
@@ -492,62 +641,23 @@ function analyzeFunction(
     const arguments_ = callArguments(node);
 
     for (const index of builtinMutatedArgumentIndexes(path, arguments_.length)) {
-      markMutationThroughRoot(fn, rootIdentifier(arguments_[index]));
+      const root = rootIdentifier(arguments_[index]);
+      if (root && locals.has(root) && latestBlockAssignmentIsOwned(root, node, owned, fn.body)) continue;
+      markMutationThroughRoot(fn, root);
     }
 
-    const localTarget = !locals.has(path) && !parameters.has(path) ? localFunctions.get(path) : null;
-    if (localTarget) {
-      fn.dependencies.add(localTarget);
+    const target = callTarget(node);
+    if (target) {
+      fn.dependencies.add(target.targetId);
       fn.mutationCalls.push({
-        targetId: localTarget,
-        receiverRoot: null,
+        targetId: target.targetId,
+        receiverRoot: target.receiverRoot,
         argumentRoots: arguments_.map((argument) => rootIdentifier(argument)),
       });
     }
-
-    const sameMember = path.match(/^([A-Za-z_][A-Za-z0-9_]*)([:.])([A-Za-z_][A-Za-z0-9_]*)$/);
-    if (sameMember) {
-      const receiver = sameMember[1];
-      if (receiver === "self" || (receiver === record.exportName && !locals.has(receiver) && !parameters.has(receiver))) {
-        const target = memberFunctions.get(sameMember[3]);
-        if (target) {
-          fn.dependencies.add(target);
-          fn.mutationCalls.push({
-            targetId: target,
-            receiverRoot: sameMember[2] === ":" ? receiver : null,
-            argumentRoots: arguments_.map((argument) => rootIdentifier(argument)),
-          });
-        }
-      }
-    }
-
-    const importedMember = path.match(/^([A-Za-z_][A-Za-z0-9_]*)([.:])([A-Za-z_][A-Za-z0-9_]*)$/);
-    if (importedMember) {
-      const root = importedMember[1];
-      const moduleId = instanceAliases.get(root)
-        ?? (!locals.has(root) && !parameters.has(root) ? record.imports.get(root) : undefined);
-      if (moduleId) {
-        const target = `${moduleId}::member:${importedMember[3]}`;
-        fn.dependencies.add(target);
-        fn.mutationCalls.push({
-          targetId: target,
-          receiverRoot: importedMember[2] === ":" ? root : null,
-          argumentRoots: arguments_.map((argument) => rootIdentifier(argument)),
-        });
-      }
-    } else if (!locals.has(path) && !parameters.has(path)) {
-      const moduleId = record.imports.get(path);
-      const target = moduleId ? exportedFunctions.get(moduleId) : null;
-      if (target) {
-        fn.dependencies.add(target);
-        fn.mutationCalls.push({
-          targetId: target,
-          receiverRoot: null,
-          argumentRoots: arguments_.map((argument) => rootIdentifier(argument)),
-        });
-      }
-    }
   }
+
+  fn.returnOrigins = returnedNodes.map((node) => returnedOrigin(fn, node, callTarget));
 }
 
 function markMutationThroughRoot(fn: FunctionRecord, root: string | null): boolean {
@@ -565,12 +675,17 @@ function markMutationThroughRoot(fn: FunctionRecord, root: string | null): boole
   }
 
   if (fn.ownedRoots.has(root)) return false;
+  const result = fn.resultRoots.get(root);
+  if (result) {
+    if (fn.mutatedResults.includes(result)) return false;
+    fn.mutatedResults.push(result);
+    return true;
+  }
   if (fn.externalRoots.has(root) || !fn.localNames.has(root)) {
     if (fn.directEffect) return false;
     fn.directEffect = true;
     return true;
   }
-  if (fn.localNames.has(root)) return false;
   return false;
 }
 
@@ -592,14 +707,48 @@ function propagateLocalMutationEffects(functions: FunctionRecord[]): void {
   }
 }
 
-function mutationOriginForRoot(fn: FunctionRecord, root: string | null): CachedMutationOrigin | null {
+function mutationOriginForRoot(fn: FunctionRecord, root: string | null, depth = 0): CachedMutationOrigin | null {
   if (!root) return null;
   const parameterOrigin = fn.parameterOrigins.get(root);
   if (parameterOrigin === -1) return { kind: "receiver" };
   if (parameterOrigin !== undefined) return { kind: "parameter", index: parameterOrigin };
-  if (fn.ownedRoots.has(root) || fn.localNames.has(root)) return { kind: "local" };
-  if (fn.externalRoots.has(root) || !fn.localNames.has(root)) return { kind: "external" };
-  return null;
+  if (fn.ownedRoots.has(root)) return { kind: "local" };
+  const result = fn.resultRoots.get(root);
+  if (result) return resultOrigin(fn, result, depth);
+  if (fn.localNames.has(root)) return { kind: "local" };
+  return { kind: "external" };
+}
+
+const MAX_RESULT_DEPTH = 8;
+
+function resultOrigin(fn: FunctionRecord, result: ResultRoot, depth: number): CachedMutationOrigin {
+  if (depth >= MAX_RESULT_DEPTH) return { kind: "external" };
+  return {
+    kind: "result",
+    targetId: result.targetId,
+    argumentOrigins: result.argumentRoots.map((root) => mutationOriginForRoot(fn, root, depth + 1)),
+  };
+}
+
+function returnedOrigin(
+  fn: FunctionRecord,
+  returned: SyntaxNode | null,
+  callTarget: (node: SyntaxNode) => { targetId: string } | null,
+): CachedMutationOrigin {
+  if (!returned) return { kind: "local" };
+  const node = unwrapExpression(returned);
+  if (expressionCreatesOwnedValue(node, fn.ownedRoots)) return { kind: "local" };
+  if (["nil", "true", "false", "number", "string"].includes(node.type)) return { kind: "local" };
+  if (node.type === "function_call") {
+    const target = callTarget(node);
+    return target
+      ? resultOrigin(fn, {
+        targetId: target.targetId,
+        argumentRoots: callArguments(node).map((argument) => rootIdentifier(argument)),
+      }, 0)
+      : { kind: "external" };
+  }
+  return mutationOriginForRoot(fn, rootIdentifier(node)) ?? { kind: "external" };
 }
 
 function cachedMutationCalls(fn: FunctionRecord): CachedMutationCall[] {
@@ -610,12 +759,44 @@ function cachedMutationCalls(fn: FunctionRecord): CachedMutationCall[] {
   }));
 }
 
-function applyCachedMutationOrigin(fn: CachedSourceEffectFunction, origin: CachedMutationOrigin | null): boolean {
+function cachedFunctionState(fn: FunctionRecord): CachedSourceEffectFunction {
+  return {
+    id: fn.id,
+    moduleId: fn.moduleId,
+    localName: fn.localName,
+    memberName: fn.memberName,
+    exported: fn.exported,
+    directEffect: fn.directEffect,
+    mutatesReceiver: fn.mutatesReceiver,
+    mutatedParameterIndexes: [...fn.mutatedParameterIndexes].sort((a, b) => a - b),
+    dependencies: [...fn.dependencies].sort(),
+    mutationCalls: cachedMutationCalls(fn),
+    mutatedOrigins: fn.mutatedResults.map((result) => resultOrigin(fn, result, 0)),
+    returnOrigins: fn.returnOrigins,
+  };
+}
+
+function applyCachedMutationOrigin(
+  fn: CachedSourceEffectFunction,
+  origin: CachedMutationOrigin | null,
+  byId: Map<string, CachedSourceEffectFunction>,
+  depth = 0,
+): boolean {
   if (!origin || origin.kind === "local") return false;
-  if (origin.kind === "external") {
+  if (origin.kind === "external" || depth >= MAX_RESULT_DEPTH) {
     if (fn.directEffect) return false;
     fn.directEffect = true;
     return true;
+  }
+  if (origin.kind === "result") {
+    // Mutating a call result mutates whatever the callee can return
+    const target = byId.get(origin.targetId);
+    const returns = target?.returnOrigins ?? [{ kind: "external" } as const];
+    let changed = false;
+    for (const returned of returns) {
+      if (applyCachedMutationOrigin(fn, substituteArguments(returned, origin.argumentOrigins), byId, depth + 1)) changed = true;
+    }
+    return changed;
   }
   if (origin.kind === "receiver") {
     if (fn.mutatesReceiver) return false;
@@ -628,18 +809,38 @@ function applyCachedMutationOrigin(fn: CachedSourceEffectFunction, origin: Cache
   return true;
 }
 
+// Callee origins name callee parameters, so map them onto the caller's arguments
+function substituteArguments(
+  origin: CachedMutationOrigin,
+  argumentOrigins: Array<CachedMutationOrigin | null>,
+): CachedMutationOrigin | null {
+  if (origin.kind === "parameter") return argumentOrigins[origin.index] ?? { kind: "local" };
+  if (origin.kind === "receiver") return { kind: "external" };
+  if (origin.kind === "result") {
+    return {
+      kind: "result",
+      targetId: origin.targetId,
+      argumentOrigins: origin.argumentOrigins.map((argument) => argument && substituteArguments(argument, argumentOrigins)),
+    };
+  }
+  return origin;
+}
+
 function propagateMutationEffects(functions: CachedSourceEffectFunction[]): void {
   const byId = new Map(functions.map((fn) => [fn.id, fn] as const));
   let changed = true;
   while (changed) {
     changed = false;
     for (const fn of functions) {
+      for (const origin of fn.mutatedOrigins ?? []) {
+        if (applyCachedMutationOrigin(fn, origin, byId)) changed = true;
+      }
       for (const call of fn.mutationCalls) {
         const target = byId.get(call.targetId);
         if (!target) continue;
-        if (target.mutatesReceiver && applyCachedMutationOrigin(fn, call.receiverOrigin)) changed = true;
+        if (target.mutatesReceiver && applyCachedMutationOrigin(fn, call.receiverOrigin, byId)) changed = true;
         for (const index of target.mutatedParameterIndexes) {
-          if (applyCachedMutationOrigin(fn, call.argumentOrigins[index] ?? null)) changed = true;
+          if (applyCachedMutationOrigin(fn, call.argumentOrigins[index] ?? null, byId)) changed = true;
         }
       }
     }
@@ -699,18 +900,7 @@ export function analyzeEffectModuleForWorker(
   propagateLocalMutationEffects(state.functions);
   return {
     id: state.record.id,
-    functions: state.functions.map((fn) => ({
-      id: fn.id,
-      moduleId: fn.moduleId,
-      localName: fn.localName,
-      memberName: fn.memberName,
-      exported: fn.exported,
-      directEffect: fn.directEffect,
-      mutatesReceiver: fn.mutatesReceiver,
-      mutatedParameterIndexes: [...fn.mutatedParameterIndexes].sort((a, b) => a - b),
-      dependencies: [...fn.dependencies].sort(),
-      mutationCalls: cachedMutationCalls(fn),
-    })),
+    functions: state.functions.map(cachedFunctionState),
   };
 }
 
@@ -949,18 +1139,7 @@ export async function buildProjectSourceEffects(
         analyzeFunction(fn, record, localFunctions, memberFunctions, summariesByModuleId, moduleInstances, exportedFunctions);
       }
       propagateLocalMutationEffects(functions);
-      analyzedFunctionStatesByModule.set(moduleId, functions.map((fn) => ({
-        id: fn.id,
-        moduleId: fn.moduleId,
-        localName: fn.localName,
-        memberName: fn.memberName,
-        exported: fn.exported,
-        directEffect: fn.directEffect,
-        mutatesReceiver: fn.mutatesReceiver,
-        mutatedParameterIndexes: [...fn.mutatedParameterIndexes].sort((a, b) => a - b),
-        dependencies: [...fn.dependencies].sort(),
-        mutationCalls: cachedMutationCalls(fn),
-      })));
+      analyzedFunctionStatesByModule.set(moduleId, functions.map(cachedFunctionState));
       analyzedModuleCount += 1;
       if ((analyzedModuleCount & 31) === 0 || analyzedModuleCount === rawRecords.size) {
         onProgress?.({ phase: "analyze-calls", current: analyzedModuleCount, total: callAnalysisTotal });

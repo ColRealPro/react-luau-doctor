@@ -4798,3 +4798,82 @@ return Plain
     ["Component.luau:react-luau/rerender-unnecessary-usecallback:5", "Component.luau:react-luau/rerender-unnecessary-usecallback:11"],
   );
 });
+
+test("source effects follow returned parameters, fresh reassignments, and casts", async (t) => {
+  const root = tempProject(t, "returned-parameters", {
+    "withA.luau": `local function withA(props, base)
+  base.A = props.a
+  return base
+end
+
+return withA
+`,
+    "withB.luau": `local withA = require(script.Parent.withA)
+
+local function withB(props, base)
+  local full = withA(props, base) :: any
+  full.B = props.b
+  local extra: any = nil
+  extra = {}
+  extra.C = props.c
+  return full
+end
+
+return withB
+`,
+    "markItem.luau": `local function markItem(items, value)
+  local result = {}
+  for _, item in items do
+    local next = item
+    if item.id == value then
+      next = table.clone(item)
+      next.isChecked = true
+    end
+    table.insert(result, next)
+  end
+  return result
+end
+
+return markItem
+`,
+    "store.luau": `local state = { count = 0 }
+
+return {
+  getState = function()
+    return state
+  end,
+}
+`,
+    "bump.luau": `local store = require(script.Parent.store)
+
+local function bump()
+  local current = store.getState()
+  current.count += 1
+  return current.count
+end
+
+return bump
+`,
+    "Component.luau": `local React = require(script.Parent.React)
+local withB = require(script.Parent.withB)
+local markItem = require(script.Parent.markItem)
+local bump = require(script.Parent.bump)
+
+local function Component(props)
+  local frameProps = withB(props, { Size = props.size })
+  local items = markItem(props.items, props.value)
+  return React.createElement("Frame", frameProps, items, bump())
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics
+      .filter((diagnostic) => ["react-luau/no-side-effects-in-render", "react-luau/no-prop-mutation"].includes(diagnostic.rule))
+      .map((diagnostic) => `${diagnostic.rule}:${diagnostic.location.line}`),
+    ["react-luau/no-side-effects-in-render:9"],
+  );
+});
