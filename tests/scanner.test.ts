@@ -4711,3 +4711,31 @@ return useLeak
     ["useLeak.luau"],
   );
 });
+
+test("typeof types and casts before comparisons parse cleanly", async (t) => {
+  const root = tempProject(t, "typeof-types", {
+    "Component.luau": `local React = require(script.Parent.React)
+local Base = require(script.Parent.Base)
+
+local context = React.createContext(nil :: Base | typeof(Base))
+
+local function render(component: typeof(Base) | string, value: typeof(Base.value)?): typeof(Base)
+  return component :: typeof(Base)
+end
+
+local function Component(props)
+  local ref = React.useRef(nil :: typeof(props.value)?)
+  if ref.current :: number <= 0 and typeof(props.value) == "number" then
+    return nil
+  end
+  return React.createElement("Frame", { Name = render("Frame", nil) })
+end
+
+return Component :: typeof(Component)
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.equal(report.unverifiedFiles, undefined);
+  assert.ok(!report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/parse-error"));
+});

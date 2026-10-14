@@ -637,12 +637,30 @@ function genericFunctionReturnPrefixRanges(
   return ranges;
 }
 
-function normalizeLocalTypeofAnnotations(
+// The bundled grammar reads `x :: number < y` as the start of generic type
+// arguments. Casts are type-only, so blanking them keeps the comparison
+function castsBeforeLessThanRanges(source: string, mask: Uint8Array): Range[] {
+  const ranges: Range[] = [];
+  const pattern = /::\s*[A-Za-z_][A-Za-z0-9_.]*\??(?=\s*<(?:=|\s))/g;
+
+  for (const match of source.matchAll(pattern)) {
+    if (isCode(mask, match.index, match.index + match[0].length))
+      ranges.push({ start: match.index, end: match.index + match[0].length });
+  }
+
+  return ranges;
+}
+
+// The bundled grammar only accepts `typeof(...)` types in a few positions.
+// Annotations, casts, unions, intersections, and return types are type-only,
+// while a runtime `typeof(x)` call never follows these tokens
+function normalizeTypeofAnnotations(
   source: string,
   mask: Uint8Array,
 ): string {
   const replacements: Array<{ start: number; end: number; value: string }> = [];
-  const pattern = /\blocal\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*typeof\s*\(/g;
+  const pattern =
+    /(?:\blocal\s+[A-Za-z_][A-Za-z0-9_]*\s*:|::|:(?=\s)|[|&]|->)\s*typeof\s*\(/g;
 
   for (const match of source.matchAll(pattern)) {
     const matchStart = match.index;
@@ -778,10 +796,7 @@ export function parserCompatibleSource(source: string): string {
     mask,
   );
   const packCompatible = normalizeGenericTypePackUses(literalCompatible, mask);
-  const typeofCompatible = normalizeLocalTypeofAnnotations(
-    packCompatible,
-    mask,
-  );
+  const typeofCompatible = normalizeTypeofAnnotations(packCompatible, mask);
 
   const ranges = [
     ...maskTypeAliases(source, mask),
@@ -789,6 +804,7 @@ export function parserCompatibleSource(source: string): string {
     ...attributeRanges(source, mask),
     ...explicitTypeArgumentRanges(source, mask),
     ...genericFunctionReturnPrefixRanges(source, mask),
+    ...castsBeforeLessThanRanges(source, mask),
   ];
 
   const masked = applyMasks(typeofCompatible, ranges);
