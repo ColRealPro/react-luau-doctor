@@ -4660,3 +4660,54 @@ return ModuleFlags
   assert.deepEqual(lines("ExportedComponent.luau"), [5, 11]);
   assert.deepEqual(lines("ModuleComponent.luau"), [5]);
 });
+
+test("effect cleanup follows connections stored in ref fields and collections", async (t) => {
+  const root = tempProject(t, "cleanup-containers", {
+    "useConnections.luau": `local React = require(script.Parent.React)
+
+local function useConnections(instance, names)
+  local listener = React.useRef(nil)
+  local named = React.useRef({})
+  React.useEffect(function()
+    local connections = {}
+    table.insert(connections, instance.Changed:Connect(print))
+    listener.current = instance.Destroying:Connect(print)
+    for _, name in names do
+      named.current[name] = instance:GetPropertyChangedSignal(name):Connect(print)
+    end
+    return function()
+      for _, connection in connections do
+        connection:Disconnect()
+      end
+      listener.current:Disconnect()
+      for _, connection in pairs(named.current) do
+        connection:Disconnect()
+      end
+    end
+  end, { instance, names })
+end
+
+return useConnections
+`,
+    "useLeak.luau": `local React = require(script.Parent.React)
+
+local function useLeak(instance)
+  local listener = React.useRef(nil)
+  React.useEffect(function()
+    listener.current = instance.Changed:Connect(print)
+    return function()
+      listener:Disconnect()
+    end
+  end, { instance })
+end
+
+return useLeak
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/effect-needs-cleanup").map((diagnostic) => diagnostic.file),
+    ["useLeak.luau"],
+  );
+});

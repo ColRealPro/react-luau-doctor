@@ -90,7 +90,7 @@ function cleanupDestroysExpression(cleanupText: string, expression: string): boo
   return new RegExp(`(?:^|[^A-Za-z0-9_])${escapeRegExp(expression)}\\s*:\\s*Destroy\\s*\\(`, "s").test(cleanupText);
 }
 
-function assignedVariableName(call: SyntaxNode, callback: FunctionInfo): string | null {
+function assignedVariableName(call: SyntaxNode, callback: FunctionInfo, context: RuleContext): string | null {
   let current = call.parent;
   while (current && !sameNode(current, callback.node)) {
     if (current.type === "variable_declaration") {
@@ -103,11 +103,17 @@ function assignedVariableName(call: SyntaxNode, callback: FunctionInfo): string 
     if (current.type === "assignment_statement") {
       const beforeCall = current.text.slice(0, Math.max(0, call.startIndex - current.startIndex));
       const match = beforeCall.match(/^\s*([A-Za-z_][A-Za-z0-9_]*(?:\s*\[[^\]]+\]|\s*\.[A-Za-z_][A-Za-z0-9_]*)*)\s*=\s*$/s);
-      const target = match?.[1]?.replace(/\s+/g, "") ?? "";
-      const root = target.match(/^([A-Za-z_][A-Za-z0-9_]*)/)?.[1];
-      if (root) return root;
+      const target = match?.[1]?.replace(/\s+/g, "");
+      if (target) return target;
       // A call can be nested inside a conditional/table initializer. In that case
       // keep walking so the surrounding variable declaration can own the resource.
+    }
+    if (current.type === "function_call" && context.getCallPath(current) === "table.insert") {
+      const args = context.callArguments(current);
+      const collection = args[0]?.text.replace(/\s+/g, "");
+      // The inserted element has no name of its own, only its collection
+      if (collection && args.length > 1 && args.at(-1)!.startIndex <= call.startIndex)
+        return `${collection}[]`;
     }
     if (current.type === "function_definition" || current.type === "function_declaration") return null;
     current = current.parent;
@@ -115,18 +121,29 @@ function assignedVariableName(call: SyntaxNode, callback: FunctionInfo): string 
   return null;
 }
 
-function cleanupIteratesAndDisconnects(cleanupText: string, collection: string): boolean {
-  const escaped = escapeRegExp(collection);
-  const loops = new RegExp(
-    `for\\s+[^\\n]*?([A-Za-z_][A-Za-z0-9_]*)\\s+in\\s+${escaped}\\s+do([\\s\\S]*?)end`,
-    "g",
-  );
-  for (const match of cleanupText.matchAll(loops)) {
-    const item = match[1];
-    const body = match[2] ?? "";
-    if (new RegExp(`\\b${escapeRegExp(item)}\\s*:\\s*Disconnect\\s*\\(`).test(body)) return true;
+// `a.b[key]` is owned by `a.b` and `a` as well, since cleanup may iterate either
+function containingPaths(path: string): string[] {
+  const result: string[] = [];
+  for (let index = 1; index < path.length; index += 1) {
+    if (path[index] === "." || path[index] === "[") result.push(path.slice(0, index));
   }
-  return false;
+  return result.reverse();
+}
+
+function cleanupIteratesAndDisconnects(cleanupText: string, path: string): boolean {
+  return [path, ...containingPaths(path)].some((collection) => {
+    const escaped = escapeRegExp(collection);
+    const loops = new RegExp(
+      `for\\s+[^\\n]*?([A-Za-z_][A-Za-z0-9_]*)\\s+in\\s+(?:i?pairs\\s*\\(\\s*)?${escaped}\\s*\\)?\\s+do([\\s\\S]*?)end`,
+      "g",
+    );
+    for (const match of cleanupText.matchAll(loops)) {
+      const item = match[1];
+      const body = match[2] ?? "";
+      if (new RegExp(`\\b${escapeRegExp(item)}\\s*:\\s*Disconnect\\s*\\(`).test(body)) return true;
+    }
+    return false;
+  });
 }
 
 function cleanupCallsDisposer(cleanupText: string, variable: string): boolean {
@@ -361,7 +378,7 @@ end`,
 function classifyResource(call: SyntaxNode, context: RuleContext, callback: FunctionInfo): Resource | null {
   const rawPath = context.getCallPath(call) ?? "";
   const path = context.resolveCallPath(rawPath);
-  const variable = assignedVariableName(call, callback);
+  const variable = assignedVariableName(call, callback, context);
   const finalMember = path.split(/[.:]/).at(-1) ?? path;
 
   if (/:Connect$/.test(rawPath)) {
