@@ -50,7 +50,7 @@ import type {
   Severity,
 } from "./types";
 
-const REACT_SOURCE_MARKER = /\bReact(?:Roblox)?\b/i;
+const REACT_SOURCE_MARKER = /\b(?:React(?:Roblox)?|Roact(?:Compat)?)\b/i;
 
 export interface ScanAnalysisSession {
   projectModelModules: Map<string, ProjectModelModuleCacheEntry>;

@@ -4544,3 +4544,31 @@ return Component
     assert.equal(diagnostic.message.includes("may be"), ["ConditionalReassignment.luau", "MixedLiteral.luau", "NumericLiteralMap.luau", "Reassigned.luau"].includes(diagnostic.file));
   }
 });
+
+function tempProject(t: { after(fn: () => void): void }, name: string, files: Record<string, string>): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `doctor-${name}-`));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const [file, source] of Object.entries(files)) fs.writeFileSync(path.join(root, file), source);
+  return root;
+}
+
+test("Roact and RoactCompat namespaces are analyzed as React", async (t) => {
+  const root = tempProject(t, "roact-namespace", {
+    "Component.luau": `local Roact = require(script.Parent.Roact)
+local useThing = require(script.Parent.useThing)
+
+local function Component(props)
+  if props.enabled then
+    useThing()
+  end
+  return Roact.createElement("Frame")
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.equal(report.scannedFiles, 1);
+  assert.ok(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks"));
+});

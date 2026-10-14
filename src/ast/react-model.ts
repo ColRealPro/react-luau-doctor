@@ -63,6 +63,14 @@ function requireTargetContainsModule(target: string, moduleName: string): boolea
     .some((token) => token.toLowerCase() === moduleName.toLowerCase());
 }
 
+// RoactCompat re-exports React's element, ref, context, and binding APIs, and
+// legacy Roact shares their semantics, so both resolve to React members
+const REACT_PACKAGE_NAMES = ["React", "RoactCompat", "Roact"];
+
+export function requireTargetIsReact(target: string): boolean {
+  return REACT_PACKAGE_NAMES.some((name) => requireTargetContainsModule(target, name));
+}
+
 function resolvePath(
   rawPath: string,
   aliases: Map<string, string>,
@@ -312,7 +320,7 @@ export function buildReactModel(root: SyntaxNode, project?: ProjectModel): React
     if (requireTargetContainsModule(target, "ReactRoblox")) {
       reactRobloxNamespaces.add(localName);
       isReactFile = true;
-    } else if (requireTargetContainsModule(target, "React")) {
+    } else if (requireTargetIsReact(target)) {
       reactNamespaces.add(localName);
       isReactFile = true;
     }

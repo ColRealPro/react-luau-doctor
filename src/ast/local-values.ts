@@ -1,5 +1,6 @@
 import type { SyntaxNode } from "../syntax";
 import type { FunctionInfo, RuleContext } from "../types";
+import { requireTargetIsReact } from "./react-model";
 import { normalizeExpressionText, parameterBindingNames } from "./walk";
 
 interface LocalValue {
@@ -248,7 +249,9 @@ function resolveReactApiPath(
 
   if (
     visible !== undefined &&
-    (!binding || !/^require\s*\(.*\bReact\b.*\)$/s.test(binding.value.text))
+    (!binding ||
+      !/^require\s*\(.*\)$/s.test(binding.value.text) ||
+      !requireTargetIsReact(binding.value.text))
   )
     return null;
 
