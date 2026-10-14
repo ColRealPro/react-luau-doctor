@@ -415,6 +415,14 @@ export function buildReactModel(root: SyntaxNode, project?: ProjectModel): React
     names.add(name);
     map.set(key, names);
   };
+  const hasOnlyStableDependencies = (deps: SyntaxNode | undefined, owner: FunctionInfo | null): boolean => {
+    if (isEmptyDependencyTable(deps)) return true;
+    if (!owner || deps?.type !== "table_constructor") return false;
+    const stable = stableVariablesByFunction.get(nodeKey(owner.node));
+    return deps.namedChildren
+      .filter((child) => child.type === "field")
+      .every((field) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(field.text) && Boolean(stable?.has(field.text)));
+  };
 
   for (const declaration of declarations) {
     const names = declarationNames(declaration);
@@ -469,7 +477,7 @@ export function buildReactModel(root: SyntaxNode, project?: ProjectModel): React
         addScopedVariable(stableVariablesByFunction, owner, names[1]);
       }
     } else if (path === "React.useMemo" && names.length >= 1) {
-      if (isEmptyDependencyTable(args[1])) {
+      if (hasOnlyStableDependencies(args[1], owner)) {
         stableVariables.add(names[0]);
         addScopedVariable(stableVariablesByFunction, owner, names[0]);
       }
@@ -477,8 +485,8 @@ export function buildReactModel(root: SyntaxNode, project?: ProjectModel): React
         addScopedVariable(externalMutableVariablesByFunction, owner, names[0]);
         addScopedVariable(instanceVariablesByFunction, owner, names[0]);
       }
-    } else if (path === "React.useCallback" && names.length >= 1 && isEmptyDependencyTable(args[1])) {
-      // Empty-dependency callbacks keep a stable identity. Their own stale captures are
+    } else if (path === "React.useCallback" && names.length >= 1 && hasOnlyStableDependencies(args[1], owner)) {
+      // Callbacks with only stable dependencies keep a stable identity. Their own stale captures are
       // diagnosed on the useCallback dependency table instead of cascading into every
       // effect that consumes the callback.
       stableVariables.add(names[0]);

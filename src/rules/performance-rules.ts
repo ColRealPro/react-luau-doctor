@@ -13,7 +13,7 @@ import type {
   StateBinding,
 } from "../types";
 
-import { normalizeExpressionText, sameNode } from "../ast/walk";
+import { nodeKey, normalizeExpressionText, rootIdentifier, sameNode } from "../ast/walk";
 import { reactApiPath, resolveLocalValue } from "../ast/local-values";
 import { freshValueKind } from "../ast/value-identity";
 import { isHighFrequencyRunServiceCall } from "../roblox-semantics";
@@ -592,6 +592,56 @@ function isOnlyDirectFunctionCallReference(
   );
 }
 
+// A plain function that only captures stable values behaves the same on every
+// render, so hooks can call a stale copy and never need it as a dependency
+function hasReactiveDependency(
+  context: RuleContext,
+  deps: SyntaxNode | undefined,
+  owner: FunctionInfo,
+): boolean {
+  if (deps?.type !== "table_constructor") return true;
+
+  const ownerKey = nodeKey(owner.node);
+  const locals = context.model.componentLocals.get(ownerKey) ?? new Set<string>();
+  const stable = context.model.stableVariablesByFunction.get(ownerKey) ?? new Set<string>();
+
+  return deps.namedChildren.some((field) => {
+    const root = rootIdentifier(field.text);
+    return !root || (locals.has(root) && !stable.has(root));
+  });
+}
+
+// A hook callback with dependencies must list what it captures, so a captured
+// useCallback is observed by that dependency table even when it is only called
+function isCapturedByDependencyHook(
+  context: RuleContext,
+  reference: SyntaxNode,
+  owner: FunctionInfo,
+): boolean {
+  for (
+    let fn = context.nearestFunction(reference);
+    fn && fn !== owner;
+    fn = context.nearestFunction(fn.node)
+  ) {
+    const call = fn.node.parent?.parent;
+
+    if (
+      fn.node.parent?.type !== "arguments" ||
+      call?.type !== "function_call" ||
+      !/^React\.use(?:Effect|LayoutEffect|Memo|Callback|ImperativeHandle)$/.test(
+        context.resolveCallPath(context.getCallPath(call) ?? ""),
+      )
+    )
+      continue;
+
+    const args = context.callArguments(call);
+    const callbackIndex = args.findIndex((arg) => sameNode(arg, fn.node));
+    if (callbackIndex >= 0 && args.length > callbackIndex + 1) return true;
+  }
+
+  return false;
+}
+
 export const rerenderUnnecessaryUseCallback: RuleDefinition = {
   id: "react-luau/rerender-unnecessary-usecallback",
   category: "Performance",
@@ -624,11 +674,18 @@ export const rerenderUnnecessaryUseCallback: RuleDefinition = {
         name,
         declaration,
       );
+      const reactive = hasReactiveDependency(
+        context,
+        context.callArguments(call)[1],
+        owner,
+      );
 
       if (
         references.length === 0 ||
         references.some(
-          (node) => !isOnlyDirectFunctionCallReference(node, name),
+          (node) =>
+            !isOnlyDirectFunctionCallReference(node, name) ||
+            (reactive && isCapturedByDependencyHook(context, node, owner)),
         )
       )
         continue;

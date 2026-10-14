@@ -4739,3 +4739,62 @@ return Component :: typeof(Component)
   assert.equal(report.unverifiedFiles, undefined);
   assert.ok(!report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/parse-error"));
 });
+
+test("useCallback captured by a dependency hook is unobserved only when its captures are stable", async (t) => {
+  const root = tempProject(t, "captured-callback", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component(props)
+  local open, setOpen = React.useState(false)
+  local close = React.useCallback(function()
+    setOpen(false)
+  end, {})
+  local notify = React.useCallback(function()
+    props.onClose()
+  end, { props.onClose })
+  local reset = React.useCallback(function()
+    setOpen(false)
+  end, { setOpen })
+  React.useEffect(function()
+    if not props.visible then
+      close()
+      notify()
+      reset()
+    end
+  end, { props.visible, notify })
+  return React.createElement("Frame", { Visible = open })
+end
+
+return Component
+`,
+    "Plain.luau": `local React = require(script.Parent.React)
+
+local function Plain(props)
+  local open, setOpen = React.useState(false)
+  local close = function()
+    setOpen(false)
+  end
+  local notify = function()
+    props.onClose()
+  end
+  React.useEffect(function()
+    if not props.visible then
+      close()
+      notify()
+    end
+  end, { props.visible, props.onClose })
+  return React.createElement("Frame", { Visible = open })
+end
+
+return Plain
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics
+      .filter((diagnostic) => ["react-luau/rerender-unnecessary-usecallback", "react-luau/exhaustive-deps"].includes(diagnostic.rule))
+      .map((diagnostic) => `${diagnostic.file}:${diagnostic.rule}:${diagnostic.location.line}`),
+    ["Component.luau:react-luau/rerender-unnecessary-usecallback:5", "Component.luau:react-luau/rerender-unnecessary-usecallback:11"],
+  );
+});
