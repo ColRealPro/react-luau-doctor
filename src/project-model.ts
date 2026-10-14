@@ -68,6 +68,7 @@ export interface ProjectModelModuleAnalysis {
   callbackFunction?: ExternalCallbackFunctionSummary;
   bindingCompatibleProps?: Set<string>;
   staticIterationTables?: Set<string>;
+  loadTimeExportFields?: Set<string>;
   conditionalHookMode?: ConditionalHookModeSummary;
   declaredMethods: Map<string, Set<string>>;
 }
@@ -1550,6 +1551,197 @@ function findStaticIterationTables(source: string): Set<string> | null {
   return result;
 }
 
+const IDENTIFIER = "[A-Za-z_][A-Za-z0-9_]*";
+const FIELD_ACCESS = new RegExp(`^\\s*\\.\\s*(${IDENTIFIER})`);
+const ASSIGNMENT_OPERATOR = /^\s*(?:=(?!=)|\+=|-=|\*=|\/\/=|\/=|%=|\^=|\.\.=)/;
+const READ_ONLY_CALL =
+  /\b(?:pairs|ipairs|next|typeof|type|tostring|table\s*\.\s*(?:clone|find|concat|unpack))\s*\(\s*$/;
+
+interface NameUse {
+  index: number;
+  /** Field uses name the field they touch, while escapes may reach any field */
+  kind: "field" | "read" | "escape";
+  field: string | null;
+  write: boolean;
+  declaration: boolean;
+}
+
+function classifyUse(code: string, index: number, length: number): NameUse {
+  const rest = code.slice(index + length);
+  const before = code.slice(Math.max(0, index - 32), index);
+  const declaration = /\bfunction\s+$/.test(before);
+  const field = rest.match(FIELD_ACCESS);
+
+  if (field)
+    return {
+      index,
+      kind: "field",
+      field: field[1],
+      write:
+        declaration || ASSIGNMENT_OPERATOR.test(rest.slice(field[0].length)),
+      declaration,
+    };
+
+  const bracket = rest.match(/^\s*\[/);
+
+  if (bracket) {
+    const close = matchingDelimiter(
+      code,
+      index + length + bracket[0].length - 1,
+      "[",
+      "]",
+    );
+    const write =
+      close === null || ASSIGNMENT_OPERATOR.test(code.slice(close + 1));
+
+    return {
+      index,
+      kind: write ? "escape" : "read",
+      field: null,
+      write,
+      declaration,
+    };
+  }
+
+  const readOnly =
+    /#\s*$/.test(before) ||
+    (READ_ONLY_CALL.test(before) && /^\s*[,)]/.test(rest));
+
+  return {
+    index,
+    kind: readOnly ? "read" : "escape",
+    field: null,
+    write: false,
+    declaration,
+  };
+}
+
+// Masked code keeps offsets, so member names and string contents never match
+function nameUses(code: string, name: string, from = 0): NameUse[] {
+  const uses: NameUse[] = [];
+
+  for (const match of code.matchAll(new RegExp(`\\b${name}\\b`, "g"))) {
+    if (match.index < from) continue;
+    if (/[.:]\s*$/.test(code.slice(Math.max(0, match.index - 8), match.index)))
+      continue;
+
+    uses.push(classifyUse(code, match.index, name.length));
+  }
+
+  return uses;
+}
+
+function atLineStart(code: string, index: number): boolean {
+  return index === 0 || code[index - 1] === "\n";
+}
+
+/**
+ * Fields of a module's returned table that only change while the module
+ * loads, such as flags read once into a constants table. Writes inside
+ * functions, bracket writes, method calls, and escaping references disqualify
+ * the fields they could affect.
+ */
+function findLoadTimeExportFields(source: string): Set<string> | null {
+  const code = maskLuauNonCode(source);
+  const direct = /^return\s*\{/m.exec(code);
+
+  if (direct) {
+    const open = direct.index + direct[0].length - 1;
+    const close = matchingDelimiter(code, open, "{", "}");
+
+    return close === null
+      ? null
+      : new Set(
+          topLevelFieldRanges(code, open, close).map((field) => field.name),
+        );
+  }
+
+  const returned = new RegExp(`^return\\s+(${IDENTIFIER})\\s*$`, "m").exec(
+    code,
+  );
+  if (!returned) return null;
+
+  const name = returned[1];
+  const declaration = new RegExp(
+    `^local\\s+${name}\\s*(?::[^=\\n]*)?=\\s*\\{`,
+    "m",
+  ).exec(code);
+  if (!declaration) return null;
+
+  const open = declaration.index + declaration[0].length - 1;
+  const close = matchingDelimiter(code, open, "{", "}");
+  if (close === null) return null;
+
+  const fields = new Set(
+    topLevelFieldRanges(code, open, close).map((field) => field.name),
+  );
+  const returnIndex = returned.index + returned[0].indexOf(name, "return".length);
+  const runtimeWrites = new Set<string>();
+
+  for (const use of nameUses(code, name, close)) {
+    if (use.index === returnIndex || use.kind === "read") continue;
+    if (use.kind === "escape" || !use.field) return null;
+    if (!use.write) continue;
+
+    const statementStart = use.declaration
+      ? code.lastIndexOf("function", use.index)
+      : use.index;
+
+    // Column-zero statements run while the module loads
+    if (atLineStart(code, statementStart)) fields.add(use.field);
+    else runtimeWrites.add(use.field);
+  }
+
+  for (const field of runtimeWrites) fields.delete(field);
+
+  return fields;
+}
+
+/**
+ * Removes load-time fields that project modules can change after loading.
+ * Requiring a module without binding it to a local, such as re-exporting it,
+ * lets unseen code write to it, so that disqualifies the whole module.
+ */
+function invalidateExternalFieldWrites(
+  records: SourceRecord[],
+  loadTimeFields: Map<string, Set<string>>,
+): void {
+  for (const record of records) {
+    const code = maskLuauNonCode(record.source);
+
+    for (const match of code.matchAll(/\brequire\s*\(/g)) {
+      const open = match.index + match[0].length - 1;
+      const close = matchingDelimiter(code, open, "(", ")");
+      if (close === null) continue;
+
+      const fields = resolveModuleReference(
+        normalizeRequireTarget(code.slice(open + 1, close)),
+        loadTimeFields,
+      );
+      if (!fields || fields.size === 0) continue;
+
+      const binding = code
+        .slice(Math.max(0, match.index - 64), match.index)
+        .match(new RegExp(`\\blocal\\s+(${IDENTIFIER})\\s*=\\s*$`));
+
+      const uses = binding
+        ? nameUses(code, binding[1], close + 1)
+        : [classifyUse(code, match.index, close + 1 - match.index)];
+
+      for (const use of uses) {
+        if (use.kind === "read") continue;
+
+        if (use.kind === "escape" || !use.field) {
+          fields.clear();
+          break;
+        }
+
+        if (use.write) fields.delete(use.field);
+      }
+    }
+  }
+}
+
 export function buildProjectModel(
   root: string,
   candidates: ScanFileInput[],
@@ -1601,6 +1793,7 @@ export function buildProjectModel(
       bindingCompatibleProps:
         findBindingCompatibleComponentProps(source) ?? undefined,
       staticIterationTables: findStaticIterationTables(source) ?? undefined,
+      loadTimeExportFields: findLoadTimeExportFields(source) ?? undefined,
       conditionalHookMode: findConditionalHookMode(source) ?? undefined,
       declaredMethods: findDeclaredMethods(source),
     };
@@ -1623,6 +1816,7 @@ export function buildProjectModel(
     Set<string>
   >();
   const staticIterationTablesByModule = new Map<string, Set<string>>();
+  const loadTimeFieldsByModule = new Map<string, Set<string>>();
   const conditionalHookModesByModule = new Map<
     string,
     ConditionalHookModeSummary
@@ -1656,6 +1850,9 @@ export function buildProjectModel(
         new Set(analysis.staticIterationTables),
       );
 
+    if (analysis.loadTimeExportFields)
+      loadTimeFieldsByModule.set(id, new Set(analysis.loadTimeExportFields));
+
     if (analysis.conditionalHookMode)
       conditionalHookModesByModule.set(id, {
         ...analysis.conditionalHookMode,
@@ -1683,6 +1880,13 @@ export function buildProjectModel(
   );
 
   collectConditionalHookModeCallSites(records, conditionalHookModes);
+
+  const loadTimeModuleFields = buildUniqueFeatureAliases(
+    records,
+    loadTimeFieldsByModule,
+  );
+
+  invalidateExternalFieldWrites(records, loadTimeModuleFields);
 
   let changed = true;
 
@@ -1727,6 +1931,7 @@ export function buildProjectModel(
       staticIterationTablesByModule,
     ),
 
+    loadTimeModuleFields,
     conditionalHookModes,
     reactHookModules,
     sourceEffects: new Map(),

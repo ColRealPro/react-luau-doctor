@@ -4592,3 +4592,71 @@ return Component
   const report = await scanPath(root);
   assert.deepEqual(report.diagnostics.map((diagnostic) => diagnostic.rule), []);
 });
+
+test("rules of hooks accepts fields of load-time module tables that nothing can rewrite", async (t) => {
+  const flags = `local getFlag = require(script.Parent.getFlag)
+
+return {
+  enabled = getFlag("Enabled"),
+  other = getFlag("Other"),
+}
+`;
+  const component = (module: string) => `local React = require(script.Parent.React)
+local Flags = require(script.Parent.${module})
+
+local function Component(props)
+  local value = if Flags.enabled then React.useMemo(function()
+    return { size = props.size }
+  end, { props.size }) else nil
+  if not Flags.other then
+    return nil
+  end
+  local count = React.useState(0)
+  return React.createElement("Frame", { Size = value and value.size, LayoutOrder = count })
+end
+
+return Component
+`;
+  const root = tempProject(t, "load-time-fields", {
+    "Flags.luau": flags,
+    "StableComponent.luau": component("Flags"),
+    "WrittenFlags.luau": flags,
+    "Debug.luau": `local WrittenFlags = require(script.Parent.WrittenFlags)
+
+return function()
+  WrittenFlags.other = true
+end
+`,
+    "WrittenComponent.luau": component("WrittenFlags"),
+    "ExportedFlags.luau": flags,
+    "Package.luau": `return {
+  Flags = require(script.Parent.ExportedFlags),
+}
+`,
+    "ExportedComponent.luau": component("ExportedFlags"),
+    "ModuleFlags.luau": `local getFlag = require(script.Parent.getFlag)
+
+local ModuleFlags = {
+  enabled = getFlag("Enabled"),
+}
+
+ModuleFlags.other = getFlag("Other")
+
+function ModuleFlags.toggle()
+  ModuleFlags.enabled = not ModuleFlags.enabled
+end
+
+return ModuleFlags
+`,
+    "ModuleComponent.luau": component("ModuleFlags"),
+  });
+
+  const report = await scanPath(root);
+  const lines = (file: string) => report.diagnostics
+    .filter((diagnostic) => diagnostic.file === file && diagnostic.rule === "react-luau/rules-of-hooks")
+    .map((diagnostic) => diagnostic.location.line);
+  assert.deepEqual(lines("StableComponent.luau"), []);
+  assert.deepEqual(lines("WrittenComponent.luau"), [11]);
+  assert.deepEqual(lines("ExportedComponent.luau"), [5, 11]);
+  assert.deepEqual(lines("ModuleComponent.luau"), [5]);
+});

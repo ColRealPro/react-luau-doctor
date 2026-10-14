@@ -531,6 +531,47 @@ function simpleConditionRoot(condition: SyntaxNode): string | null {
   return match?.[1] ?? null;
 }
 
+function loadTimeFieldCondition(
+  condition: SyntaxNode,
+): { root: string; field: string } | null {
+  const match = condition.text.trim().match(
+    /^(?:not\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)(?:\s*(?:==|~=)\s*(?:true|false|nil))?$/,
+  );
+
+  return match ? { root: match[1], field: match[2] } : null;
+}
+
+const loadTimeImportsCache = new WeakMap<SyntaxNode, Map<string, Set<string>>>();
+
+// Module-level requires of tables whose fields are fixed once loaded, such as flag modules
+function loadTimeFieldImports(context: RuleContext): Map<string, Set<string>> {
+  const cached = loadTimeImportsCache.get(context.root);
+  if (cached) return cached;
+
+  const result = new Map<string, Set<string>>();
+
+  for (const node of context.walk(context.root)) {
+    if (node.type !== "variable_declaration" || context.nearestFunction(node))
+      continue;
+
+    const match = node.text.match(
+      /^\s*local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)\s*$/s,
+    );
+
+    if (!match) continue;
+
+    const fields = resolveModuleReference(
+      normalizeRequireTarget(match[2]),
+      context.project.loadTimeModuleFields,
+    );
+
+    if (fields) result.set(match[1], fields);
+  }
+
+  loadTimeImportsCache.set(context.root, result);
+  return result;
+}
+
 const unstableLocalNamesCache = new WeakMap<FunctionInfo, Set<string>>();
 
 function unstableLocalNames(fn: FunctionInfo, context: RuleContext): Set<string> {
@@ -600,6 +641,15 @@ function conditionIsProvablyInvariant(
   return conditions.every((condition) => {
     if (["true", "false", "nil", "number", "string"].includes(condition.type))
       return true;
+
+    const member = loadTimeFieldCondition(condition);
+
+    if (member)
+      return (
+        moduleInvariants.has(member.root) &&
+        moduleNameIsUnshadowed(member.root, condition, fn, context) &&
+        Boolean(loadTimeFieldImports(context).get(member.root)?.has(member.field))
+      );
 
     const root = simpleConditionRoot(condition);
 

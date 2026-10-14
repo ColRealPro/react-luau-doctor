@@ -56,6 +56,7 @@ interface SerializedProjectModel {
   bindingApiAlternatives: Array<[string, string]>;
   bindingCompatibleComponentProps: Array<[string, string[]]>;
   staticIterationTables: Array<[string, string[]]>;
+  loadTimeModuleFields: Array<[string, string[]]>;
 
   conditionalHookModes: Array<
     [
@@ -494,6 +495,10 @@ export function serializeProjectModel(
       ([key, value]) => [key, [...value].sort()],
     ),
 
+    loadTimeModuleFields: [...project.loadTimeModuleFields].map(
+      ([key, value]) => [key, [...value].sort()],
+    ),
+
     conditionalHookModes: [...project.conditionalHookModes],
     reactHookModules: [...project.reactHookModules],
 
@@ -522,6 +527,13 @@ export function deserializeProjectModel(
 
     staticIterationTables: new Map(
       project.staticIterationTables.map(([key, value]) => [
+        key,
+        new Set(value),
+      ]),
+    ),
+
+    loadTimeModuleFields: new Map(
+      (project.loadTimeModuleFields ?? []).map(([key, value]) => [
         key,
         new Set(value),
       ]),
@@ -567,6 +579,7 @@ export function projectModelFeatureKey(project: ProjectModel): string {
     bindingApiAlternatives: serialized.bindingApiAlternatives,
     bindingCompatibleComponentProps: serialized.bindingCompatibleComponentProps,
     staticIterationTables: serialized.staticIterationTables,
+    loadTimeModuleFields: serialized.loadTimeModuleFields,
     conditionalHookModes: serialized.conditionalHookModes,
     reactHookModules: serialized.reactHookModules,
   });
