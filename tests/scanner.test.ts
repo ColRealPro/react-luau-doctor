@@ -4740,6 +4740,38 @@ return Component :: typeof(Component)
   assert.ok(!report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/parse-error"));
 });
 
+test("typeof in type brackets, commented unions, and builtin-named function type parameters parse cleanly", async (t) => {
+  const root = tempProject(t, "type-brackets", {
+    "Component.luau": `local React = require(script.Parent.React)
+local Base = require(script.Parent.Base)
+
+export type Variant =
+  typeof(Base.A)
+  -- Deprecated
+  | typeof(Base.B)
+
+export type Props = Readonly<
+  {
+    value: number,
+  }
+>
+
+local renderers: { [typeof("Frame") | string]: (number: number, string: string) -> () } = {}
+
+local function Component(props)
+  local ref = nil :: Ref<typeof(Base)> | nil
+  local kind = renderers[typeof(props.value)]
+  return React.createElement("Frame", { Name = tostring(ref) .. tostring(kind) })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.ok(!report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/parse-error"));
+});
+
 test("useCallback captured by a dependency hook is unobserved only when its captures are stable", async (t) => {
   const root = tempProject(t, "captured-callback", {
     "Component.luau": `local React = require(script.Parent.React)
