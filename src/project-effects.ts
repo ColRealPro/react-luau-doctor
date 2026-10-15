@@ -502,6 +502,78 @@ function iteratedCollection(clause: SyntaxNode): SyntaxNode | null {
   return path === "pairs" || path === "ipairs" ? callArguments(collection)[0] ?? null : collection;
 }
 
+const compactText = (node: SyntaxNode) => node.text.replace(/\s+/g, "");
+
+function disjuncts(condition: SyntaxNode): SyntaxNode[] {
+  const node = unwrapExpression(condition);
+  if (node.type === "binary_expression" && node.children.some((part) => part.type === "or"))
+    return node.namedChildren.flatMap(disjuncts);
+  return [node];
+}
+
+// `x == nil`, `nil == x`, and `not x` test whether a slot is still empty
+function emptySlotTested(condition: SyntaxNode): SyntaxNode | null {
+  const node = unwrapExpression(condition);
+  if (node.type === "unary_expression" && node.children[0]?.type === "not")
+    return node.childForFieldName("operand");
+  if (node.type !== "binary_expression" || !node.children.some((part) => part.type === "==")) return null;
+  const [left, right] = node.namedChildren;
+  if (right?.type === "nil") return left ?? null;
+  if (left?.type === "nil") return right ?? null;
+  return null;
+}
+
+function filledSlotTested(condition: SyntaxNode): SyntaxNode | null {
+  const node = unwrapExpression(condition);
+  if (node.type !== "binary_expression") return node;
+  if (!node.children.some((part) => part.type === "~=")) return null;
+  const [left, right] = node.namedChildren;
+  if (right?.type === "nil") return left ?? null;
+  if (left?.type === "nil") return right ?? null;
+  return null;
+}
+
+function assignsSlot(block: SyntaxNode, slot: string): boolean {
+  for (const node of block.namedChildren) {
+    if (node.type !== "assignment_statement") continue;
+    if (assignmentSides(node).left.some((target) => compactText(target) === slot)) return true;
+  }
+  return false;
+}
+
+// Writes that only fill an empty slot leave the same value on every later call,
+// so lazy caches and one-time initialization are not observable effects
+function fillsEmptySlot(statement: SyntaxNode, target: string, body: SyntaxNode, aliases: Map<string, string>): boolean {
+  const slot = (node: SyntaxNode | null) => {
+    if (!node) return null;
+    const text = compactText(node);
+    return aliases.get(text) ?? text;
+  };
+
+  for (let current = statement; current.parent && current.id !== body.id; current = current.parent) {
+    const parent = current.parent;
+
+    if (parent.type === "if_statement" && parent.childForFieldName("consequence")?.id === current.id) {
+      const condition = parent.childForFieldName("condition");
+      for (const tested of condition ? disjuncts(condition).map(emptySlotTested) : []) {
+        const guarded = slot(tested);
+        if (guarded && (guarded === target || assignsSlot(current, guarded))) return true;
+      }
+    }
+
+    if (parent.type !== "block" && parent.id !== body.id) continue;
+    for (const sibling of parent.namedChildren) {
+      if (sibling.startIndex >= current.startIndex) break;
+      if (sibling.type !== "if_statement" || sibling.namedChildren.some((part) => part.type === "elseif_statement" || part.type === "else_statement")) continue;
+      const returns = sibling.childForFieldName("consequence")?.namedChildren.at(-1)?.type === "return_statement";
+      const condition = sibling.childForFieldName("condition");
+      if (returns && condition && slot(filledSlotTested(condition)) === target) return true;
+    }
+  }
+
+  return false;
+}
+
 function analyzeFunction(
   fn: FunctionRecord,
   record: ParsedRecord,
@@ -601,6 +673,15 @@ function analyzeFunction(
     }
   }
 
+  const slotAliases = new Map<string, string>();
+  for (const node of nodes) {
+    if (node.type !== "variable_declaration") continue;
+    const { names, expressions } = declarationParts(node);
+    const expression = expressions[0] && unwrapExpression(expressions[0]);
+    if (names.length === 1 && expression && ["identifier", "dot_index_expression", "bracket_index_expression"].includes(expression.type))
+      slotAliases.set(names[0], compactText(expression));
+  }
+
   fn.parameterOrigins = parameterOrigins;
   fn.externalRoots = externalAliases;
   fn.ownedRoots = owned;
@@ -616,12 +697,14 @@ function analyzeFunction(
       const { left } = assignmentSides(node);
       for (const target of left) {
         if (target.type === "identifier") {
-          if (!locals.has(target.text) && !parameters.has(target.text)) fn.directEffect = true;
+          if (!locals.has(target.text) && !parameters.has(target.text) && !fillsEmptySlot(node, target.text, fn.body, slotAliases))
+            fn.directEffect = true;
           continue;
         }
         const root = rootIdentifier(target);
         if (!root) continue;
         if (owned.has(root)) continue;
+        if (fillsEmptySlot(node, compactText(target), fn.body, slotAliases)) continue;
         if (refLocals.has(root) && target.text.replace(/\s+/g, "") === `${root}.current`) continue;
         if (locals.has(root) && latestBlockAssignmentIsOwned(root, node, owned, fn.body)) continue;
         markMutationThroughRoot(fn, root);

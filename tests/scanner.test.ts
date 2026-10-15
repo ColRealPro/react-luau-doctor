@@ -4950,6 +4950,59 @@ return Plain
   );
 });
 
+test("source effects ignore writes that only fill an empty cache slot", async (t) => {
+  const root = tempProject(t, "cache-fills", {
+    "Lookup.luau": `local cache = {}
+local shared = nil
+local count = 0
+
+local Lookup = {}
+
+function Lookup.get(key)
+  local cached = cache[key]
+  if cached then
+    return cached
+  end
+  cached = { key = key }
+  cache[key] = cached
+  return cached
+end
+
+function Lookup.shared()
+  if shared == nil then
+    shared = {}
+  end
+  return shared
+end
+
+function Lookup.count()
+  count += 1
+  return count
+end
+
+return Lookup
+`,
+    "Component.luau": `local React = require(script.Parent.React)
+local Lookup = require(script.Parent.Lookup)
+
+local function Component(props)
+  local entry = Lookup.get(props.key)
+  local shared = Lookup.shared()
+  local count = Lookup.count()
+  return React.createElement("TextLabel", { Text = entry.key .. tostring(shared) .. count })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render").map((diagnostic) => diagnostic.location.line),
+    [7],
+  );
+});
+
 test("source effects follow returned parameters, fresh reassignments, and casts", async (t) => {
   const root = tempProject(t, "returned-parameters", {
     "withA.luau": `local function withA(props, base)
