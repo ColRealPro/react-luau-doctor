@@ -214,13 +214,15 @@ function taskCallbackNode(call: SyntaxNode, context: RuleContext, callback: Func
 function cancellationFlagMatches(taskCallback: SyntaxNode | null, cleanupText: string, callback: FunctionInfo): boolean {
   if (!taskCallback || !callback.body) return false;
   const beforeTask = callback.body.text.slice(0, Math.max(0, taskCallback.startIndex - callback.body.startIndex));
-  const declarations = [...beforeTask.matchAll(/\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*false\b/g)].map((match) => match[1]);
+  const declarations = [...beforeTask.matchAll(/\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(true|false)\b/g)];
 
-  for (const name of declarations) {
+  for (const [, name, initial] of declarations) {
     const escaped = escapeRegExp(name);
-    if (!new RegExp(`\\b${escaped}\\s*=\\s*true\\b`).test(cleanupText)) continue;
-    const taskText = taskCallback.text;
-    const observesCancellation = new RegExp(`(?:if\\s+${escaped}\\s+then[\\s\\S]{0,120}?return|if\\s+not\\s+${escaped}\\s+then|while\\s+not\\s+${escaped}\\b|until\\s+${escaped}\\b)`, "s").test(taskText);
+    const cancelled = initial === "true" ? "false" : "true";
+    if (!new RegExp(`\\b${escaped}\\s*=\\s*${cancelled}\\b`).test(cleanupText)) continue;
+    const observesCancellation = new RegExp(
+      `(?:\\b(?:if|elseif|while|until|and|or|not)\\s+(?:not\\s+)?${escaped}\\b|\\b${escaped}\\s*[~=]=)`,
+    ).test(taskCallback.text);
     if (observesCancellation) return true;
   }
 

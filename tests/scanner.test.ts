@@ -4712,6 +4712,39 @@ return useLeak
   );
 });
 
+test("effect cleanup accepts tasks that check a flag the cleanup changes", async (t) => {
+  const task = (flag: string, initial: string, cancelled: string, guard: string) => `local React = require(script.Parent.React)
+
+local function useLoaded(id)
+  local loaded, setLoaded = React.useState(false)
+  React.useEffect(function()
+    local ${flag} = ${initial}
+    task.spawn(function()
+      task.wait(1)
+      ${guard}
+    end)
+    return function()
+      ${flag} = ${cancelled}
+    end
+  end, { id })
+  return loaded
+end
+
+return useLoaded
+`;
+  const root = tempProject(t, "cancellation-flags", {
+    "useMounted.luau": task("isMounted", "true", "false", "if isMounted and id then setLoaded(true) end"),
+    "useCancelled.luau": task("cancelled", "false", "true", "if cancelled then return end\n      setLoaded(true)"),
+    "useIgnored.luau": task("done", "false", "true", "done = true\n      setLoaded(true)"),
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/effect-needs-cleanup").map((diagnostic) => diagnostic.file),
+    ["useIgnored.luau"],
+  );
+});
+
 test("typeof types and casts before comparisons parse cleanly", async (t) => {
   const root = tempProject(t, "typeof-types", {
     "Component.luau": `local React = require(script.Parent.React)

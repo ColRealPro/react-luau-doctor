@@ -26,6 +26,7 @@
 - Type annotations in multi-name `local` declarations are no longer treated as declared variables
 - `typeof` types and type casts before comparisons no longer cause parse errors
 - `typeof` inside generic and indexer types, multi-line generic type aliases, comments between union members, and function type parameters named after builtin types no longer cause parse errors
+- `effect-needs-cleanup` accepts any task that checks a flag the cleanup changes, such as `if isMounted then` or `if cancelled then return end`
 
 ## 0.20.4
 
