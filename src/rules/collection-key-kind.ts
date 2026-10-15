@@ -1,5 +1,6 @@
 import type { SyntaxNode } from "../syntax";
 import type { RuleContext } from "../types";
+import { variableListTargets } from "../ast/walk";
 import { simpleTypeAliases } from "../parser-compat";
 import { assignmentLeft, declarationNames } from "./helpers";
 
@@ -20,7 +21,7 @@ export function isUnshadowedBuiltin(site: SyntaxNode, name: string): boolean {
     if (current.type === "for_statement") {
       const variables = current.namedChildren.find((child) => child.type === "for_generic_clause")
         ?.namedChildren.find((child) => child.type === "variable_list");
-      if (variables?.namedChildren.some((variable) => variable.text === name)) return false;
+      if (variableListTargets(variables).some((variable) => variable.text === name)) return false;
     }
   }
   return true;

@@ -44,6 +44,11 @@ export function descendantsOfType(node: SyntaxNode, type: string): SyntaxNode[] 
   return result;
 }
 
+// The grammar keeps a bare type annotation such as `local a: Foo, b` inside the
+// variable list as an unlabeled identifier, so only `name` fields are targets
+export function variableListTargets(list: SyntaxNode | null | undefined): SyntaxNode[] {
+  return list?.childrenForFieldName("name") ?? [];
+}
 
 export function parameterBindingNames(parameters: SyntaxNode | null | undefined): string[] {
   if (!parameters) return [];

@@ -18,6 +18,7 @@ export interface SyntaxNode {
   isMissing: boolean;
   hasError: boolean;
   childForFieldName(name: string): SyntaxNode | null;
+  childrenForFieldName(name: string): SyntaxNode[];
 }
 
 export interface SyntaxTree {

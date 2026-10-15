@@ -15,6 +15,7 @@ import packageJson from "../package.json";
 import { renderSummaryComment } from "../src/ci/report";
 import {
   GitHubClient,
+  publishCheckRun,
   reconcileReviews,
   type Review,
   type ReviewAnalysis,
@@ -24,6 +25,9 @@ import {
 import type { Diagnostic, ScanReport } from "../src/types";
 
 const cli = path.resolve(import.meta.dir, "../src/cli.ts");
+
+// Local mock servers do not need GitHub's spacing between mutative requests
+process.env.DOCTOR_GITHUB_MUTATION_INTERVAL_MS = "0";
 
 interface Result {
   status: number | null;
@@ -292,12 +296,14 @@ async function reconcile(
   mock: MockGitHub,
   current: ReviewAnalysis,
   canInline = (_entry: Diagnostic) => true,
+  limit = 20,
 ): Promise<number> {
   return reconcileReviews(
     mock.client,
     { reviews: structuredClone(mock.reviews), comments: structuredClone(mock.comments) },
     current,
     canInline,
+    limit,
   );
 }
 
@@ -366,6 +372,75 @@ test("inline selection prioritizes severity and alternates files", async (t) => 
   );
 });
 
+test("inline reviews respect the configured limit and track reviews above the old cap", async (t) => {
+  const mock = mockGitHub(t);
+  const diagnostics = Array.from({ length: 60 }, (_, index) =>
+    diagnostic("Component.luau", index + 1, "warning"),
+  );
+  const inline = () => true;
+  assert.equal(await reconcile(mock, analysis(diagnostics), inline, 50), 50);
+  await reconcile(mock, analysis(diagnostics), inline, 50);
+  assert.equal(mock.reviews.length, 1);
+  assert.equal(mock.comments.length, 50);
+});
+
+test("check runs append annotations in batches before completing", async (t) => {
+  const requests: Array<{ method: string; path: string; body: any }> = [];
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      requests.push({
+        method: request.method,
+        path: new URL(request.url).pathname,
+        body: await request.json(),
+      });
+
+      return Response.json({ id: 5 });
+    },
+  });
+  const saved = { token: process.env.GITHUB_TOKEN, api: process.env.GITHUB_API_URL };
+  process.env.GITHUB_TOKEN = "local-test-token";
+  process.env.GITHUB_API_URL = server.url.toString();
+  t.after(() => {
+    server.stop(true);
+
+    if (saved.token === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = saved.token;
+
+    if (saved.api === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = saved.api;
+  });
+  const annotations = Array.from({ length: 120 }, (_, index) => ({
+    path: "Component.luau",
+    start_line: index + 1,
+    end_line: index + 1,
+    annotation_level: "warning" as const,
+    title: "example-rule",
+    message: "Diagnostic message",
+  }));
+  await publishCheckRun(
+    new GitHubClient("test/project", 0, { head: "head", base: "", runId: "", attempt: "1" }),
+    "head",
+    { conclusion: "neutral", title: "Findings", summary: "Summary", annotations },
+  );
+  assert.deepEqual(
+    requests.map((request) => [
+      request.method,
+      request.path,
+      request.body.output.annotations.length,
+    ]),
+    [
+      ["POST", "/repos/test/project/check-runs", 50],
+      ["PATCH", "/repos/test/project/check-runs/5", 50],
+      ["PATCH", "/repos/test/project/check-runs/5", 20],
+    ],
+  );
+  assert.equal(requests[0].body.status, "in_progress");
+  assert.equal(requests[2].body.status, "completed");
+  assert.equal(requests[2].body.conclusion, "neutral");
+});
+
 test("ci install writes a version-pinned GitHub workflow", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-ci-install-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -381,6 +456,7 @@ test("ci install writes a version-pinned GitHub workflow", (t) => {
   assert.match(workflow, /--comment/);
   assert.match(workflow, /--review-comments/);
   assert.match(workflow, /--commit-status/);
+  assert.match(workflow, /checks: write/);
   assert.match(workflow, /contents: read/);
   assert.doesNotMatch(workflow, /contents: write|pull_request_target/);
   assert.match(workflow, /actions\/upload-artifact@v4/);
@@ -405,8 +481,14 @@ test("ci config rewrites gate, scope, and reporting settings", (t) => {
     "--no-comment",
     "--no-review-comments",
     "--no-commit-status",
+    "--max-annotations",
+    "100",
+    "--max-review-comments",
+    "30",
   ]);
   assert.equal(configured.status, 0, configured.stderr);
+  const reconfigured = run(["ci", "config", "--yes", "--cwd", root, "--max-annotations", "0"]);
+  assert.equal(reconfigured.status, 0, reconfigured.stderr);
   const workflow = fs.readFileSync(
     path.join(root, ".github/workflows/react-luau-doctor.yml"),
     "utf8",
@@ -416,6 +498,11 @@ test("ci config rewrites gate, scope, and reporting settings", (t) => {
   assert.match(workflow, /--no-comment/);
   assert.match(workflow, /--no-review-comments/);
   assert.match(workflow, /--no-commit-status/);
+  assert.match(workflow, /--max-annotations 0/);
+  assert.match(workflow, /--max-review-comments 30/);
+  const capped = run(["ci", "config", "--yes", "--cwd", root, "--max-review-comments", "51"]);
+  assert.notEqual(capped.status, 0);
+  assert.match(capped.stderr, /--max-review-comments must be an integer from 0 to 50/);
 });
 
 test("ci upgrade refreshes the npm pin while preserving workflow configuration", (t) => {
@@ -656,7 +743,7 @@ async function runWithApi(
   return { stdout, stderr, status };
 }
 
-test("PR reporting keeps summaries PR-wide and new inline reviews scoped to the latest push", async (t) => {
+test("PR reporting keeps summaries PR-wide and new inline reviews scoped to the latest push", { timeout: 30_000 }, async (t) => {
   const root = createRepo(VALID_COMPONENT);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const base = git(root, "rev-parse", "HEAD");
@@ -812,6 +899,37 @@ test("suppressed syntax failures cannot produce clean CI results, success status
   assert.match(fs.readFileSync(path.join(root, "outputs.txt"), "utf8"), /analysis-complete=false/);
 });
 
+test("push check run annotations use repository paths for nested scan directories", async (t) => {
+  const root = createRepo(VALID_COMPONENT);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, "game"));
+  fs.writeFileSync(path.join(root, "game", "Component.luau"), INVALID_COMPONENT);
+  git(root, "add", ".");
+  git(root, "commit", "-m", "nested");
+  const checkRuns: any[] = [];
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      if (new URL(request.url).pathname.endsWith("/check-runs")) {
+        checkRuns.push(await request.json());
+      }
+
+      return Response.json({ id: 1 });
+    },
+  });
+  t.after(() => server.stop(true));
+  const result = await runWithApi(root, "", server.url.toString(), {
+    args: ["--directory", "game"],
+    env: { GITHUB_EVENT_NAME: "push", GITHUB_SHA: git(root, "rev-parse", "HEAD") },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(
+    checkRuns[0]?.output.annotations.map((annotation: any) => annotation.path),
+    ["game/Component.luau"],
+  );
+});
+
 test("read-only fork token failures preserve diagnostics and the blocking gate", async (t) => {
   const root = createRepo(VALID_COMPONENT);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -831,6 +949,8 @@ test("read-only fork token failures preserve diagnostics and the blocking gate",
   assert.match(result.stderr, /could not update the sticky PR comment/);
   assert.match(result.stderr, /could not update inline review comments/);
   assert.match(result.stderr, /could not publish the commit status/);
+  assert.match(result.stderr, /could not publish check run annotations/);
+  assert.match(result.stdout, /^::error file=Component\.luau/m);
   assert.match(fs.readFileSync(path.join(root, "outputs.txt"), "utf8"), /error-count=1/);
 });
 
@@ -844,6 +964,8 @@ test("generated workflow passes directory values as data, including shell metach
     comment: false,
     reviewComments: false,
     commitStatus: false,
+    maxAnnotations: 10,
+    maxReviewComments: 50,
     directory: ".",
     project: "*",
   });

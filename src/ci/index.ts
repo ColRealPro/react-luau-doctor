@@ -13,9 +13,11 @@ import { diagnosticDifference, renderSummaryComment, type FixedDiagnostic } from
 import {
   GitHubClient,
   StalePublication,
+  publishCheckRun,
   readReviewState,
   reconcileReviews,
   reviewSnapshot,
+  type CheckRunResult,
   type ReviewAnalysis,
   type ReviewFinding,
   type ReviewSnapshot,
@@ -34,6 +36,8 @@ interface CiSettings {
   comment: boolean;
   reviewComments: boolean;
   commitStatus: boolean;
+  maxAnnotations: number;
+  maxReviewComments: number;
   directory: string;
   project: string;
 }
@@ -62,6 +66,8 @@ const DEFAULT_SETTINGS: CiSettings = {
   comment: true,
   reviewComments: true,
   commitStatus: true,
+  maxAnnotations: Number.POSITIVE_INFINITY,
+  maxReviewComments: 20,
   directory: ".",
   project: "*",
 };
@@ -71,6 +77,23 @@ const GITLAB_WORKFLOW = ".gitlab-ci.yml";
 const PACKAGE_SPEC = `${packageJson.name}@${packageJson.version}`;
 function yamlString(value: string): string {
   return JSON.stringify(value);
+}
+
+function workflowFlags(settings: CiSettings): string[] {
+  const limit = (flag: string, value: number, fallback: number) =>
+    value === fallback ? [] : [`${flag} ${Number.isFinite(value) ? value : "unlimited"}`];
+
+  return [
+    settings.comment ? "--comment" : "--no-comment",
+    settings.reviewComments ? "--review-comments" : "--no-review-comments",
+    settings.commitStatus ? "--commit-status" : "--no-commit-status",
+    ...limit("--max-annotations", settings.maxAnnotations, DEFAULT_SETTINGS.maxAnnotations),
+    ...limit(
+      "--max-review-comments",
+      settings.maxReviewComments,
+      DEFAULT_SETTINGS.maxReviewComments,
+    ),
+  ];
 }
 
 export function renderGitHubWorkflow(settings: CiSettings): string {
@@ -85,6 +108,7 @@ permissions:
   contents: read
   pull-requests: write
   statuses: write
+  checks: write
 
 concurrency:
   group: react-luau-doctor-\${{ github.event.pull_request.number || github.ref }}
@@ -115,9 +139,7 @@ jobs:
           --project "$DOCTOR_PROJECT"
           --blocking "$DOCTOR_BLOCKING"
           --scope "$DOCTOR_SCOPE"
-          ${settings.comment ? "--comment" : "--no-comment"}
-          ${settings.reviewComments ? "--review-comments" : "--no-review-comments"}
-          ${settings.commitStatus ? "--commit-status" : "--no-commit-status"}
+          ${workflowFlags(settings).join("\n          ")}
       - name: Upload full Doctor report
         if: always() && steps.doctor.outputs.report-path != ''
         uses: actions/upload-artifact@v4
@@ -168,6 +190,34 @@ function parseScope(value: string): ScanScope {
   }
 
   return value;
+}
+
+// GitHub rate limits reviews with many inline comments, which then publish none of them
+const MAX_REVIEW_COMMENTS = 50;
+
+type LimitFlag = "--max-annotations" | "--max-review-comments";
+
+function parseLimit(value: string, flag: LimitFlag): number {
+  const max = flag === "--max-review-comments" ? MAX_REVIEW_COMMENTS : Number.POSITIVE_INFINITY;
+
+  if (value === "unlimited" && max === Number.POSITIVE_INFINITY) return max;
+
+  if (!/^(?:0|[1-9]\d*)$/.test(value) || Number(value) > max) {
+    throw new Error(
+      Number.isFinite(max)
+        ? `${flag} must be an integer from 0 to ${max}`
+        : `${flag} must be a non-negative integer or unlimited`,
+    );
+  }
+
+  return Number(value);
+}
+
+function setLimit(settings: Partial<CiSettings>, flag: LimitFlag, value: string): void {
+  const limit = parseLimit(value, flag);
+
+  if (flag === "--max-annotations") settings.maxAnnotations = limit;
+  else settings.maxReviewComments = limit;
 }
 
 function parseProvider(value: string): CiProvider {
@@ -226,7 +276,11 @@ function parseCiManageOptions(
     else if (arg === "--no-review-comments") options.reviewComments = false;
     else if (arg === "--commit-status") options.commitStatus = true;
     else if (arg === "--no-commit-status") options.commitStatus = false;
-    else throw new Error(`Unknown ci ${action} option: ${arg}`);
+    else if (arg === "--max-annotations" || arg === "--max-review-comments") {
+      const parsed = nextValue(argv, index, arg);
+      setLimit(options, arg, parsed.value);
+      index = parsed.nextIndex;
+    } else throw new Error(`Unknown ci ${action} option: ${arg}`);
   }
 
   return options;
@@ -267,6 +321,12 @@ function parseManagedWorkflowSettings(filename: string): Partial<CiSettings> {
   if (reviewComments) result.reviewComments = parseBoolean(reviewComments, "review-comments");
 
   if (commitStatus) result.commitStatus = parseBoolean(commitStatus, "commit-status");
+
+  for (const limit of ["--max-annotations", "--max-review-comments"] as const) {
+    const value = text.match(new RegExp(`${limit}\\s+(\\S+)`))?.[1];
+
+    if (value) setLimit(result, limit, value);
+  }
 
   if (project) result.project = project;
 
@@ -503,6 +563,15 @@ function renameResolver(directory: string, head: string): ReviewAnalysis["canoni
   };
 }
 
+// Full scans can run outside a repository, but annotation paths and links must be repo-relative
+function optionalGitRoot(directory: string): string {
+  try {
+    return findGitRoot(directory);
+  } catch {
+    return directory;
+  }
+}
+
 interface CiScan {
   repoRoot: string;
   report: ScanReport;
@@ -519,7 +588,7 @@ async function scanForCi(
   snapshot?: ReviewSnapshot,
 ): Promise<CiScan> {
   const directory = path.resolve(settings.directory);
-  const repoRoot = isPullRequest ? findGitRoot(directory) : directory;
+  const repoRoot = isPullRequest ? findGitRoot(directory) : optionalGitRoot(directory);
   const roots = resolveCiProjectRoots(directory, settings.project);
   const canonicalFile = renameResolver(repoRoot, head);
   const historicalFiles = new Set<string>();
@@ -948,6 +1017,48 @@ async function publishCommitStatus(
   else await client.request(`/statuses/${sha}`, { method: "POST", body });
 }
 
+function checkRunResult(
+  report: ScanReport,
+  annotated: Diagnostic[],
+  annotationPath: (diagnostic: Diagnostic) => string,
+): CheckRunResult {
+  const { error, warning, suggestion } = report.counts;
+  const count = (value: number, name: string) => `${value} ${name}${value === 1 ? "" : "s"}`;
+  const runUrl = githubRunUrl();
+  const shown =
+    annotated.length < report.diagnostics.length
+      ? `Showing ${annotated.length} of ${report.diagnostics.length} findings · `
+      : "";
+
+  return {
+    conclusion: report.partial || report.diagnostics.length ? "neutral" : "success",
+    title: report.partial
+      ? "Analysis incomplete"
+      : report.diagnostics.length
+        ? `${count(error, "error")} · ${count(warning, "warning")} · ${count(suggestion, "suggestion")}`
+        : "No issues found",
+    summary: `${shown}See the ${runUrl ? `[workflow summary](${runUrl})` : "workflow summary"} for the full report`,
+    annotations: annotated.map((diagnostic) => {
+      const { line, column, endLine, endColumn } = diagnostic.location;
+
+      return {
+        path: annotationPath(diagnostic),
+        start_line: line,
+        end_line: endLine,
+        ...(line === endLine ? { start_column: column, end_column: endColumn } : {}),
+        annotation_level:
+          diagnostic.severity === "error"
+            ? "failure"
+            : diagnostic.severity === "warning"
+              ? "warning"
+              : "notice",
+        title: diagnostic.rule,
+        message: diagnostic.message,
+      };
+    }),
+  };
+}
+
 interface CiRunOptions extends CiSettings {}
 
 function parseCiRunOptions(argv: string[]): CiRunOptions {
@@ -978,7 +1089,11 @@ function parseCiRunOptions(argv: string[]): CiRunOptions {
     else if (arg === "--no-review-comments") settings.reviewComments = false;
     else if (arg === "--commit-status") settings.commitStatus = true;
     else if (arg === "--no-commit-status") settings.commitStatus = false;
-    else throw new Error(`Unknown ci run option: ${arg}`);
+    else if (arg === "--max-annotations" || arg === "--max-review-comments") {
+      const parsed = nextValue(argv, index, arg);
+      setLimit(settings, arg, parsed.value);
+      index = parsed.nextIndex;
+    } else throw new Error(`Unknown ci run option: ${arg}`);
   }
 
   return settings;
@@ -1032,9 +1147,33 @@ async function runCiJob(argv: string[]): Promise<void> {
   process.stdout.write(
     `${renderTextReport(report, true, false, false, process.stdout.columns ?? 120)}\n`,
   );
-  const annotations = renderAnnotations(report);
+  const severityOrder = { error: 0, warning: 1, suggestion: 2 };
+  const annotated = [...report.diagnostics]
+    .sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity])
+    .slice(0, settings.maxAnnotations);
+  let checkRunPublished = false;
 
-  if (annotations) process.stdout.write(`${annotations}\n`);
+  if (client && annotated.length) {
+    try {
+      await publishCheckRun(
+        client,
+        head,
+        checkRunResult(report, annotated, (diagnostic) =>
+          repoRelativeDiagnosticPath(settings.directory, diagnostic.file, scan.repoRoot),
+        ),
+      );
+      checkRunPublished = true;
+    } catch (error) {
+      process.stderr.write(
+        `react-luau-doctor: could not publish check run annotations; using workflow annotations: ${errorMessage(error)}\n`,
+      );
+    }
+  }
+
+  if (!checkRunPublished && annotated.length) {
+    // GitHub caps workflow command annotations, so errors are emitted first
+    process.stdout.write(`${renderAnnotations({ ...report, diagnostics: annotated })}\n`);
+  }
 
   writeOutput("score", report.score);
   writeOutput("total-issues", report.diagnostics.length);
@@ -1184,6 +1323,7 @@ async function runCiJob(argv: string[]): Promise<void> {
             introduced,
           },
           canInline,
+          settings.maxReviewComments,
         );
       } catch (error) {
         stale ||= error instanceof StalePublication;

@@ -2,6 +2,7 @@ interface BracketDepth {
   parentheses: number;
   brackets: number;
   braces: number;
+  angles: number;
 }
 
 interface Range {
@@ -39,11 +40,19 @@ function scanTypeLine(text: string, depth: BracketDepth): void {
     else if (char === "]") depth.brackets = Math.max(0, depth.brackets - 1);
     else if (char === "{") depth.braces += 1;
     else if (char === "}") depth.braces = Math.max(0, depth.braces - 1);
+    else if (char === "<") depth.angles += 1;
+    else if (char === ">" && text[index - 1] !== "-")
+      depth.angles = Math.max(0, depth.angles - 1);
   }
 }
 
 function depthIsZero(depth: BracketDepth): boolean {
-  return depth.parentheses === 0 && depth.brackets === 0 && depth.braces === 0;
+  return (
+    depth.parentheses === 0 &&
+    depth.brackets === 0 &&
+    depth.braces === 0 &&
+    depth.angles === 0
+  );
 }
 
 function lineData(source: string): { lines: string[]; offsets: number[] } {
@@ -239,7 +248,12 @@ function maskTypeAliases(source: string, mask: Uint8Array): Range[] {
     )
       continue;
 
-    const depth: BracketDepth = { parentheses: 0, brackets: 0, braces: 0 };
+    const depth: BracketDepth = {
+      parentheses: 0,
+      brackets: 0,
+      braces: 0,
+      angles: 0,
+    };
     let sawExpression = false;
     let endLine = lineIndex;
 
@@ -268,7 +282,12 @@ function maskTypeAliases(source: string, mask: Uint8Array): Range[] {
         lookahead < lines.length;
         lookahead += 1
       ) {
-        nextNonEmpty = lines[lookahead].trim();
+        const codeStart = offsets[lookahead];
+        nextNonEmpty = lines[lookahead]
+          .split("")
+          .filter((_, index) => isCode(mask, codeStart + index))
+          .join("")
+          .trim();
 
         if (nextNonEmpty.length > 0) break;
       }
@@ -637,17 +656,128 @@ function genericFunctionReturnPrefixRanges(
   return ranges;
 }
 
-function normalizeLocalTypeofAnnotations(
+// The bundled grammar reads `x :: number < y` as the start of generic type
+// arguments. Casts are type-only, so blanking them keeps the comparison
+function castsBeforeLessThanRanges(source: string, mask: Uint8Array): Range[] {
+  const ranges: Range[] = [];
+  const pattern = /::\s*[A-Za-z_][A-Za-z0-9_.]*\??(?=\s*<(?:=|\s))/g;
+
+  for (const match of source.matchAll(pattern)) {
+    if (isCode(mask, match.index, match.index + match[0].length))
+      ranges.push({ start: match.index, end: match.index + match[0].length });
+  }
+
+  return ranges;
+}
+
+const typeContextBefore =
+  /(?:\blocal\s+[A-Za-z_][A-Za-z0-9_]*\s*:|::|:(?=\s)|[|&]|->)\s*$/;
+
+function enclosingOpener(
+  source: string,
+  mask: Uint8Array,
+  position: number,
+): number | null {
+  let depth = 0;
+
+  for (let cursor = position - 1; cursor >= 0; cursor -= 1) {
+    if (!isCode(mask, cursor)) continue;
+
+    const char = source[cursor];
+
+    if (char === ">" && source[cursor - 1] !== "-") depth += 1;
+    else if (char === ")" || char === "}" || char === "]") depth += 1;
+    else if (/[<({[]/.test(char)) {
+      if (depth === 0) return cursor;
+      depth -= 1;
+    } else if (depth === 0 && /[=;]/.test(char)) return null;
+  }
+
+  return null;
+}
+
+// A bracket opens type syntax only when it sits in a type position itself, so
+// walk outward through enclosing brackets until one is anchored to a type
+// token. Generic `Name<` anchors through the name before it
+function insideTypeBrackets(
+  source: string,
+  mask: Uint8Array,
+  position: number,
+): boolean {
+  const opener = enclosingOpener(source, mask, position);
+
+  if (opener === null) return false;
+
+  let anchor = opener;
+
+  if (source[opener] === "<") {
+    const name = source.slice(0, opener).match(/[A-Za-z_][A-Za-z0-9_.]*\s*$/);
+
+    if (!name) return false;
+
+    anchor = opener - name[0].length;
+  }
+
+  const before = source.slice(0, anchor);
+
+  if (typeContextBefore.test(before)) return true;
+  if (!/[<({[,]\s*$/.test(before)) return false;
+
+  return insideTypeBrackets(source, mask, anchor);
+}
+
+// The bundled grammar rejects function type parameters named after builtin
+// types, such as `(number: number) -> ()`. Those names are type-only, so give
+// every one an equal-width identifier
+function normalizeFunctionTypeParameterNames(
+  source: string,
+  mask: Uint8Array,
+): string {
+  const starts: number[] = [];
+  const pattern = /[(,]\s*([A-Za-z_][A-Za-z0-9_]*)\s*:(?!:)/g;
+
+  for (const match of source.matchAll(pattern)) {
+    const nameStart = match.index + match[0].indexOf(match[1]);
+
+    if (!isCode(mask, match.index, match.index + match[0].length)) continue;
+
+    const opener = enclosingOpener(source, mask, nameStart);
+
+    if (
+      opener !== null &&
+      source[opener] === "(" &&
+      insideTypeBrackets(source, mask, opener + 1)
+    )
+      starts.push(nameStart);
+  }
+
+  let output = source;
+
+  for (const start of starts.sort((a, b) => b - a)) {
+    output = `${output.slice(0, start)}_${output.slice(start + 1)}`;
+  }
+
+  return output;
+}
+
+// The bundled grammar only accepts `typeof(...)` types in a few positions.
+// Annotations, casts, unions, intersections, return types, and type brackets
+// are type-only, while a runtime `typeof(x)` call never follows these tokens
+function normalizeTypeofAnnotations(
   source: string,
   mask: Uint8Array,
 ): string {
   const replacements: Array<{ start: number; end: number; value: string }> = [];
-  const pattern = /\blocal\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*typeof\s*\(/g;
+  const pattern =
+    /(?:\blocal\s+[A-Za-z_][A-Za-z0-9_]*\s*:|::|:(?=\s)|[|&]|->|([<,[]))\s*typeof\s*\(/g;
 
   for (const match of source.matchAll(pattern)) {
     const matchStart = match.index;
 
     if (!isCode(mask, matchStart, matchStart + match[0].length)) continue;
+
+    if (match[1] && !insideTypeBrackets(source, mask, matchStart + 1))
+      continue;
 
     const typeofStart = matchStart + match[0].lastIndexOf("typeof");
     const open = source.indexOf("(", typeofStart + 6);
@@ -778,8 +908,9 @@ export function parserCompatibleSource(source: string): string {
     mask,
   );
   const packCompatible = normalizeGenericTypePackUses(literalCompatible, mask);
-  const typeofCompatible = normalizeLocalTypeofAnnotations(
-    packCompatible,
+  const typeofCompatible = normalizeTypeofAnnotations(packCompatible, mask);
+  const parameterCompatible = normalizeFunctionTypeParameterNames(
+    typeofCompatible,
     mask,
   );
 
@@ -789,9 +920,10 @@ export function parserCompatibleSource(source: string): string {
     ...attributeRanges(source, mask),
     ...explicitTypeArgumentRanges(source, mask),
     ...genericFunctionReturnPrefixRanges(source, mask),
+    ...castsBeforeLessThanRanges(source, mask),
   ];
 
-  const masked = applyMasks(typeofCompatible, ranges);
+  const masked = applyMasks(parameterCompatible, ranges);
 
   // tree-sitter-luau 1.2.0 treats a statement-level assignment to the valid
   // Luau identifier `type` as a malformed type alias. Replace only that token

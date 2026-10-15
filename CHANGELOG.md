@@ -1,16 +1,37 @@
 # Changelog
 
-## Unreleased
+## 0.21.0
 
-> TODO: update `docs/rules.md`
+### Added
+
+- `--max-annotations` CI setting to limit or disable annotations
+- `--max-review-comments` CI setting to change the inline review comment limit from the default of 20, up to 50
 
 ### Changed
 
+- GitHub CI annotations are no longer limited to 10 per step. Run `ci upgrade` to grant the new `checks: write` permission
+- GitHub CI follows GitHub's request guidance to avoid rate limits
 - `react-luau/prefer-binding-over-state-candidate` is now off by default because its findings were mostly low-value
+- Files that use React through `Roact` or `RoactCompat` are now analyzed as React
+- `no-side-effects-in-render`, `no-task-spawn-in-render`, and `no-yield-in-render` now check `useMemo` callbacks, which also run during render
 
 ### Fixed
 
+- CI annotations and file links on push runs now point to the right files when `--directory` scans a subfolder
 - `react-luau/prefer-binding-over-state-candidate` no longer suggests splitting measurement state when an analyzed child component still needs the value through React state, such as in effect dependencies or hook arguments
+- `rules-of-hooks` accepts hooks behind conditions on module fields that are set at load time and never written or re-exported elsewhere in the project
+- `exhaustive-deps` no longer requires `useCallback` and `useMemo` values whose dependencies are all stable, such as callbacks that only capture state setters
+- `rerender-unnecessary-usecallback` only skips callbacks captured by another hook when the callback has reactive dependencies
+- `effect-needs-cleanup` follows connections stored in ref fields and collections to their cleanup
+- `no-side-effects-in-render` follows side effects through returned parameters, reassigned values, and type casts
+- Type annotations in multi-name `local` declarations are no longer treated as declared variables
+- `typeof` types and type casts before comparisons no longer cause parse errors
+- `typeof` inside generic and indexer types, multi-line generic type aliases, comments between union members, and function type parameters named after builtin types no longer cause parse errors
+- `effect-needs-cleanup` accepts any task that checks a flag the cleanup changes, such as `if isMounted then` or `if cancelled then return end`
+- `effect-needs-cleanup` accepts destroying an ancestor that a connected Instance was parented to in the effect
+- `rules-of-hooks` explains hooks inside `pcall` and `xpcall` callbacks instead of reporting them as outside a component
+- `no-side-effects-in-render` no longer treats lazy caches and one-time initialization in called code as side effects, such as filling `cache[key]` only when it is empty
+- `no-ref-current-in-render` accepts nil-guarded lazy ref initialization that picks the initial value through nested branches
 
 ## 0.20.4
 

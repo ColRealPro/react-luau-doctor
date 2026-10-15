@@ -48,7 +48,7 @@ Add `react-luau/` before the names below when using them in your [config](cli.md
 | `no-random-key`                 | error      | A child's key changes randomly between renders                                           |
 | `no-yield-in-render`            | error      | Render yields execution                                                                  |
 | `no-task-spawn-in-render`       | error      | Render schedules asynchronous work                                                       |
-| `no-side-effects-in-render`     | error      | Render creates instances, starts tweens, subscribes to events, or changes external state |
+| `no-side-effects-in-render`     | error      | Render or a `useMemo` callback creates instances, subscribes, or changes external state  |
 | `no-prop-mutation`              | error      | A component changes its props                                                            |
 | `no-static-name-prop`           | warning    | A child uses a static `Name` prop instead of a child table key                           |
 | `no-array-index-as-key`         | suggestion | A child uses its position in a changing list as its identity                             |
@@ -58,7 +58,7 @@ Add `react-luau/` before the names below when using them in your [config](cli.md
 | Rule                                  | Default    | What it catches                                                                |
 | ------------------------------------- | ---------- | ------------------------------------------------------------------------------ |
 | `prefer-binding-over-state`           | warning    | Frequent external state updates only change properties that could use bindings |
-| `prefer-binding-over-state-candidate` | suggestion | A state value might suit a binding, but its consumers need a closer look       |
+| `prefer-binding-over-state-candidate` | off        | A state value might suit a binding, but its consumers need a closer look       |
 | `rerender-unstable-memo-props`        | warning    | Fresh reference props can prevent a memoized child from skipping renders       |
 | `rerender-high-frequency-state`       | warning    | Frame callbacks update state that rerenders an expensive component tree        |
 | `rerender-unnecessary-usememo`        | warning    | `useMemo` caches a simple calculation                                          |

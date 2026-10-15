@@ -1,4 +1,5 @@
 import type { SyntaxNode } from "./syntax";
+import { variableListTargets } from "./ast/walk";
 import type { RuleContext } from "./types";
 
 /**
@@ -124,7 +125,7 @@ function declarationInitializer(node: SyntaxNode, name: string): SyntaxNode | nu
   const variables = assignment?.namedChildren.find((child) => child.type === "variable_list")
     ?? node.namedChildren.find((child) => child.type === "variable_list");
   const expressions = assignment?.namedChildren.find((child) => child.type === "expression_list");
-  const names = variables?.namedChildren.filter((child) => child.type === "identifier") ?? [];
+  const names = variableListTargets(variables).filter((child) => child.type === "identifier");
   const index = names.findIndex((candidate) => candidate.text === name);
   if (index < 0) return undefined;
   return expressions?.namedChildren[index] ?? expressions?.namedChildren[0] ?? null;

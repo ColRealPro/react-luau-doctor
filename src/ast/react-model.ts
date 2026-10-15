@@ -1,7 +1,7 @@
 import { normalizeRequireTarget, resolveModuleReference } from "../module-resolution";
 import type { SyntaxNode } from "../syntax";
 import type { FunctionInfo, ProjectModel, ReactModel, StateBinding } from "../types";
-import { nodeKey, normalizeExpressionText, parameterBindingNames, sameNode, walk } from "./walk";
+import { nodeKey, normalizeExpressionText, parameterBindingNames, sameNode, variableListTargets, walk } from "./walk";
 
 const REACT_HOOKS = new Set([
   "useState",
@@ -61,6 +61,14 @@ function getFunctionName(node: SyntaxNode): string | null {
 function requireTargetContainsModule(target: string, moduleName: string): boolean {
   return (target.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [])
     .some((token) => token.toLowerCase() === moduleName.toLowerCase());
+}
+
+// RoactCompat re-exports React's element, ref, context, and binding APIs, and
+// legacy Roact shares their semantics, so both resolve to React members
+const REACT_PACKAGE_NAMES = ["React", "RoactCompat", "Roact"];
+
+export function requireTargetIsReact(target: string): boolean {
+  return REACT_PACKAGE_NAMES.some((name) => requireTargetContainsModule(target, name));
 }
 
 function resolvePath(
@@ -190,7 +198,7 @@ function declarationNames(node: SyntaxNode): string[] {
   if (node.type !== "variable_declaration") return [];
   const assignment = node.namedChildren.find((child) => child.type === "assignment_statement");
   const variableList = assignment?.namedChildren.find((child) => child.type === "variable_list");
-  return variableList?.namedChildren.filter((child) => child.type === "identifier").map((child) => child.text) ?? [];
+  return variableListTargets(variableList).filter((child) => child.type === "identifier").map((child) => child.text);
 }
 
 function declarationExpressions(node: SyntaxNode): SyntaxNode[] {
@@ -312,7 +320,7 @@ export function buildReactModel(root: SyntaxNode, project?: ProjectModel): React
     if (requireTargetContainsModule(target, "ReactRoblox")) {
       reactRobloxNamespaces.add(localName);
       isReactFile = true;
-    } else if (requireTargetContainsModule(target, "React")) {
+    } else if (requireTargetIsReact(target)) {
       reactNamespaces.add(localName);
       isReactFile = true;
     }
@@ -407,6 +415,14 @@ export function buildReactModel(root: SyntaxNode, project?: ProjectModel): React
     names.add(name);
     map.set(key, names);
   };
+  const hasOnlyStableDependencies = (deps: SyntaxNode | undefined, owner: FunctionInfo | null): boolean => {
+    if (isEmptyDependencyTable(deps)) return true;
+    if (!owner || deps?.type !== "table_constructor") return false;
+    const stable = stableVariablesByFunction.get(nodeKey(owner.node));
+    return deps.namedChildren
+      .filter((child) => child.type === "field")
+      .every((field) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(field.text) && Boolean(stable?.has(field.text)));
+  };
 
   for (const declaration of declarations) {
     const names = declarationNames(declaration);
@@ -461,7 +477,7 @@ export function buildReactModel(root: SyntaxNode, project?: ProjectModel): React
         addScopedVariable(stableVariablesByFunction, owner, names[1]);
       }
     } else if (path === "React.useMemo" && names.length >= 1) {
-      if (isEmptyDependencyTable(args[1])) {
+      if (hasOnlyStableDependencies(args[1], owner)) {
         stableVariables.add(names[0]);
         addScopedVariable(stableVariablesByFunction, owner, names[0]);
       }
@@ -469,8 +485,8 @@ export function buildReactModel(root: SyntaxNode, project?: ProjectModel): React
         addScopedVariable(externalMutableVariablesByFunction, owner, names[0]);
         addScopedVariable(instanceVariablesByFunction, owner, names[0]);
       }
-    } else if (path === "React.useCallback" && names.length >= 1 && isEmptyDependencyTable(args[1])) {
-      // Empty-dependency callbacks keep a stable identity. Their own stale captures are
+    } else if (path === "React.useCallback" && names.length >= 1 && hasOnlyStableDependencies(args[1], owner)) {
+      // Callbacks with only stable dependencies keep a stable identity. Their own stale captures are
       // diagnosed on the useCallback dependency table instead of cascading into every
       // effect that consumes the callback.
       stableVariables.add(names[0]);
@@ -501,7 +517,7 @@ export function buildReactModel(root: SyntaxNode, project?: ProjectModel): React
     if (!owner || (!owner.isComponent && !owner.isHook)) continue;
     const variableList = assignment.namedChildren.find((child) => child.type === "variable_list");
     const expressionList = assignment.namedChildren.find((child) => child.type === "expression_list");
-    const names = variableList?.namedChildren.filter((child) => child.type === "identifier").map((child) => child.text) ?? [];
+    const names = variableListTargets(variableList).filter((child) => child.type === "identifier").map((child) => child.text);
     const expression = expressionList?.namedChildren[0];
     if (!expression || expression.type !== "function_call") continue;
     const rawPath = expression.childForFieldName("name")?.text ?? "";

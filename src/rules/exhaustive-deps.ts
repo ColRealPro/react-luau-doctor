@@ -207,15 +207,14 @@ function capturedDependencyPaths(
   return captured;
 }
 
-function localFunctionNode(owner: FunctionInfo, name: string, context: RuleContext): SyntaxNode | null {
+function localFunctionNode(owner: FunctionInfo, name: string): SyntaxNode | null {
   if (!owner.body) return null;
   for (const statement of owner.body.namedChildren) {
     if (statement.type === "function_declaration" && statement.childForFieldName("name")?.text === name) return statement;
-    if (statement.type !== "variable_declaration" || !declarationNames(statement).includes(name)) continue;
-    const prefix = statement.text.split("=", 1)[0] ?? "";
-    if (!new RegExp(`\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\b`).test(prefix)) continue;
-    const fn = [...context.walk(statement)].find((node) => node.type === "function_definition");
-    if (fn) return fn;
+    if (statement.type !== "variable_declaration") continue;
+    const index = declarationNames(statement).indexOf(name);
+    const value = index >= 0 ? declarationExpressions(statement)[index] : undefined;
+    if (value?.type === "function_definition") return value;
   }
   return null;
 }
@@ -236,7 +235,7 @@ function expandLocalFunctionCaptures(
       result.add(capture);
       return;
     }
-    const fn = localFunctionNode(owner, capture, context);
+    const fn = localFunctionNode(owner, capture);
     if (visiting.has(capture)) return;
     if (!fn) {
       result.add(capture);

@@ -4544,3 +4544,569 @@ return Component
     assert.equal(diagnostic.message.includes("may be"), ["ConditionalReassignment.luau", "MixedLiteral.luau", "NumericLiteralMap.luau", "Reassigned.luau"].includes(diagnostic.file));
   }
 });
+
+function tempProject(t: { after(fn: () => void): void }, name: string, files: Record<string, string>): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `doctor-${name}-`));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const [file, source] of Object.entries(files)) fs.writeFileSync(path.join(root, file), source);
+  return root;
+}
+
+test("Roact and RoactCompat namespaces are analyzed as React", async (t) => {
+  const root = tempProject(t, "roact-namespace", {
+    "Component.luau": `local Roact = require(script.Parent.Roact)
+local useThing = require(script.Parent.useThing)
+
+local function Component(props)
+  if props.enabled then
+    useThing()
+  end
+  return Roact.createElement("Frame")
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.equal(report.scannedFiles, 1);
+  assert.ok(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks"));
+});
+
+test("type annotations in multi-name locals are not treated as declared names", async (t) => {
+  const root = tempProject(t, "annotated-locals", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component()
+  local value: Value, setValue = React.useState(0)
+  local increment = React.useCallback(function()
+    setValue(1)
+  end, {})
+  return React.createElement("TextButton", { Text = tostring(value), [React.Event.Activated] = increment })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(report.diagnostics.map((diagnostic) => diagnostic.rule), []);
+});
+
+test("rules of hooks accepts fields of load-time module tables that nothing can rewrite", async (t) => {
+  const flags = `local getFlag = require(script.Parent.getFlag)
+
+return {
+  enabled = getFlag("Enabled"),
+  other = getFlag("Other"),
+}
+`;
+  const component = (module: string) => `local React = require(script.Parent.React)
+local Flags = require(script.Parent.${module})
+
+local function Component(props)
+  local value = if Flags.enabled then React.useMemo(function()
+    return { size = props.size }
+  end, { props.size }) else nil
+  if not Flags.other then
+    return nil
+  end
+  local count = React.useState(0)
+  return React.createElement("Frame", { Size = value and value.size, LayoutOrder = count })
+end
+
+return Component
+`;
+  const root = tempProject(t, "load-time-fields", {
+    "Flags.luau": flags,
+    "StableComponent.luau": component("Flags"),
+    "WrittenFlags.luau": flags,
+    "Debug.luau": `local WrittenFlags = require(script.Parent.WrittenFlags)
+
+return function()
+  WrittenFlags.other = true
+end
+`,
+    "WrittenComponent.luau": component("WrittenFlags"),
+    "ExportedFlags.luau": flags,
+    "Package.luau": `return {
+  Flags = require(script.Parent.ExportedFlags),
+}
+`,
+    "ExportedComponent.luau": component("ExportedFlags"),
+    "ModuleFlags.luau": `local getFlag = require(script.Parent.getFlag)
+
+local ModuleFlags = {
+  enabled = getFlag("Enabled"),
+}
+
+ModuleFlags.other = getFlag("Other")
+
+function ModuleFlags.toggle()
+  ModuleFlags.enabled = not ModuleFlags.enabled
+end
+
+return ModuleFlags
+`,
+    "ModuleComponent.luau": component("ModuleFlags"),
+  });
+
+  const report = await scanPath(root);
+  const lines = (file: string) => report.diagnostics
+    .filter((diagnostic) => diagnostic.file === file && diagnostic.rule === "react-luau/rules-of-hooks")
+    .map((diagnostic) => diagnostic.location.line);
+  assert.deepEqual(lines("StableComponent.luau"), []);
+  assert.deepEqual(lines("WrittenComponent.luau"), [11]);
+  assert.deepEqual(lines("ExportedComponent.luau"), [5, 11]);
+  assert.deepEqual(lines("ModuleComponent.luau"), [5]);
+});
+
+test("effect cleanup follows connections stored in ref fields and collections", async (t) => {
+  const root = tempProject(t, "cleanup-containers", {
+    "useConnections.luau": `local React = require(script.Parent.React)
+
+local function useConnections(instance, names)
+  local listener = React.useRef(nil)
+  local named = React.useRef({})
+  React.useEffect(function()
+    local connections = {}
+    table.insert(connections, instance.Changed:Connect(print))
+    listener.current = instance.Destroying:Connect(print)
+    for _, name in names do
+      named.current[name] = instance:GetPropertyChangedSignal(name):Connect(print)
+    end
+    return function()
+      for _, connection in connections do
+        connection:Disconnect()
+      end
+      listener.current:Disconnect()
+      for _, connection in pairs(named.current) do
+        connection:Disconnect()
+      end
+    end
+  end, { instance, names })
+end
+
+return useConnections
+`,
+    "useLeak.luau": `local React = require(script.Parent.React)
+
+local function useLeak(instance)
+  local listener = React.useRef(nil)
+  React.useEffect(function()
+    listener.current = instance.Changed:Connect(print)
+    return function()
+      listener:Disconnect()
+    end
+  end, { instance })
+end
+
+return useLeak
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/effect-needs-cleanup").map((diagnostic) => diagnostic.file),
+    ["useLeak.luau"],
+  );
+});
+
+test("render side effect rules check useMemo callbacks as render code", async (t) => {
+  const root = tempProject(t, "memo-side-effects", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component(props)
+  local folder = React.useMemo(function()
+    return Instance.new("Folder")
+  end, {})
+  local label = React.useMemo(function()
+    return string.upper(props.text)
+  end, { props.text })
+  local create = React.useCallback(function()
+    return Instance.new("Folder")
+  end, {})
+  React.useEffect(function()
+    return function()
+      folder:Destroy()
+    end
+  end, { folder })
+  return React.createElement("TextButton", { Text = label, [React.Event.Activated] = create })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render").map((diagnostic) => diagnostic.location.line),
+    [5],
+  );
+});
+
+test("rules-of-hooks explains hooks inside protected calls", async (t) => {
+  const root = tempProject(t, "protected-hooks", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component(props)
+  local ok, value = pcall(function()
+    return React.useContext(props.context)
+  end)
+  return React.createElement("Frame", { Visible = ok and value })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks").map((diagnostic) => diagnostic.message),
+    ["Hook React.useContext is called inside a pcall callback, so an error can skip it on some renders"],
+  );
+});
+
+test("effect cleanup accepts destroying an ancestor of a connected Instance", async (t) => {
+  const effect = (destroyed: string) => `local React = require(script.Parent.React)
+
+local function useLength(setLength)
+  React.useEffect(function()
+    local container = Instance.new("Folder")
+    local sound = Instance.new("Sound")
+    sound.Parent = container
+    sound:GetPropertyChangedSignal("TimeLength"):Connect(function()
+      setLength(sound.TimeLength)
+    end)
+    return function()
+      ${destroyed}:Destroy()
+    end
+  end, {})
+end
+
+return useLength
+`;
+  const root = tempProject(t, "ancestor-cleanup", {
+    "useAncestor.luau": effect("container"),
+    "useUnrelated.luau": effect("Instance.new(\"Folder\")"),
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/effect-needs-cleanup").map((diagnostic) => diagnostic.file),
+    ["useUnrelated.luau"],
+  );
+});
+
+test("effect cleanup accepts tasks that check a flag the cleanup changes", async (t) => {
+  const task = (flag: string, initial: string, cancelled: string, guard: string) => `local React = require(script.Parent.React)
+
+local function useLoaded(id)
+  local loaded, setLoaded = React.useState(false)
+  React.useEffect(function()
+    local ${flag} = ${initial}
+    task.spawn(function()
+      task.wait(1)
+      ${guard}
+    end)
+    return function()
+      ${flag} = ${cancelled}
+    end
+  end, { id })
+  return loaded
+end
+
+return useLoaded
+`;
+  const root = tempProject(t, "cancellation-flags", {
+    "useMounted.luau": task("isMounted", "true", "false", "if isMounted and id then setLoaded(true) end"),
+    "useCancelled.luau": task("cancelled", "false", "true", "if cancelled then return end\n      setLoaded(true)"),
+    "useIgnored.luau": task("done", "false", "true", "done = true\n      setLoaded(true)"),
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/effect-needs-cleanup").map((diagnostic) => diagnostic.file),
+    ["useIgnored.luau"],
+  );
+});
+
+test("typeof types and casts before comparisons parse cleanly", async (t) => {
+  const root = tempProject(t, "typeof-types", {
+    "Component.luau": `local React = require(script.Parent.React)
+local Base = require(script.Parent.Base)
+
+local context = React.createContext(nil :: Base | typeof(Base))
+
+local function render(component: typeof(Base) | string, value: typeof(Base.value)?): typeof(Base)
+  return component :: typeof(Base)
+end
+
+local function Component(props)
+  local ref = React.useRef(nil :: typeof(props.value)?)
+  if ref.current :: number <= 0 and typeof(props.value) == "number" then
+    return nil
+  end
+  return React.createElement("Frame", { Name = render("Frame", nil) })
+end
+
+return Component :: typeof(Component)
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.equal(report.unverifiedFiles, undefined);
+  assert.ok(!report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/parse-error"));
+});
+
+test("typeof in type brackets, commented unions, and builtin-named function type parameters parse cleanly", async (t) => {
+  const root = tempProject(t, "type-brackets", {
+    "Component.luau": `local React = require(script.Parent.React)
+local Base = require(script.Parent.Base)
+
+export type Variant =
+  typeof(Base.A)
+  -- Deprecated
+  | typeof(Base.B)
+
+export type Props = Readonly<
+  {
+    value: number,
+  }
+>
+
+local renderers: { [typeof("Frame") | string]: (number: number, string: string) -> () } = {}
+
+local function Component(props)
+  local ref = nil :: Ref<typeof(Base)> | nil
+  local kind = renderers[typeof(props.value)]
+  return React.createElement("Frame", { Name = tostring(ref) .. tostring(kind) })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.ok(!report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/parse-error"));
+});
+
+test("useCallback captured by a dependency hook is unobserved only when its captures are stable", async (t) => {
+  const root = tempProject(t, "captured-callback", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component(props)
+  local open, setOpen = React.useState(false)
+  local close = React.useCallback(function()
+    setOpen(false)
+  end, {})
+  local notify = React.useCallback(function()
+    props.onClose()
+  end, { props.onClose })
+  local reset = React.useCallback(function()
+    setOpen(false)
+  end, { setOpen })
+  React.useEffect(function()
+    if not props.visible then
+      close()
+      notify()
+      reset()
+    end
+  end, { props.visible, notify })
+  return React.createElement("Frame", { Visible = open })
+end
+
+return Component
+`,
+    "Plain.luau": `local React = require(script.Parent.React)
+
+local function Plain(props)
+  local open, setOpen = React.useState(false)
+  local close = function()
+    setOpen(false)
+  end
+  local notify = function()
+    props.onClose()
+  end
+  React.useEffect(function()
+    if not props.visible then
+      close()
+      notify()
+    end
+  end, { props.visible, props.onClose })
+  return React.createElement("Frame", { Visible = open })
+end
+
+return Plain
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics
+      .filter((diagnostic) => ["react-luau/rerender-unnecessary-usecallback", "react-luau/exhaustive-deps"].includes(diagnostic.rule))
+      .map((diagnostic) => `${diagnostic.file}:${diagnostic.rule}:${diagnostic.location.line}`),
+    ["Component.luau:react-luau/rerender-unnecessary-usecallback:5", "Component.luau:react-luau/rerender-unnecessary-usecallback:11"],
+  );
+});
+
+test("no-ref-current-in-render allows nested branches inside a nil-guarded lazy initialization", async (t) => {
+  const root = tempProject(t, "nested-lazy-ref", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component(props)
+  local id = React.useRef(nil)
+  if id.current == nil then
+    if props.id then
+      id.current = props.id
+    else
+      id.current = props.nextId()
+    end
+  else
+    id.current = props.id
+  end
+  return React.createElement("TextLabel", { Text = id.current })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-ref-current-in-render").map((diagnostic) => diagnostic.location.line),
+    [12],
+  );
+});
+
+test("source effects ignore writes that only fill an empty cache slot", async (t) => {
+  const root = tempProject(t, "cache-fills", {
+    "Lookup.luau": `local cache = {}
+local shared = nil
+local count = 0
+
+local Lookup = {}
+
+function Lookup.get(key)
+  local cached = cache[key]
+  if cached then
+    return cached
+  end
+  cached = { key = key }
+  cache[key] = cached
+  return cached
+end
+
+function Lookup.shared()
+  if shared == nil then
+    shared = {}
+  end
+  return shared
+end
+
+function Lookup.count()
+  count += 1
+  return count
+end
+
+return Lookup
+`,
+    "Component.luau": `local React = require(script.Parent.React)
+local Lookup = require(script.Parent.Lookup)
+
+local function Component(props)
+  local entry = Lookup.get(props.key)
+  local shared = Lookup.shared()
+  local count = Lookup.count()
+  return React.createElement("TextLabel", { Text = entry.key .. tostring(shared) .. count })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render").map((diagnostic) => diagnostic.location.line),
+    [7],
+  );
+});
+
+test("source effects follow returned parameters, fresh reassignments, and casts", async (t) => {
+  const root = tempProject(t, "returned-parameters", {
+    "withA.luau": `local function withA(props, base)
+  base.A = props.a
+  return base
+end
+
+return withA
+`,
+    "withB.luau": `local withA = require(script.Parent.withA)
+
+local function withB(props, base)
+  local full = withA(props, base) :: any
+  full.B = props.b
+  local extra: any = nil
+  extra = {}
+  extra.C = props.c
+  return full
+end
+
+return withB
+`,
+    "markItem.luau": `local function markItem(items, value)
+  local result = {}
+  for _, item in items do
+    local next = item
+    if item.id == value then
+      next = table.clone(item)
+      next.isChecked = true
+    end
+    table.insert(result, next)
+  end
+  return result
+end
+
+return markItem
+`,
+    "store.luau": `local state = { count = 0 }
+
+return {
+  getState = function()
+    return state
+  end,
+}
+`,
+    "bump.luau": `local store = require(script.Parent.store)
+
+local function bump()
+  local current = store.getState()
+  current.count += 1
+  return current.count
+end
+
+return bump
+`,
+    "Component.luau": `local React = require(script.Parent.React)
+local withB = require(script.Parent.withB)
+local markItem = require(script.Parent.markItem)
+local bump = require(script.Parent.bump)
+
+local function Component(props)
+  local frameProps = withB(props, { Size = props.size })
+  local items = markItem(props.items, props.value)
+  return React.createElement("Frame", frameProps, items, bump())
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics
+      .filter((diagnostic) => ["react-luau/no-side-effects-in-render", "react-luau/no-prop-mutation"].includes(diagnostic.rule))
+      .map((diagnostic) => `${diagnostic.rule}:${diagnostic.location.line}`),
+    ["react-luau/no-side-effects-in-render:9"],
+  );
+});

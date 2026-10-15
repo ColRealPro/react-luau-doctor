@@ -150,6 +150,7 @@ CI commands:
   ci config  [--provider github|gitlab] [--blocking <level>] [--scope <value>] [reporting toggles] [-y] [--cwd <cwd>]
   ci upgrade [--provider github|gitlab] [--pr] [-y] [--cwd <cwd>]
   Reporting toggles: --comment/--no-comment, --review-comments/--no-review-comments, --commit-status/--no-commit-status
+  Reporting limits: --max-annotations <n|unlimited>, --max-review-comments <0-50>
 
 Update commands:
   update                                 Update the global installation to the latest release

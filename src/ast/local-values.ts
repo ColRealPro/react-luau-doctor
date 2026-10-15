@@ -1,6 +1,7 @@
 import type { SyntaxNode } from "../syntax";
 import type { FunctionInfo, RuleContext } from "../types";
-import { normalizeExpressionText, parameterBindingNames } from "./walk";
+import { requireTargetIsReact } from "./react-model";
+import { normalizeExpressionText, parameterBindingNames, variableListTargets } from "./walk";
 
 interface LocalValue {
   value: SyntaxNode;
@@ -57,7 +58,7 @@ function assignedValue(
       ?.namedChildren ?? [];
 
   const index =
-    variables?.namedChildren.findIndex(
+    variableListTargets(variables).findIndex(
       (child) => child.type === "identifier" && child.text === name,
     ) ?? -1;
 
@@ -248,7 +249,9 @@ function resolveReactApiPath(
 
   if (
     visible !== undefined &&
-    (!binding || !/^require\s*\(.*\bReact\b.*\)$/s.test(binding.value.text))
+    (!binding ||
+      !/^require\s*\(.*\)$/s.test(binding.value.text) ||
+      !requireTargetIsReact(binding.value.text))
   )
     return null;
 

@@ -170,6 +170,8 @@ export interface ProjectModel {
   bindingApiAlternatives: Map<string, string>;
   bindingCompatibleComponentProps: Map<string, Set<string>>;
   staticIterationTables: Map<string, Set<string>>;
+  /** Returned module table fields that are fixed once the module finishes loading */
+  loadTimeModuleFields: Map<string, Set<string>>;
   conditionalHookModes: Map<string, ConditionalHookModeSummary>;
   /** Project modules exporting use* functions, classified by whether they currently execute React hook topology. */
   reactHookModules: Map<string, boolean>;
