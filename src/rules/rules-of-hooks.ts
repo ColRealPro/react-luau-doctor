@@ -1253,6 +1253,19 @@ function callbackFunctions(context: RuleContext): Set<number> {
   return callbacks;
 }
 
+function protectedCallOf(context: RuleContext, fnNode: SyntaxNode): string | null {
+  let call = fnNode.parent;
+  while (call && call.type !== "function_call") call = call.parent;
+  if (!call) return null;
+
+  const path = context.getCallPath(call);
+  if (path !== "pcall" && path !== "xpcall") return null;
+  if (!context.callArguments(call).some((argument) => unwrapExpression(argument).id === fnNode.id)) return null;
+
+  const owner = context.nearestFunction(call);
+  return owner && (owner.isComponent || owner.isHook) ? path : null;
+}
+
 export const rulesOfHooks: RuleDefinition = {
   id: "react-luau/rules-of-hooks",
   category: "Hooks",
@@ -1299,6 +1312,18 @@ export const rulesOfHooks: RuleDefinition = {
         (!fn.isComponent && !fn.isHook) ||
         callbacks.has(fn.node.id)
       ) {
+        const protectedCall = fn && protectedCallOf(context, fn.node);
+
+        if (protectedCall) {
+          diagnostics.push({
+            node: callNameNode(call),
+            message: `Hook ${path} is called inside a ${protectedCall} callback, so an error can skip it on some renders`,
+            help: `Call the hook at the top level and wrap only the code that can fail in ${protectedCall}`,
+          });
+
+          continue;
+        }
+
         diagnostics.push({
           node: callNameNode(call),
           message: `Hook ${path} is called outside a React component or custom hook`,

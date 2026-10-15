@@ -28,6 +28,7 @@
 - `typeof` inside generic and indexer types, multi-line generic type aliases, comments between union members, and function type parameters named after builtin types no longer cause parse errors
 - `effect-needs-cleanup` accepts any task that checks a flag the cleanup changes, such as `if isMounted then` or `if cancelled then return end`
 - `effect-needs-cleanup` accepts destroying an ancestor that a connected Instance was parented to in the effect
+- `rules-of-hooks` explains hooks inside `pcall` and `xpcall` callbacks instead of reporting them as outside a component
 
 ## 0.20.4
 

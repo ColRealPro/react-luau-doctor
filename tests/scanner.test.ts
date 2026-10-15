@@ -4712,6 +4712,28 @@ return useLeak
   );
 });
 
+test("rules-of-hooks explains hooks inside protected calls", async (t) => {
+  const root = tempProject(t, "protected-hooks", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component(props)
+  local ok, value = pcall(function()
+    return React.useContext(props.context)
+  end)
+  return React.createElement("Frame", { Visible = ok and value })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/rules-of-hooks").map((diagnostic) => diagnostic.message),
+    ["Hook React.useContext is called inside a pcall callback, so an error can skip it on some renders"],
+  );
+});
+
 test("effect cleanup accepts destroying an ancestor of a connected Instance", async (t) => {
   const effect = (destroyed: string) => `local React = require(script.Parent.React)
 
