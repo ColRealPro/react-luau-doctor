@@ -31,6 +31,7 @@
 - `effect-needs-cleanup` accepts destroying an ancestor that a connected Instance was parented to in the effect
 - `rules-of-hooks` explains hooks inside `pcall` and `xpcall` callbacks instead of reporting them as outside a component
 - `no-side-effects-in-render` no longer treats lazy caches and one-time initialization in called code as side effects, such as filling `cache[key]` only when it is empty
+- `no-ref-current-in-render` accepts nil-guarded lazy ref initialization that picks the initial value through nested branches
 
 ## 0.20.4
 

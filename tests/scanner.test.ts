@@ -4950,6 +4950,35 @@ return Plain
   );
 });
 
+test("no-ref-current-in-render allows nested branches inside a nil-guarded lazy initialization", async (t) => {
+  const root = tempProject(t, "nested-lazy-ref", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component(props)
+  local id = React.useRef(nil)
+  if id.current == nil then
+    if props.id then
+      id.current = props.id
+    else
+      id.current = props.nextId()
+    end
+  else
+    id.current = props.id
+  end
+  return React.createElement("TextLabel", { Text = id.current })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-ref-current-in-render").map((diagnostic) => diagnostic.location.line),
+    [12],
+  );
+});
+
 test("source effects ignore writes that only fill an empty cache slot", async (t) => {
   const root = tempProject(t, "cache-fills", {
     "Lookup.luau": `local cache = {}

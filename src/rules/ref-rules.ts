@@ -10,15 +10,20 @@ function refRootFromTarget(target: string, refs: Set<string>): string | null {
 }
 
 function isNilGuardedLazyInit(node: SyntaxNode, refName: string): boolean {
+  const escaped = refName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const guard = new RegExp(`^(?:${escaped}\\.current==nil|nil==${escaped}\\.current|not${escaped}\\.current)$`);
   let current = node.parent;
+  let previous = node;
   while (current) {
-    if (current.type === "if_statement") {
-      const condition = current.childForFieldName("condition")?.text.replace(/\s+/g, "") ?? "";
-      const escaped = refName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      if (new RegExp(`^(?:${escaped}\.current==nil|nil==${escaped}\.current)$`).test(condition)) return true;
-      return false;
-    }
+    // The guard may enclose further branches that pick the initial value
+    if (
+      current.type === "if_statement" &&
+      current.childForFieldName("consequence")?.id === previous.id &&
+      guard.test(current.childForFieldName("condition")?.text.replace(/\s+/g, "") ?? "")
+    )
+      return true;
     if (current.type === "function_definition" || current.type === "function_declaration") return false;
+    previous = current;
     current = current.parent;
   }
   return false;
