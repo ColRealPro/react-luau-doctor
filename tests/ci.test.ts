@@ -356,6 +356,37 @@ test("fixed human discussions stay intact and use actual thread resolution state
   assert.doesNotMatch(mock.reviews[0].body!, /awaiting resolution/);
 });
 
+test("analyzer changes re-verify earlier findings against the reviewed commit", async (t) => {
+  const mock = mockGitHub(t);
+  const first = diagnostic("Component.luau", 3, "error", "First message");
+  const second = diagnostic("Component.luau", 6, "warning", "Second message");
+  await reconcile(mock, analysis([first, second]));
+  const updated = (historical: ReviewAnalysis["historical"], current: Diagnostic[] = []) => ({
+    ...analysis(current),
+    signature: "updated",
+    historical,
+  });
+  await reconcile(mock, updated(async () => new Map()));
+  assert.match(mock.reviews[0].body!, /2 issues awaiting verification/);
+  await reconcile(
+    mock,
+    updated(async () => new Map([["Component.luau", [finding(first)]]]), [first]),
+  );
+  assert.match(mock.reviews[0].body!, /1 still remains in the PR · 1 issue no longer reported/);
+  assert.equal(mock.comments.length, 1);
+  await reconcile(
+    mock,
+    updated(async () => {
+      throw new Error("verified reviews should not be rescanned");
+    }),
+  );
+  assert.match(
+    mock.reviews[0].body!,
+    /\*\*1 of these 2 issues fixed\*\* · 1 issue no longer reported/,
+  );
+  assert.equal(mock.comments.length, 0);
+});
+
 test("inline selection prioritizes severity and alternates files", async (t) => {
   const mock = mockGitHub(t);
   const diagnostics = [
@@ -842,6 +873,114 @@ test("PR reporting keeps summaries PR-wide and new inline reviews scoped to the 
   assert.equal(unavailable.status, 1);
   assert.match(unavailable.stderr, /new inline comments were skipped/);
   assert.equal(reviewRequests().length, 0);
+});
+
+test("PR reviews verify fixes made alongside configuration changes", { timeout: 30_000 }, async (t) => {
+  const root = createRepo(VALID_COMPONENT);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const base = git(root, "rev-parse", "HEAD");
+  fs.writeFileSync(path.join(root, "Component.luau"), INVALID_COMPONENT);
+  git(root, "add", "Component.luau");
+  git(root, "commit", "-m", "introduce finding");
+
+  const reviews: Review[] = [];
+  const comments: ReviewComment[] = [];
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      const url = new URL(request.url);
+      const body: any = request.method === "GET" ? null : await request.json().catch(() => null);
+
+      if (request.method === "GET" && url.pathname.endsWith("/pulls/7")) {
+        return Response.json({
+          head: { sha: git(root, "rev-parse", "HEAD") },
+          base: { sha: base },
+          state: "open",
+        });
+      }
+
+      if (request.method === "GET" && url.pathname.endsWith("/pulls/7/reviews")) {
+        return Response.json(reviews);
+      }
+
+      if (request.method === "GET" && url.pathname.endsWith("/pulls/7/comments")) {
+        return Response.json(comments);
+      }
+
+      if (request.method === "GET") return Response.json([]);
+
+      if (url.pathname === "/graphql") {
+        const nodes = comments.map((comment) => ({
+          isResolved: false,
+          comments: { nodes: [{ databaseId: comment.id }] },
+        }));
+
+        return Response.json({
+          data: {
+            repository: {
+              pullRequest: { reviewThreads: { nodes, pageInfo: { hasNextPage: false } } },
+            },
+          },
+        });
+      }
+
+      if (request.method === "POST" && url.pathname.endsWith("/pulls/7/reviews")) {
+        const id = reviews.length + 1;
+        reviews.push({ id, body: body.body, user: { type: "Bot" }, commit_id: body.commit_id });
+
+        for (const comment of body.comments) {
+          comments.push({
+            id: comments.length + 100,
+            pull_request_review_id: id,
+            path: comment.path,
+            line: comment.line,
+            original_line: comment.line,
+            commit_id: body.commit_id,
+            body: comment.body,
+            user: { type: "Bot" },
+          });
+        }
+      }
+
+      if (request.method === "PUT" && url.pathname.includes("/pulls/7/reviews/")) {
+        reviews.find((review) => review.id === Number(url.pathname.split("/").at(-1)))!.body =
+          body.body;
+      }
+
+      if (request.method === "DELETE" && url.pathname.includes("/pulls/comments/")) {
+        const id = Number(url.pathname.split("/").at(-1));
+        comments.splice(
+          comments.findIndex((comment) => comment.id === id),
+          1,
+        );
+
+        return new Response(null, { status: 204 });
+      }
+
+      return Response.json({ id: 1 });
+    },
+  });
+  t.after(() => server.stop(true));
+
+  await runWithApi(root, base, server.url.toString(), { event: { action: "opened" } });
+  assert.equal(comments.length, 1);
+
+  const before = git(root, "rev-parse", "HEAD");
+  fs.writeFileSync(path.join(root, "Component.luau"), VALID_COMPONENT);
+  fs.writeFileSync(
+    path.join(root, "react-luau-doctor.config.json"),
+    JSON.stringify({ rules: { "react-luau/effect-needs-cleanup": "off" } }),
+  );
+  git(root, "add", ".");
+  git(root, "commit", "-m", "fix finding and update config");
+  const result = await runWithApi(root, base, server.url.toString(), {
+    event: { action: "synchronize", before },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(reviews[0].body!, /\*\*This issue fixed in later commits\*\*/);
+  assert.doesNotMatch(reviews[0].body!, /awaiting verification/);
+  assert.equal(comments.length, 0);
 });
 
 test("suppressed syntax failures cannot produce clean CI results, success statuses, or review cleanup", async (t) => {

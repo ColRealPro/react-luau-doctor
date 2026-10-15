@@ -71,12 +71,17 @@ export function renderReviewProgress(
   fixed: number,
   unknown: number,
   discussions?: number,
+  withdrawn = 0,
 ): string {
   const lines = [`**React-Luau Doctor found ${total} new ${total === 1 ? "issue" : "issues"}**`];
   const status: string[] = [];
 
   if (unknown > 0) {
     status.push(`${unknown} ${unknown === 1 ? "issue" : "issues"} awaiting verification`);
+  }
+
+  if (withdrawn > 0) {
+    status.push(`${issueCount(withdrawn)} no longer reported`);
   }
 
   if (discussions === undefined && fixed > 0) {
@@ -86,6 +91,12 @@ export function renderReviewProgress(
   const discussion = discussions
     ? `${discussions} ${discussions === 1 ? "discussion" : "discussions"} awaiting resolution`
     : "";
+
+  const remaining = total - fixed - unknown - withdrawn;
+
+  if (remaining > 0 && (fixed > 0 || status.length)) {
+    status.unshift(`${remaining} still ${remaining === 1 ? "remains" : "remain"} in the PR`);
+  }
 
   if (fixed > 0) {
     let fixedText = `${fixed} of these ${issueCount(total)} fixed`;
@@ -98,12 +109,6 @@ export function renderReviewProgress(
       } else {
         fixedText = `All ${total} issues fixed in later commits`;
       }
-    }
-
-    const remaining = total - fixed - unknown;
-
-    if (remaining > 0) {
-      status.unshift(`${remaining} still ${remaining === 1 ? "remains" : "remain"} in the PR`);
     }
 
     lines.push(

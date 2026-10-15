@@ -24,7 +24,7 @@ export interface ReviewFinding {
   diagnosticId?: string;
   anchor?: string;
   identity?: string;
-  status: "active" | "fixed" | "unknown";
+  status: "active" | "fixed" | "unknown" | "withdrawn";
 }
 
 export interface ReviewState {
@@ -41,6 +41,7 @@ interface FindingRecord {
   finding: ReviewFinding;
   file: string | null;
   identity: string;
+  verification?: "reproduced" | "withdrawn";
 }
 
 function assignFindings(records: FindingRecord[], analysis: ReviewAnalysis): void {
@@ -48,7 +49,7 @@ function assignFindings(records: FindingRecord[], analysis: ReviewAnalysis): voi
 
   for (const record of records) {
     if (!record.file) {
-      record.finding.status = "unknown";
+      record.finding.status = record.verification === "withdrawn" ? "withdrawn" : "unknown";
       continue;
     }
 
@@ -121,15 +122,83 @@ function assignFindings(records: FindingRecord[], analysis: ReviewAnalysis): voi
       if (match) {
         record.finding.status = "active";
         match.identity = record.identity;
+      } else if (record.verification === "withdrawn") {
+        record.finding.status = "withdrawn";
       } else {
         record.finding.status =
           !ambiguous &&
           !potentiallyRelocated &&
           analysis.verifiedFiles.has(record.file!) &&
           analysis.eligible({ ...record.finding, file: record.file! }) &&
-          record.state.signature === analysis.signature
+          (record.state.signature === analysis.signature || record.verification === "reproduced")
             ? "fixed"
             : "unknown";
+      }
+    }
+  }
+}
+
+// Separates code fixes from analyzer or configuration changes by rescanning the reviewed commit
+async function verifyHistoricalFindings(
+  records: FindingRecord[],
+  analysis: ReviewAnalysis,
+): Promise<void> {
+  if (!analysis.historical) return;
+
+  const pending = new Map<string, FindingRecord[]>();
+
+  for (const record of records) {
+    if (
+      record.state.signature === analysis.signature ||
+      record.finding.status === "withdrawn"
+    ) {
+      continue;
+    }
+
+    pending.set(record.state.commit, [...(pending.get(record.state.commit) ?? []), record]);
+  }
+
+  for (const [commit, entries] of pending) {
+    const scanned = await analysis.historical(commit, [
+      ...new Set(entries.map((entry) => entry.finding.file)),
+    ]);
+    const groups = new Map<string, FindingRecord[]>();
+
+    for (const entry of entries) {
+      if (!scanned.has(entry.finding.file)) continue;
+
+      const key = findingFingerprint(entry.finding);
+      groups.set(key, [...(groups.get(key) ?? []), entry]);
+    }
+
+    for (const [key, group] of groups) {
+      const candidates = scanned
+        .get(group[0].finding.file)!
+        .filter((finding) => findingFingerprint(finding) === key)
+        .map((finding) => ({ finding, used: false }));
+
+      for (const entry of group) {
+        const candidate = candidates.find(
+          (candidate) =>
+            !candidate.used &&
+            entry.finding.anchor !== undefined &&
+            candidate.finding.anchor === entry.finding.anchor,
+        );
+
+        if (!candidate) continue;
+
+        candidate.used = true;
+        entry.verification = "reproduced";
+      }
+
+      const unmatched = group.filter((entry) => !entry.verification);
+      const remaining = candidates.filter((candidate) => !candidate.used).length;
+
+      // Partial reproduction cannot tell which identical finding was withdrawn
+      if (remaining > 0 && remaining < unmatched.length) continue;
+
+      for (const entry of unmatched) {
+        entry.verification = remaining ? "reproduced" : "withdrawn";
       }
     }
   }
@@ -172,7 +241,7 @@ export function readReviewState(body: string): ReviewState | null {
           typeof f.message !== "string" ||
           !Number.isSafeInteger(f.line) ||
           f.line < 1 ||
-          !["active", "fixed", "unknown"].includes(f.status) ||
+          !["active", "fixed", "unknown", "withdrawn"].includes(f.status) ||
           [f.anchor, f.identity, f.diagnosticId].some(
             (value) => value !== undefined && typeof value !== "string",
           ),
@@ -190,7 +259,14 @@ export function readReviewState(body: string): ReviewState | null {
 export function renderReviewBody(state: ReviewState, discussions?: number): string {
   const fixed = state.findings.filter((finding) => finding.status === "fixed").length;
   const unknown = state.findings.filter((finding) => finding.status === "unknown").length;
-  const progress = renderReviewProgress(state.findings.length, fixed, unknown, discussions);
+  const withdrawn = state.findings.filter((finding) => finding.status === "withdrawn").length;
+  const progress = renderReviewProgress(
+    state.findings.length,
+    fixed,
+    unknown,
+    discussions,
+    withdrawn,
+  );
   const metadata = Buffer.from(JSON.stringify(state)).toString("base64");
 
   return `${REVIEW_MARKER}\n${progress}\n\n${STATE_PREFIX}${metadata} -->`;
@@ -601,6 +677,8 @@ export interface ReviewAnalysis {
   deletedFiles?: ReadonlySet<string>;
   eligible: (finding: ReviewFinding) => boolean;
   canonicalFile: (file: string, commit: string) => string | null;
+  // Rescans files as they were at a commit, omitting files that could not be fully verified
+  historical?: (commit: string, files: string[]) => Promise<Map<string, ReviewFinding[]>>;
 }
 
 export interface ReviewSnapshot {
@@ -743,13 +821,22 @@ export async function reconcileReviews(
     }
   }
 
-  assignFindings(records, analysis);
+  await verifyHistoricalFindings(records, analysis);
+  assignFindings(
+    records.filter((record) => record.finding.status !== "withdrawn"),
+    analysis,
+  );
 
   for (const state of states.values()) {
-    if (state.signature !== "") continue;
+    if (state.signature === analysis.signature) continue;
 
-    // Once every recovered finding is observed under this configuration, later compatible scans can verify fixes
+    const reverified = records
+      .filter((record) => record.state === state)
+      .every((record) => record.verification || record.finding.status === "withdrawn");
+
+    // Once every finding is observed under this configuration, later compatible scans can verify fixes
     if (
+      reverified ||
       state.findings.every((finding) => {
         const file = analysis.canonicalFile(finding.file, state.commit);
 
@@ -829,7 +916,12 @@ export async function reconcileReviews(
         representedIdentities.add(finding.identity!);
       }
 
-      if (comment && finding.status === "fixed" && !discussion && threads?.has(comment.id)) {
+      if (
+        comment &&
+        (finding.status === "fixed" || finding.status === "withdrawn") &&
+        !discussion &&
+        threads?.has(comment.id)
+      ) {
         cleanup.push(comment);
       }
     }
