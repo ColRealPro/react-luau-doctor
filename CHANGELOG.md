@@ -13,6 +13,7 @@
 - GitHub CI follows GitHub's request guidance to avoid rate limits
 - `react-luau/prefer-binding-over-state-candidate` is now off by default because its findings were mostly low-value
 - Files that use React through `Roact` or `RoactCompat` are now analyzed as React
+- `no-side-effects-in-render`, `no-task-spawn-in-render`, and `no-yield-in-render` now check `useMemo` callbacks, which also run during render
 
 ### Fixed
 

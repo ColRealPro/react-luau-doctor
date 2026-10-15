@@ -4712,6 +4712,39 @@ return useLeak
   );
 });
 
+test("render side effect rules check useMemo callbacks as render code", async (t) => {
+  const root = tempProject(t, "memo-side-effects", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component(props)
+  local folder = React.useMemo(function()
+    return Instance.new("Folder")
+  end, {})
+  local label = React.useMemo(function()
+    return string.upper(props.text)
+  end, { props.text })
+  local create = React.useCallback(function()
+    return Instance.new("Folder")
+  end, {})
+  React.useEffect(function()
+    return function()
+      folder:Destroy()
+    end
+  end, { folder })
+  return React.createElement("TextButton", { Text = label, [React.Event.Activated] = create })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render").map((diagnostic) => diagnostic.location.line),
+    [5],
+  );
+});
+
 test("rules-of-hooks explains hooks inside protected calls", async (t) => {
   const root = tempProject(t, "protected-hooks", {
     "Component.luau": `local React = require(script.Parent.React)

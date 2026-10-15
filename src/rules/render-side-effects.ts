@@ -2,6 +2,7 @@ import type { SyntaxNode } from "../syntax";
 import { variableListTargets } from "../ast/walk";
 
 import type {
+  FunctionInfo,
   RuleContext,
   RuleDefinition,
   SourceEffectModuleSummary,
@@ -439,6 +440,33 @@ const RENDER_EFFECT_PATTERNS = [
   /:unmount$/,
 ];
 
+// useMemo callbacks run during render, and React may discard the memoized value
+// and run them again, so they are held to the same rules as the render body
+function runsDuringRender(
+  node: SyntaxNode,
+  component: FunctionInfo,
+  context: RuleContext,
+): "render" | "useMemo" | null {
+  if (context.isDirectlyExecutedInFunction(node, component)) return "render";
+
+  const callback = context.nearestFunction(node)?.node;
+  const memo = callback?.parent?.parent;
+
+  if (
+    callback?.type !== "function_definition" ||
+    memo?.type !== "function_call" ||
+    context.callArguments(memo)[0]?.id !== callback.id ||
+    context.resolveCallPath(context.getCallPath(memo) ?? "") !== "React.useMemo" ||
+    !context.isDirectlyExecutedInFunction(memo, component)
+  )
+    return null;
+
+  return "useMemo";
+}
+
+const MEMO_HELP =
+  "React can throw away a memoized value and run the callback again. Create the resource in an effect, release it in that effect's cleanup, and store it in state if render needs it";
+
 function hasNestedKnownRenderSideEffect(
   call: SyntaxNode,
   context: RuleContext,
@@ -476,8 +504,9 @@ export const noYieldInRender: RuleDefinition = {
     for (const call of context.findCalls()) {
       const component = context.containingComponent(call);
 
-      if (!component || !context.isDirectlyExecutedInFunction(call, component))
-        continue;
+      const phase = component && runsDuringRender(call, component, context);
+
+      if (!phase) continue;
 
       const path = context.resolveCallPath(context.getCallPath(call) ?? "");
       const reason = knownYieldReason(path, call, context);
@@ -486,7 +515,10 @@ export const noYieldInRender: RuleDefinition = {
 
       diagnostics.push({
         node: callNameNode(call),
-        message: `${path} can yield during component render.`,
+        message:
+          phase === "useMemo"
+            ? `${path} can yield inside a useMemo callback, which runs during render`
+            : `${path} can yield during component render.`,
         help: `Move yielding work outside render, usually into an effect or an external data-loading boundary. The bundled Roblox yield metadata recognizes ${reason} as a yielding API.`,
       });
     }
@@ -514,8 +546,9 @@ export const noTaskSpawnInRender: RuleDefinition = {
     for (const call of context.findCalls()) {
       const component = context.containingComponent(call);
 
-      if (!component || !context.isDirectlyExecutedInFunction(call, component))
-        continue;
+      const phase = component && runsDuringRender(call, component, context);
+
+      if (!phase) continue;
 
       const path = context.getCallPath(call);
 
@@ -528,7 +561,10 @@ export const noTaskSpawnInRender: RuleDefinition = {
 
       diagnostics.push({
         node: callNameNode(call),
-        message: `${path} schedules work during component render.`,
+        message:
+          phase === "useMemo"
+            ? `${path} schedules work inside a useMemo callback, which runs during render`
+            : `${path} schedules work during component render.`,
         summary: `${path} schedules work during render.`,
         help: "Move the scheduled work into an effect or the event that actually owns the side effect.",
       });
@@ -558,8 +594,9 @@ export const noSideEffectsInRender: RuleDefinition = {
     for (const call of context.findCalls()) {
       const component = context.containingComponent(call);
 
-      if (!component || !context.isDirectlyExecutedInFunction(call, component))
-        continue;
+      const phase = component && runsDuringRender(call, component, context);
+
+      if (!phase) continue;
 
       const path = context.resolveCallPath(context.getCallPath(call) ?? "");
 
@@ -586,7 +623,9 @@ export const noSideEffectsInRender: RuleDefinition = {
         message:
           inferredFromSource && !knownPattern
             ? `${path} runs during render, and code it calls eventually changes state outside the current render.`
-            : `${path} performs a side effect directly during component render.`,
+            : phase === "useMemo"
+              ? `${path} performs a side effect inside a useMemo callback, which runs during render`
+              : `${path} performs a side effect directly during component render.`,
 
         summary: `${path} has side effects during render.`,
 
@@ -598,7 +637,9 @@ export const noSideEffectsInRender: RuleDefinition = {
         help:
           inferredFromSource && !knownPattern
             ? "Move this call into an effect, event handler, or another committed lifecycle boundary so an abandoned render cannot still change application state."
-            : "Move imperative work into an effect or event handler with explicit ownership and cleanup. Use React.createElement for React-owned Instances. Destroy imperative Instances, cancel tweens, and disconnect subscriptions when their owner is cleaned up.",
+            : phase === "useMemo"
+              ? MEMO_HELP
+              : "Move imperative work into an effect or event handler with explicit ownership and cleanup. Use React.createElement for React-owned Instances. Destroy imperative Instances, cancel tweens, and disconnect subscriptions when their owner is cleaned up.",
 
         fixPreview:
           inferredFromSource && !knownPattern
