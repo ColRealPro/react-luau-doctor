@@ -743,7 +743,7 @@ async function runWithApi(
   return { stdout, stderr, status };
 }
 
-test("PR reporting keeps summaries PR-wide and new inline reviews scoped to the latest push", async (t) => {
+test("PR reporting keeps summaries PR-wide and new inline reviews scoped to the latest push", { timeout: 30_000 }, async (t) => {
   const root = createRepo(VALID_COMPONENT);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const base = git(root, "rev-parse", "HEAD");
