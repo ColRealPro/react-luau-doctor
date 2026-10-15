@@ -4712,6 +4712,37 @@ return useLeak
   );
 });
 
+test("effect cleanup accepts destroying an ancestor of a connected Instance", async (t) => {
+  const effect = (destroyed: string) => `local React = require(script.Parent.React)
+
+local function useLength(setLength)
+  React.useEffect(function()
+    local container = Instance.new("Folder")
+    local sound = Instance.new("Sound")
+    sound.Parent = container
+    sound:GetPropertyChangedSignal("TimeLength"):Connect(function()
+      setLength(sound.TimeLength)
+    end)
+    return function()
+      ${destroyed}:Destroy()
+    end
+  end, {})
+end
+
+return useLength
+`;
+  const root = tempProject(t, "ancestor-cleanup", {
+    "useAncestor.luau": effect("container"),
+    "useUnrelated.luau": effect("Instance.new(\"Folder\")"),
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/effect-needs-cleanup").map((diagnostic) => diagnostic.file),
+    ["useUnrelated.luau"],
+  );
+});
+
 test("effect cleanup accepts tasks that check a flag the cleanup changes", async (t) => {
   const task = (flag: string, initial: string, cancelled: string, guard: string) => `local React = require(script.Parent.React)
 

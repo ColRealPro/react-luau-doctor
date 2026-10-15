@@ -86,6 +86,30 @@ function isProvenInstanceExpression(
   return Boolean(effectOwner && bodyDeclaresInstanceBefore(effectOwner.body, callback.node.startIndex, expression, context));
 }
 
+// Destroying an Instance destroys its descendants, which disconnects their events
+function parentedInstanceAncestors(
+  expression: string,
+  call: SyntaxNode,
+  context: RuleContext,
+  callback: FunctionInfo,
+): string[] {
+  const bodyText = callback.body?.text ?? "";
+  const ancestors: string[] = [];
+  let current = expression;
+
+  while (ancestors.length < 16) {
+    const parent = bodyText.match(
+      new RegExp(`\\b${escapeRegExp(current)}\\s*\\.\\s*Parent\\s*=\\s*([A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_.:\\[(])`),
+    )?.[1];
+    if (!parent || parent === expression || ancestors.includes(parent)) break;
+    if (!isProvenInstanceExpression(parent, call, context, callback)) break;
+    ancestors.push(parent);
+    current = parent;
+  }
+
+  return ancestors;
+}
+
 function cleanupDestroysExpression(cleanupText: string, expression: string): boolean {
   return new RegExp(`(?:^|[^A-Za-z0-9_])${escapeRegExp(expression)}\\s*:\\s*Destroy\\s*\\(`, "s").test(cleanupText);
 }
@@ -386,6 +410,10 @@ function classifyResource(call: SyntaxNode, context: RuleContext, callback: Func
   if (/:Connect$/.test(rawPath)) {
     const ownerExpression = connectionOwnerExpression(rawPath);
     const ownerIsInstance = isProvenInstanceExpression(ownerExpression, call, context, callback);
+    const destroyableOwners =
+      ownerIsInstance && ownerExpression
+        ? [ownerExpression, ...parentedInstanceAncestors(ownerExpression, call, context, callback)]
+        : [];
     return {
       call,
       label: "connection/subscription",
@@ -395,7 +423,7 @@ function classifyResource(call: SyntaxNode, context: RuleContext, callback: Func
         if (name && cleanupIteratesAndDisconnects(text, name)) return true;
         // Custom Signal/Iris-style Connect APIs may return a disposer function instead of RBXScriptConnection.
         if (name && cleanupCallsDisposer(text, name)) return true;
-        return Boolean(ownerIsInstance && ownerExpression && cleanupDestroysExpression(text, ownerExpression));
+        return destroyableOwners.some((owner) => cleanupDestroysExpression(text, owner));
       },
     };
   }
