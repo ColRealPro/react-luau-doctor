@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-> TODO: update `docs/rules.md`
-
 ### Added
 
 - `--max-annotations` CI setting to limit or disable annotations
@@ -14,11 +12,19 @@
 - GitHub CI annotations are no longer limited to 10 per step. Run `ci upgrade` to grant the new `checks: write` permission
 - GitHub CI follows GitHub's request guidance to avoid rate limits
 - `react-luau/prefer-binding-over-state-candidate` is now off by default because its findings were mostly low-value
+- Files that use React through `Roact` or `RoactCompat` are now analyzed as React
 
 ### Fixed
 
 - CI annotations and file links on push runs now point to the right files when `--directory` scans a subfolder
 - `react-luau/prefer-binding-over-state-candidate` no longer suggests splitting measurement state when an analyzed child component still needs the value through React state, such as in effect dependencies or hook arguments
+- `rules-of-hooks` accepts hooks behind conditions on module fields that are set at load time and never written or re-exported elsewhere in the project
+- `exhaustive-deps` no longer requires `useCallback` and `useMemo` values whose dependencies are all stable, such as callbacks that only capture state setters
+- `rerender-unnecessary-usecallback` only skips callbacks captured by another hook when the callback has reactive dependencies
+- `effect-needs-cleanup` follows connections stored in ref fields and collections to their cleanup
+- `no-side-effects-in-render` follows side effects through returned parameters, reassigned values, and type casts
+- Type annotations in multi-name `local` declarations are no longer treated as declared variables
+- `typeof` types and type casts before comparisons no longer cause parse errors
 
 ## 0.20.4
 

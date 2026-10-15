@@ -58,7 +58,7 @@ Add `react-luau/` before the names below when using them in your [config](cli.md
 | Rule                                  | Default    | What it catches                                                                |
 | ------------------------------------- | ---------- | ------------------------------------------------------------------------------ |
 | `prefer-binding-over-state`           | warning    | Frequent external state updates only change properties that could use bindings |
-| `prefer-binding-over-state-candidate` | suggestion | A state value might suit a binding, but its consumers need a closer look       |
+| `prefer-binding-over-state-candidate` | off        | A state value might suit a binding, but its consumers need a closer look       |
 | `rerender-unstable-memo-props`        | warning    | Fresh reference props can prevent a memoized child from skipping renders       |
 | `rerender-high-frequency-state`       | warning    | Frame callbacks update state that rerenders an expensive component tree        |
 | `rerender-unnecessary-usememo`        | warning    | `useMemo` caches a simple calculation                                          |
