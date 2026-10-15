@@ -599,6 +599,8 @@ async function scanForCi(
     if (!state) continue;
 
     for (const finding of state.findings) {
+      if (finding.status === "withdrawn") continue;
+
       const file = canonicalFile(finding.file, state.commit);
 
       if (file) historicalFiles.add(file);
@@ -848,6 +850,11 @@ async function scanForCi(
       : aggregateReports(directory, reports);
   const comparison = comparisons.length ? aggregateReports(directory, comparisons) : report;
   const sourceCache = new Map<string, string[]>();
+  const anchor = (lines: string[] | undefined, line: number) =>
+    createHash("sha256")
+      .update(lines?.[line - 1]?.trim() ?? "")
+      .digest("hex")
+      .slice(0, 16);
   const toFinding = (diagnostic: Diagnostic): ReviewFinding => {
     const file = repoRelativeDiagnosticPath(directory, diagnostic.file, repoRoot);
     const absolute = path.resolve(repoRoot, file);
@@ -867,12 +874,78 @@ async function scanForCi(
       line: diagnostic.location.line,
       column: diagnostic.location.column,
       diagnosticId: diagnostic.id,
-      anchor: createHash("sha256")
-        .update(sourceCache.get(file)?.[diagnostic.location.line - 1]?.trim() ?? "")
-        .digest("hex")
-        .slice(0, 16),
+      anchor: anchor(sourceCache.get(file), diagnostic.location.line),
       status: "active",
     };
+  };
+  const historical = async (commit: string, files: string[]) => {
+    const findings = new Map<string, ReviewFinding[]>();
+    const unverified = new Set<string>();
+    const sources = new Map<string, string[]>();
+
+    for (const file of files) {
+      findings.set(file, []);
+    }
+
+    for (const { root: projectRoot, config } of configs) {
+      const inputs: Array<{ absolutePath: string; relativePath: string; source: string }> = [];
+
+      for (const file of files) {
+        const absolutePath = path.resolve(repoRoot, file);
+        const relativePath = normalize(path.relative(projectRoot, absolutePath));
+
+        if (
+          relativePath.startsWith("../") ||
+          path.isAbsolute(relativePath) ||
+          !isSelectedLuauPath(relativePath, config)
+        ) {
+          continue;
+        }
+
+        const source = gitResult(repoRoot, ["show", `${commit}:${file}`]);
+
+        if (source === null) {
+          unverified.add(file);
+          continue;
+        }
+
+        sources.set(file, source.split(/\r?\n/));
+        inputs.push({ absolutePath, relativePath, source });
+      }
+
+      if (!inputs.length) continue;
+
+      const scan = await scanPath(projectRoot, {
+        files: inputs,
+        projectRoot,
+        config,
+        categories: config.categories,
+      });
+
+      for (const file of [...(scan.skippedFiles ?? []), ...(scan.unverifiedFiles ?? [])]) {
+        unverified.add(repoRelativeDiagnosticPath(projectRoot, file, repoRoot));
+      }
+
+      for (const diagnostic of scan.diagnostics) {
+        const file = repoRelativeDiagnosticPath(projectRoot, diagnostic.file, repoRoot);
+
+        findings.get(file)?.push({
+          file,
+          rule: diagnostic.rule,
+          severity: diagnostic.severity,
+          message: diagnostic.message,
+          line: diagnostic.location.line,
+          anchor: anchor(sources.get(file), diagnostic.location.line),
+          status: "active",
+        });
+      }
+    }
+
+    for (const file of unverified) {
+      findings.delete(file);
+    }
+
+    return findings;
   };
 
   return {
@@ -904,6 +977,7 @@ async function scanForCi(
       verifiedFiles,
       deletedFiles,
       canonicalFile,
+      historical,
       eligible: (finding) =>
         !uncertainFiles.has(finding.file) &&
         configs.some(({ root, config }) => {

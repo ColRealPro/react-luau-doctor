@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.21.1
+
+### Fixed
+
+- PR review findings no longer get stuck awaiting verification after upgrades or config changes
+
 ## 0.21.0
 
 ### Added
