@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.21.2
+
+### Changed
+
+- `no-side-effects-in-render` shows which code in a called function causes the side effect
+
+### Fixed
+
+- `no-side-effects-in-render` no longer flags lookup caches, lazy defaults, or edits to fresh values such as `GetChildren()` results in called code
+- Event handlers and other callbacks no longer count as components just because they call a hook or a helper named like one
+- `no-prop-mutation` no longer flags helpers that parent a new Instance into a passed Instance
+
 ## 0.21.0
 
 ### Changed
