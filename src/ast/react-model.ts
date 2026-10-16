@@ -380,6 +380,28 @@ export function buildReactModel(root: SyntaxNode, project?: ProjectModel): React
     functionsBySimpleName.set(info.name, existing);
   }
 
+  // Like imported hooks, a local function named like a hook only counts as one
+  // when it calls a hook, so calling a plain helper does not make a component
+  const hookKinds = new Map(projectHookKinds);
+  const localHookNames = new Set(
+    functions
+      .filter((info) => info.isHook && info.name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(info.name) && !projectHookKinds.has(info.name))
+      .map((info) => info.name!),
+  );
+  for (const name of localHookNames) hookKinds.set(name, false);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const name of localHookNames) {
+      if (hookKinds.get(name)) continue;
+      const callsHook = (functionsBySimpleName.get(name) ?? []).some((info) =>
+        info.body && hasDirectHookCall(info.body, aliases, reactNamespaces, reactRobloxNamespaces, hookKinds),
+      );
+      if (!callsHook) continue;
+      hookKinds.set(name, true);
+      changed = true;
+    }
+  }
+
   for (const info of functions) {
     if (!isReactFile || !info.body || info.isHook) continue;
     const simplePascalName = Boolean(info.name && /^[A-Z][A-Za-z0-9_]*$/.test(info.name));
@@ -388,7 +410,7 @@ export function buildReactModel(root: SyntaxNode, project?: ProjectModel): React
       aliases,
       reactNamespaces,
       reactRobloxNamespaces,
-      projectHookKinds,
+      hookKinds,
     );
     const renders = hasDirectCreateElementCall(info.body, aliases, reactNamespaces, reactRobloxNamespaces);
     if (hasHooks || isMemoWrappedFunction(info.node, aliases, reactNamespaces) || (simplePascalName && renders)) {

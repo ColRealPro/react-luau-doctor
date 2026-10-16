@@ -10,6 +10,7 @@ import type {
   ProjectModel,
   ScanFileInput,
   SourceEffectModuleSummary,
+  SourceEffectStep,
 } from "./types";
 
 const MAX_CACHED_REPORTS = 8;
@@ -24,6 +25,8 @@ interface CachedFileState {
 
 interface SerializedSourceEffectSummary {
   effectfulMembers: string[];
+  effectTraces?: Array<[string, SourceEffectStep[]]>;
+  receiverTraces?: Array<[string, SourceEffectStep[]]>;
   effectfulExport: boolean;
   mutatingMembers: string[];
   mutatingExportParameters: number[];
@@ -426,6 +429,8 @@ function serializeSourceEffect(
 ): SerializedSourceEffectSummary {
   return {
     effectfulMembers: [...summary.effectfulMembers].sort(),
+    effectTraces: [...(summary.effectTraces ?? [])].sort(([left], [right]) => left.localeCompare(right)),
+    receiverTraces: [...(summary.receiverTraces ?? [])].sort(([left], [right]) => left.localeCompare(right)),
     effectfulExport: summary.effectfulExport,
     mutatingMembers: [...summary.mutatingMembers].sort(),
 
@@ -456,6 +461,8 @@ function deserializeSourceEffect(
 ): SourceEffectModuleSummary {
   return {
     effectfulMembers: new Set(summary.effectfulMembers),
+    effectTraces: new Map(summary.effectTraces ?? []),
+    receiverTraces: new Map(summary.receiverTraces ?? []),
     effectfulExport: summary.effectfulExport,
     mutatingMembers: new Set(summary.mutatingMembers ?? []),
     mutatingExportParameters: new Set(summary.mutatingExportParameters ?? []),

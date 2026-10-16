@@ -9,9 +9,10 @@ import {
   resolveModuleReference,
   type ModuleIdentity,
 } from "./module-resolution";
+import { apiFunctionReference, apiInstanceMethodReference } from "./api-reference";
 import { parseLuau } from "./parser";
 import type { AnalysisWorkerPool } from "./parallel";
-import type { ScanFileInput, SourceEffectModuleSummary } from "./types";
+import type { ScanFileInput, SourceEffectModuleSummary, SourceEffectStep } from "./types";
 
 
 export interface ProjectEffectParseCacheEntry {
@@ -26,8 +27,14 @@ export type CachedMutationOrigin =
   | { kind: "local" }
   | { kind: "result"; targetId: string; argumentOrigins: Array<CachedMutationOrigin | null> };
 
+export interface EffectSite {
+  line: number;
+  code: string;
+}
+
 export interface CachedMutationCall {
   targetId: string;
+  site?: EffectSite;
   receiverOrigin: CachedMutationOrigin | null;
   argumentOrigins: Array<CachedMutationOrigin | null>;
 }
@@ -39,12 +46,16 @@ export interface CachedSourceEffectFunction {
   memberName: string | null;
   exported: boolean;
   directEffect: boolean;
+  /** First code in this function that changes outside state */
+  effectSite?: EffectSite;
+  receiverSite?: EffectSite;
   mutatesReceiver: boolean;
   mutatedParameterIndexes: number[];
   dependencies: string[];
   mutationCalls: CachedMutationCall[];
   /** Call results this function mutates, resolved through each callee's returns */
   mutatedOrigins?: CachedMutationOrigin[];
+  mutatedOriginSites?: EffectSite[];
   returnOrigins?: CachedMutationOrigin[];
 }
 
@@ -105,6 +116,7 @@ interface ParsedRecord extends ModuleIdentity {
 
 interface MutationCall {
   targetId: string;
+  site: EffectSite;
   receiverRoot: string | null;
   argumentRoots: Array<string | null>;
 }
@@ -125,6 +137,8 @@ interface FunctionRecord {
   body: SyntaxNode;
   parameters: string[];
   directEffect: boolean;
+  effectSite: EffectSite | null;
+  receiverSite: EffectSite | null;
   mutatesReceiver: boolean;
   mutatedParameterIndexes: Set<number>;
   dependencies: Set<string>;
@@ -135,6 +149,7 @@ interface FunctionRecord {
   localNames: Set<string>;
   resultRoots: Map<string, ResultRoot>;
   mutatedResults: ResultRoot[];
+  mutatedResultSites: EffectSite[];
   returnOrigins: CachedMutationOrigin[];
 }
 
@@ -286,6 +301,27 @@ function expressionCreatesOwnedValue(input: SyntaxNode, owned: Set<string>): boo
   return Boolean(root && owned.has(root));
 }
 
+// Engine calls such as GetChildren or string.split return a value nothing else holds yet
+function createsFreshEngineValue(node: SyntaxNode): boolean {
+  if (node.type !== "function_call") return false;
+  const path = callPath(node) ?? "";
+  const method = path.match(/:([A-Za-z_][A-Za-z0-9_]*)$/)?.[1];
+  return (method ? apiInstanceMethodReference(method) : apiFunctionReference(path))?.allocation === "new";
+}
+
+const createsFreshInstance = (node: SyntaxNode) => /^Instance\.new$|:Clone$/.test(callPath(node) ?? "");
+
+function effectSite(node: SyntaxNode): EffectSite {
+  return { line: node.startPosition.row + 1, code: node.text.split(/\r?\n/)[0].trim().slice(0, 120) };
+}
+
+function markDirectEffect(fn: { directEffect: boolean; effectSite?: EffectSite | null }, site: EffectSite | undefined): boolean {
+  if (fn.directEffect) return false;
+  fn.directEffect = true;
+  fn.effectSite ??= site;
+  return true;
+}
+
 function directNodes(body: SyntaxNode): SyntaxNode[] {
   const result: SyntaxNode[] = [];
   const visit = (node: SyntaxNode): void => {
@@ -322,6 +358,8 @@ function topLevelFunctionRecords(record: ParsedRecord): FunctionRecord[] {
       body,
       parameters: parameterNames(node),
       directEffect: false,
+      effectSite: null,
+      receiverSite: null,
       mutatesReceiver: false,
       mutatedParameterIndexes: new Set<number>(),
       dependencies: new Set<string>(),
@@ -332,6 +370,7 @@ function topLevelFunctionRecords(record: ParsedRecord): FunctionRecord[] {
       localNames: new Set<string>(),
       resultRoots: new Map<string, ResultRoot>(),
       mutatedResults: [],
+      mutatedResultSites: [],
       returnOrigins: [],
     });
   };
@@ -550,6 +589,13 @@ function fillsEmptySlot(statement: SyntaxNode, target: string, body: SyntaxNode,
     return aliases.get(text) ?? text;
   };
 
+  // `slot = slot or value` keeps any value already there
+  const { left, right } = assignmentSides(statement);
+  const value = right[left.findIndex((candidate) => slot(candidate) === target)];
+  const defaulted = value && unwrapExpression(value);
+  if (defaulted?.type === "binary_expression" && defaulted.children.some((part) => part.type === "or") && slot(defaulted.namedChildren[0]) === target)
+    return true;
+
   for (let current = statement; current.parent && current.id !== body.id; current = current.parent) {
     const parent = current.parent;
 
@@ -574,6 +620,225 @@ function fillsEmptySlot(statement: SyntaxNode, target: string, body: SyntaxNode,
   return false;
 }
 
+const slotRoot = (slot: string) => slot.match(/^[A-Za-z_][A-Za-z0-9_]*/)?.[0] ?? null;
+
+function functionSlotAliases(nodes: SyntaxNode[]): Map<string, string> {
+  const aliases = new Map<string, string>();
+  for (const node of nodes) {
+    if (node.type !== "variable_declaration") continue;
+    const { names, expressions } = declarationParts(node);
+    const expression = expressions[0] && unwrapExpression(expressions[0]);
+    if (names.length === 1 && expression && ["identifier", "dot_index_expression", "bracket_index_expression"].includes(expression.type))
+      aliases.set(names[0], compactText(expression));
+  }
+  return aliases;
+}
+
+// Locals that hold a cache table's contents, such as `local list = cache[key]`,
+// mapped to the cache they come from
+function cacheAliasNames(nodes: SyntaxNode[], caches: Set<string>, outer?: Map<string, string>): Map<string, string> {
+  const aliases = new Map<string, string>();
+  const cacheOf = (root: string | null) => root ? aliases.get(root) ?? outer?.get(root) ?? (caches.has(root) ? root : null) : null;
+  for (const node of nodes) {
+    if (node.type === "for_generic_clause") {
+      const cache = cacheOf(rootIdentifier(iteratedCollection(node)));
+      if (!cache) continue;
+      for (const target of variableListTargets(child(node, "variable_list"))) aliases.set(target.text, cache);
+      continue;
+    }
+    if (node.type !== "variable_declaration") continue;
+    const { names, expressions } = declarationParts(node);
+    for (let index = 0; index < names.length; index += 1) {
+      const expression = expressions[index] ?? expressions[0];
+      const cache = expression ? cacheOf(rootIdentifier(expression)) : null;
+      if (cache) aliases.set(names[index], cache);
+    }
+  }
+  return aliases;
+}
+
+function slotFilledIn(nodes: SyntaxNode[], slot: string, aliases: Map<string, string>): boolean {
+  return nodes.some((node) => {
+    if (node.type !== "assignment_statement" || node.parent?.type === "variable_declaration") return false;
+    const { left, right } = assignmentSides(node);
+    return left.some((target, index) => {
+      const text = compactText(target);
+      return (aliases.get(text) ?? text) === slot && right[index]?.type !== "nil";
+    });
+  });
+}
+
+function returnsSlot(statement: SyntaxNode, slot: string, aliases: Map<string, string>): boolean {
+  const returned = child(statement, "expression_list")?.namedChildren[0];
+  if (!returned) return false;
+  const text = compactText(unwrapExpression(returned));
+  return (aliases.get(text) ?? text) === slot;
+}
+
+// A memoizing miss branch follows a lookup of cache[key] that returns the cached
+// value when present, and fills cache[key] before the function returns, so its
+// writes run at most once per key
+function inMemoizedMissBranch(
+  statement: SyntaxNode,
+  body: SyntaxNode,
+  aliases: Map<string, string>,
+  caches: Set<string>,
+): boolean {
+  const slot = (node: SyntaxNode | null) => {
+    if (!node) return null;
+    const text = compactText(node);
+    const resolved = aliases.get(text) ?? text;
+    const root = slotRoot(resolved);
+    return root && caches.has(root) && resolved !== root ? resolved : null;
+  };
+
+  for (let current = statement; current.parent && current.id !== body.id; current = current.parent) {
+    const parent = current.parent;
+
+    if (parent.type === "if_statement" && parent.childForFieldName("consequence")?.id === current.id) {
+      const condition = parent.childForFieldName("condition");
+      const fillsAndReturns = (guarded: string) =>
+        slotFilledIn(directNodes(current), guarded, aliases) &&
+        directNodes(body).some((node) => node.type === "return_statement" && node.startIndex > parent.endIndex && returnsSlot(node, guarded, aliases));
+      for (const guarded of condition ? disjuncts(condition).map((tested) => slot(emptySlotTested(tested))) : []) {
+        if (guarded && fillsAndReturns(guarded)) return true;
+      }
+    }
+
+    if (parent.type !== "block" && parent.id !== body.id) continue;
+    const siblings = parent.namedChildren;
+    for (let index = 0; index < siblings.length && siblings[index].startIndex < current.startIndex; index += 1) {
+      const sibling = siblings[index];
+      if (sibling.type !== "if_statement" || sibling.namedChildren.some((part) => part.type === "elseif_statement" || part.type === "else_statement")) continue;
+      const exit = sibling.childForFieldName("consequence")?.namedChildren.at(-1);
+      const condition = sibling.childForFieldName("condition");
+      const guarded = condition ? slot(filledSlotTested(condition)) : null;
+      if (!guarded || exit?.type !== "return_statement" || !returnsSlot(exit, guarded, aliases)) continue;
+      if (slotFilledIn(siblings.slice(index + 1).flatMap(directNodes), guarded, aliases)) return true;
+    }
+  }
+
+  return false;
+}
+
+const CACHE_READERS = new Set(["pairs", "ipairs", "next", "rawget", "table.insert", "table.remove", "table.clear"]);
+const CACHE_REMOVERS = new Set(["table.remove", "table.clear"]);
+
+function isTableConstructor(input: SyntaxNode): boolean {
+  const node = unwrapExpression(input);
+  if (node.type === "table_constructor") return true;
+  return node.type === "function_call" &&
+    callPath(node) === "setmetatable" &&
+    callArguments(node)[0]?.type === "table_constructor";
+}
+
+// Private module tables that are only ever filled by memoizing lookups. Their
+// entries can always be rebuilt by another lookup, so filling, indexing, and
+// pruning them is not an effect observable outside the module
+function moduleCacheTables(record: ParsedRecord): Set<string> {
+  const root = record.tree.rootNode;
+  const declarations = new Map<string, SyntaxNode>();
+  for (const node of root.namedChildren) {
+    if (node.type !== "variable_declaration") continue;
+    const { names, expressions } = declarationParts(node);
+    if (names.length === 1 && expressions.length === 1 && isTableConstructor(expressions[0]) && names[0] !== record.exportName)
+      declarations.set(names[0], node);
+  }
+  if (declarations.size === 0) return new Set();
+
+  const caches = new Set(declarations.keys());
+  const allNodes: SyntaxNode[] = [];
+  const visit = (node: SyntaxNode): void => {
+    allNodes.push(node);
+    for (const candidate of node.namedChildren) visit(candidate);
+  };
+  visit(root);
+
+  // Using the table itself for anything but indexing, iteration, or table
+  // library edits lets it escape, or shadows it with another binding
+  for (const node of allNodes) {
+    if (node.type !== "identifier" || !caches.has(node.text)) continue;
+    const parent = node.parent;
+    if (!parent) continue;
+    if (parent.parent?.parent?.id === declarations.get(node.text)?.id && parent.type === "variable_list") continue;
+    if ((parent.type === "dot_index_expression" || parent.type === "bracket_index_expression") && parent.namedChildren[0]?.id === node.id) continue;
+    if (parent.type === "unary_expression" && parent.children[0]?.type === "#") continue;
+    if (parent.type === "expression_list" && parent.parent?.type === "for_generic_clause" && parent.namedChildren[0]?.id === node.id) continue;
+    const call = parent.parent;
+    if (parent.type === "arguments" && call?.type === "function_call" && parent.namedChildren[0]?.id === node.id && CACHE_READERS.has(callPath(call) ?? "")) continue;
+    caches.delete(node.text);
+  }
+
+  const scopes = new Map<number, { body: SyntaxNode; nodes: SyntaxNode[]; slotAliases: Map<string, string> }>();
+  const scopeChain = (node: SyntaxNode) => {
+    const chain: Array<{ body: SyntaxNode; nodes: SyntaxNode[]; slotAliases: Map<string, string> }> = [];
+    for (let current: SyntaxNode | null = node.parent; current; current = current.parent) {
+      const isFunction = current.type === "function_definition" || current.type === "function_declaration";
+      const body = isFunction ? child(current, "block") : current.id === root.id ? current : null;
+      if (!body) continue;
+      let scope = scopes.get(body.id);
+      if (!scope) {
+        const nodes = directNodes(body);
+        scope = { body, nodes, slotAliases: functionSlotAliases(nodes) };
+        scopes.set(body.id, scope);
+      }
+      chain.push(scope);
+    }
+    return chain;
+  };
+
+  const insertions: Array<{ statement: SyntaxNode; root: string }> = [];
+  for (const node of allNodes) {
+    if ((node.type === "assignment_statement" && node.parent?.type !== "variable_declaration") || node.type === "update_statement") {
+      const { left, right } = assignmentSides(node);
+      left.forEach((target, index) => {
+        const root = rootIdentifier(target);
+        if (target.type === "identifier" || !root) return;
+        if (node.type === "assignment_statement" && right[index]?.type === "nil") return;
+        insertions.push({ statement: node, root });
+      });
+      continue;
+    }
+    if (node.type !== "function_call") continue;
+    const path = callPath(node) ?? "";
+    if (CACHE_REMOVERS.has(path)) continue;
+    const arguments_ = callArguments(node);
+    for (const index of builtinMutatedArgumentIndexes(path, arguments_.length)) {
+      const root = rootIdentifier(arguments_[index]);
+      if (root) insertions.push({ statement: node, root });
+    }
+  }
+
+  let changed = true;
+  while (changed && caches.size > 0) {
+    changed = false;
+    const aliasesByBody = new Map<number, Map<string, string>>();
+    const aliasesFor = (chain: ReturnType<typeof scopeChain>): Map<string, string> | undefined => {
+      let aliases: Map<string, string> | undefined;
+      for (const scope of [...chain].reverse()) {
+        let scoped = aliasesByBody.get(scope.body.id);
+        if (!scoped) {
+          scoped = cacheAliasNames(scope.nodes, caches, aliases);
+          aliasesByBody.set(scope.body.id, scoped);
+        }
+        aliases = new Map([...(aliases ?? []), ...scoped]);
+      }
+      return aliases;
+    };
+    for (const { statement, root: name } of insertions) {
+      const chain = scopeChain(statement);
+      const cache = aliasesFor(chain)?.get(name) ?? (caches.has(name) ? name : null);
+      if (!cache) continue;
+      const scope = chain[0];
+      if (scope && inMemoizedMissBranch(statement, scope.body, scope.slotAliases, caches)) continue;
+      caches.delete(cache);
+      changed = true;
+    }
+  }
+
+  return caches;
+}
+
 function analyzeFunction(
   fn: FunctionRecord,
   record: ParsedRecord,
@@ -582,6 +847,7 @@ function analyzeFunction(
   moduleSummaries: Map<string, SourceEffectModuleSummary>,
   moduleInstances: Map<string, string>,
   exportedFunctions: Map<string, string>,
+  caches: Set<string>,
 ): void {
   const parameters = new Set(fn.parameters);
   const parameterOrigins = new Map<string, number>(fn.parameters.map((name, index) => [name, index] as const));
@@ -594,6 +860,8 @@ function analyzeFunction(
   const externalAliases = new Set<string>();
   const resultRoots = new Map<string, ResultRoot>();
   const refLocals = new Set<string>();
+  const freshInstances = new Set<string>();
+  const parents: Array<{ parent: SyntaxNode; statement: SyntaxNode }> = [];
   const instanceAliases = new Map(moduleInstances);
   const nodes = directNodes(fn.body);
   const returnedNodes: Array<SyntaxNode | null> = [];
@@ -633,8 +901,14 @@ function analyzeFunction(
       const expression = declared && unwrapExpression(declared);
       locals.add(name);
       if (!expression) continue;
-      const createsOwnedValue = expressionCreatesOwnedValue(expression, owned);
+      const freshEngineValue = expression.type === "function_call" && !callTarget(expression) && createsFreshEngineValue(expression);
+      const createsOwnedValue = freshEngineValue || expressionCreatesOwnedValue(expression, owned);
       if (createsOwnedValue) owned.add(name);
+      if (freshEngineValue && createsFreshInstance(expression)) {
+        freshInstances.add(name);
+        const parent = callArguments(expression)[1];
+        if (parent) parents.push({ parent, statement: node });
+      }
       const root = rootIdentifier(expression);
       const parameterOrigin = root ? parameterOrigins.get(root) : undefined;
       // A call's first result follows the callee's returned value instead of the callee name
@@ -673,20 +947,37 @@ function analyzeFunction(
     }
   }
 
-  const slotAliases = new Map<string, string>();
+  const slotAliases = functionSlotAliases(nodes);
+  const cacheAliases = cacheAliasNames(nodes, caches);
+  // Names also bound to other values may not hold cache contents at a given write
   for (const node of nodes) {
-    if (node.type !== "variable_declaration") continue;
-    const { names, expressions } = declarationParts(node);
-    const expression = expressions[0] && unwrapExpression(expressions[0]);
-    if (names.length === 1 && expression && ["identifier", "dot_index_expression", "bracket_index_expression"].includes(expression.type))
-      slotAliases.set(names[0], compactText(expression));
+    const isAssignment = node.type === "assignment_statement" && node.parent?.type !== "variable_declaration";
+    if (node.type !== "variable_declaration" && !isAssignment) continue;
+    const { names, expressions } = isAssignment
+      ? (({ left, right }) => ({ names: left.map((target) => target.type === "identifier" ? target.text : null), expressions: right }))(assignmentSides(node))
+      : declarationParts(node);
+    names.forEach((name, index) => {
+      if (!name) return;
+      const expression = expressions[index] ?? expressions[0];
+      const root = expression ? rootIdentifier(expression) : null;
+      if (!root || !(caches.has(root) || cacheAliases.has(root))) cacheAliases.delete(name);
+    });
   }
+  for (const name of [...parameters]) cacheAliases.delete(name);
+  const mutatesCache = (root: string) => cacheAliases.has(root) || (caches.has(root) && !locals.has(root) && !parameters.has(root));
 
   fn.parameterOrigins = parameterOrigins;
   fn.externalRoots = externalAliases;
   fn.ownedRoots = owned;
   fn.localNames = locals;
   fn.resultRoots = resultRoots;
+  // A new Instance is private until it joins a tree that is not also new
+  const joinsExistingTree = (parent: SyntaxNode) => {
+    const root = rootIdentifier(parent);
+    return parent.type !== "nil" && !(root && owned.has(root));
+  };
+  const parentedAt = parents.find(({ parent }) => joinsExistingTree(parent));
+  if (parentedAt) markDirectEffect(fn, effectSite(parentedAt.statement));
 
   // Luau locals are lexically scoped from their declaration onward, so the
   // source-order pass above is enough to propagate aliases through local
@@ -694,20 +985,24 @@ function analyzeFunction(
   // redundant and particularly expensive on large modules.
   for (const node of nodes) {
     if ((node.type === "assignment_statement" || node.type === "update_statement") && node.parent?.type !== "variable_declaration") {
-      const { left } = assignmentSides(node);
-      for (const target of left) {
+      const { left, right } = assignmentSides(node);
+      for (const [index, target] of left.entries()) {
         if (target.type === "identifier") {
           if (!locals.has(target.text) && !parameters.has(target.text) && !fillsEmptySlot(node, target.text, fn.body, slotAliases))
-            fn.directEffect = true;
+            markDirectEffect(fn, effectSite(node));
           continue;
         }
         const root = rootIdentifier(target);
         if (!root) continue;
-        if (owned.has(root)) continue;
+        const value = right[index] ?? right[0];
+        const key = target.type === "bracket_index_expression" ? target.namedChildren[1] : null;
+        const setsParent = compactText(target) === `${root}.Parent` || (key && (key.type !== "string" || /^["'`]Parent["'`]$/.test(key.text)));
+        if (freshInstances.has(root) && setsParent && value && joinsExistingTree(value)) markDirectEffect(fn, effectSite(node));
+        if (owned.has(root) || mutatesCache(root)) continue;
         if (fillsEmptySlot(node, compactText(target), fn.body, slotAliases)) continue;
         if (refLocals.has(root) && target.text.replace(/\s+/g, "") === `${root}.current`) continue;
         if (locals.has(root) && latestBlockAssignmentIsOwned(root, node, owned, fn.body)) continue;
-        markMutationThroughRoot(fn, root);
+        markMutationThroughRoot(fn, root, effectSite(node));
       }
       continue;
     }
@@ -725,8 +1020,9 @@ function analyzeFunction(
 
     for (const index of builtinMutatedArgumentIndexes(path, arguments_.length)) {
       const root = rootIdentifier(arguments_[index]);
+      if (root && mutatesCache(root)) continue;
       if (root && locals.has(root) && latestBlockAssignmentIsOwned(root, node, owned, fn.body)) continue;
-      markMutationThroughRoot(fn, root);
+      markMutationThroughRoot(fn, root, effectSite(node));
     }
 
     const target = callTarget(node);
@@ -734,6 +1030,7 @@ function analyzeFunction(
       fn.dependencies.add(target.targetId);
       fn.mutationCalls.push({
         targetId: target.targetId,
+        site: effectSite(node),
         receiverRoot: target.receiverRoot,
         argumentRoots: arguments_.map((argument) => rootIdentifier(argument)),
       });
@@ -743,13 +1040,14 @@ function analyzeFunction(
   fn.returnOrigins = returnedNodes.map((node) => returnedOrigin(fn, node, callTarget));
 }
 
-function markMutationThroughRoot(fn: FunctionRecord, root: string | null): boolean {
+function markMutationThroughRoot(fn: FunctionRecord, root: string | null, site: EffectSite): boolean {
   if (!root) return false;
   const parameterOrigin = fn.parameterOrigins.get(root);
   if (parameterOrigin !== undefined) {
     if (parameterOrigin === -1) {
       if (fn.mutatesReceiver) return false;
       fn.mutatesReceiver = true;
+      fn.receiverSite ??= site;
       return true;
     }
     if (fn.mutatedParameterIndexes.has(parameterOrigin)) return false;
@@ -762,13 +1060,10 @@ function markMutationThroughRoot(fn: FunctionRecord, root: string | null): boole
   if (result) {
     if (fn.mutatedResults.includes(result)) return false;
     fn.mutatedResults.push(result);
+    fn.mutatedResultSites.push(site);
     return true;
   }
-  if (fn.externalRoots.has(root) || !fn.localNames.has(root)) {
-    if (fn.directEffect) return false;
-    fn.directEffect = true;
-    return true;
-  }
+  if (fn.externalRoots.has(root) || !fn.localNames.has(root)) return markDirectEffect(fn, site);
   return false;
 }
 
@@ -781,9 +1076,9 @@ function propagateLocalMutationEffects(functions: FunctionRecord[]): void {
       for (const call of fn.mutationCalls) {
         const target = byId.get(call.targetId);
         if (!target) continue;
-        if (target.mutatesReceiver && markMutationThroughRoot(fn, call.receiverRoot)) changed = true;
+        if (target.mutatesReceiver && markMutationThroughRoot(fn, call.receiverRoot, call.site)) changed = true;
         for (const index of target.mutatedParameterIndexes) {
-          if (markMutationThroughRoot(fn, call.argumentRoots[index] ?? null)) changed = true;
+          if (markMutationThroughRoot(fn, call.argumentRoots[index] ?? null, call.site)) changed = true;
         }
       }
     }
@@ -805,7 +1100,8 @@ function mutationOriginForRoot(fn: FunctionRecord, root: string | null, depth = 
 const MAX_RESULT_DEPTH = 8;
 
 function resultOrigin(fn: FunctionRecord, result: ResultRoot, depth: number): CachedMutationOrigin {
-  if (depth >= MAX_RESULT_DEPTH) return { kind: "external" };
+  // Too deep to follow means unknown, which is not evidence of an effect
+  if (depth >= MAX_RESULT_DEPTH) return { kind: "local" };
   return {
     kind: "result",
     targetId: result.targetId,
@@ -824,12 +1120,13 @@ function returnedOrigin(
   if (["nil", "true", "false", "number", "string"].includes(node.type)) return { kind: "local" };
   if (node.type === "function_call") {
     const target = callTarget(node);
-    return target
-      ? resultOrigin(fn, {
+    if (target) {
+      return resultOrigin(fn, {
         targetId: target.targetId,
         argumentRoots: callArguments(node).map((argument) => rootIdentifier(argument)),
-      }, 0)
-      : { kind: "external" };
+      }, 0);
+    }
+    return createsFreshEngineValue(node) ? { kind: "local" } : { kind: "external" };
   }
   return mutationOriginForRoot(fn, rootIdentifier(node)) ?? { kind: "external" };
 }
@@ -837,6 +1134,7 @@ function returnedOrigin(
 function cachedMutationCalls(fn: FunctionRecord): CachedMutationCall[] {
   return fn.mutationCalls.map((call) => ({
     targetId: call.targetId,
+    site: call.site,
     receiverOrigin: mutationOriginForRoot(fn, call.receiverRoot),
     argumentOrigins: call.argumentRoots.map((root) => mutationOriginForRoot(fn, root)),
   }));
@@ -850,11 +1148,14 @@ function cachedFunctionState(fn: FunctionRecord): CachedSourceEffectFunction {
     memberName: fn.memberName,
     exported: fn.exported,
     directEffect: fn.directEffect,
+    ...(fn.effectSite ? { effectSite: fn.effectSite } : {}),
+    ...(fn.receiverSite ? { receiverSite: fn.receiverSite } : {}),
     mutatesReceiver: fn.mutatesReceiver,
     mutatedParameterIndexes: [...fn.mutatedParameterIndexes].sort((a, b) => a - b),
     dependencies: [...fn.dependencies].sort(),
     mutationCalls: cachedMutationCalls(fn),
     mutatedOrigins: fn.mutatedResults.map((result) => resultOrigin(fn, result, 0)),
+    mutatedOriginSites: fn.mutatedResultSites,
     returnOrigins: fn.returnOrigins,
   };
 }
@@ -863,27 +1164,25 @@ function applyCachedMutationOrigin(
   fn: CachedSourceEffectFunction,
   origin: CachedMutationOrigin | null,
   byId: Map<string, CachedSourceEffectFunction>,
+  site: EffectSite | undefined,
   depth = 0,
 ): boolean {
-  if (!origin || origin.kind === "local") return false;
-  if (origin.kind === "external" || depth >= MAX_RESULT_DEPTH) {
-    if (fn.directEffect) return false;
-    fn.directEffect = true;
-    return true;
-  }
+  if (!origin || origin.kind === "local" || depth >= MAX_RESULT_DEPTH) return false;
+  if (origin.kind === "external") return markDirectEffect(fn, site);
   if (origin.kind === "result") {
     // Mutating a call result mutates whatever the callee can return
     const target = byId.get(origin.targetId);
     const returns = target?.returnOrigins ?? [{ kind: "external" } as const];
     let changed = false;
     for (const returned of returns) {
-      if (applyCachedMutationOrigin(fn, substituteArguments(returned, origin.argumentOrigins), byId, depth + 1)) changed = true;
+      if (applyCachedMutationOrigin(fn, substituteArguments(returned, origin.argumentOrigins), byId, site, depth + 1)) changed = true;
     }
     return changed;
   }
   if (origin.kind === "receiver") {
     if (fn.mutatesReceiver) return false;
     fn.mutatesReceiver = true;
+    fn.receiverSite ??= site;
     return true;
   }
   if (fn.mutatedParameterIndexes.includes(origin.index)) return false;
@@ -915,15 +1214,15 @@ function propagateMutationEffects(functions: CachedSourceEffectFunction[]): void
   while (changed) {
     changed = false;
     for (const fn of functions) {
-      for (const origin of fn.mutatedOrigins ?? []) {
-        if (applyCachedMutationOrigin(fn, origin, byId)) changed = true;
+      for (const [index, origin] of (fn.mutatedOrigins ?? []).entries()) {
+        if (applyCachedMutationOrigin(fn, origin, byId, fn.mutatedOriginSites?.[index])) changed = true;
       }
       for (const call of fn.mutationCalls) {
         const target = byId.get(call.targetId);
         if (!target) continue;
-        if (target.mutatesReceiver && applyCachedMutationOrigin(fn, call.receiverOrigin, byId)) changed = true;
+        if (target.mutatesReceiver && applyCachedMutationOrigin(fn, call.receiverOrigin, byId, call.site)) changed = true;
         for (const index of target.mutatedParameterIndexes) {
-          if (applyCachedMutationOrigin(fn, call.argumentOrigins[index] ?? null, byId)) changed = true;
+          if (applyCachedMutationOrigin(fn, call.argumentOrigins[index] ?? null, byId, call.site)) changed = true;
         }
       }
     }
@@ -977,8 +1276,9 @@ export function analyzeEffectModuleForWorker(
     if (fn.memberName) memberFunctions.set(fn.memberName, fn.id);
   }
   const moduleInstances = moduleLevelInstanceAliases(state.record, moduleSummaries);
+  const caches = moduleCacheTables(state.record);
   for (const fn of state.functions) {
-    analyzeFunction(fn, state.record, localFunctions, memberFunctions, moduleSummaries, moduleInstances, exportedFunctions);
+    analyzeFunction(fn, state.record, localFunctions, memberFunctions, moduleSummaries, moduleInstances, exportedFunctions, caches);
   }
   propagateLocalMutationEffects(state.functions);
   return {
@@ -1218,8 +1518,9 @@ export async function buildProjectSourceEffects(
         if (fn.memberName) memberFunctions.set(fn.memberName, fn.id);
       }
       const moduleInstances = moduleLevelInstanceAliases(record, summariesByModuleId);
+      const caches = moduleCacheTables(record);
       for (const fn of functions) {
-        analyzeFunction(fn, record, localFunctions, memberFunctions, summariesByModuleId, moduleInstances, exportedFunctions);
+        analyzeFunction(fn, record, localFunctions, memberFunctions, summariesByModuleId, moduleInstances, exportedFunctions, caches);
       }
       propagateLocalMutationEffects(functions);
       analyzedFunctionStatesByModule.set(moduleId, functions.map(cachedFunctionState));
@@ -1294,12 +1595,15 @@ export async function buildProjectSourceEffects(
   }
 
   onProgress?.({ phase: "propagate", current: 0, total: Math.max(1, functions.length) });
+  // The effectful callee each dependent was first reached through
+  const effectSources = new Map<string, string>();
   let queueIndex = 0;
   while (queueIndex < queue.length) {
     const effectfulId = queue[queueIndex++];
     for (const dependent of reverseDependencies.get(effectfulId) ?? []) {
       if (effectful.has(dependent)) continue;
       effectful.add(dependent);
+      effectSources.set(dependent, effectfulId);
       queue.push(dependent);
     }
     if ((queueIndex & 63) === 0 || queueIndex === queue.length) {
@@ -1311,10 +1615,34 @@ export async function buildProjectSourceEffects(
   // partially filled progress bar behind.
   onProgress?.({ phase: "propagate", current: Math.max(1, functions.length), total: Math.max(1, functions.length) });
 
+  const relativePaths = new Map(identities.map((identity) => [identity.id, identity.relativePath] as const));
+  const stepName = (fn: CachedSourceEffectFunction) => {
+    const file = relativePaths.get(fn.moduleId) ?? fn.moduleId;
+    const parts = file.replace(/\.luau?$/, "").split("/");
+    const moduleName = parts.at(-1) === "init" && parts.length > 1 ? parts.at(-2)! : parts.at(-1)!;
+    return fn.memberName ? `${moduleName}.${fn.memberName}` : fn.localName ?? moduleName;
+  };
+  const effectTrace = (fn: CachedSourceEffectFunction): SourceEffectStep[] => {
+    const steps: SourceEffectStep[] = [];
+    const seen = new Set<string>();
+    for (let current: CachedSourceEffectFunction | undefined = fn; current && !seen.has(current.id);) {
+      seen.add(current.id);
+      const sourceId = effectSources.get(current.id);
+      const site = sourceId
+        ? current.mutationCalls.find((call) => call.targetId === sourceId)?.site
+        : current.effectSite;
+      steps.push({ name: stepName(current), file: relativePaths.get(current.moduleId) ?? current.moduleId, ...site });
+      current = sourceId ? functionStates.get(sourceId) : undefined;
+    }
+    return steps;
+  };
+
   const summarizeTotal = Math.max(1, functions.length + 1);
   onProgress?.({ phase: "summarize", current: 0, total: summarizeTotal });
   for (const summary of summariesByModuleId.values()) {
     summary.effectfulMembers.clear();
+    summary.effectTraces = new Map();
+    summary.receiverTraces = new Map();
     summary.effectfulExport = false;
     summary.mutatingMembers.clear();
     summary.mutatingExportParameters.clear();
@@ -1324,7 +1652,10 @@ export async function buildProjectSourceEffects(
   for (let index = 0; index < functions.length; index += 1) {
     const fn = functions[index];
     const summary = summariesByModuleId.get(fn.moduleId);
-    if (summary && fn.memberName && fn.mutatesReceiver) summary.mutatingMembers.add(fn.memberName);
+    if (summary && fn.memberName && fn.mutatesReceiver) {
+      summary.mutatingMembers.add(fn.memberName);
+      summary.receiverTraces?.set(fn.memberName, [{ name: stepName(fn), file: relativePaths.get(fn.moduleId) ?? fn.moduleId, ...fn.receiverSite }]);
+    }
     if (summary && fn.mutatedParameterIndexes.length > 0) {
       if (fn.exported && !fn.memberName) {
         for (const parameterIndex of fn.mutatedParameterIndexes) summary.mutatingExportParameters.add(parameterIndex);
@@ -1339,6 +1670,7 @@ export async function buildProjectSourceEffects(
     if (summary && effectful.has(fn.id)) {
       if (fn.memberName) summary.effectfulMembers.add(fn.memberName);
       if (fn.exported) summary.effectfulExport = true;
+      if (fn.memberName || fn.exported) summary.effectTraces?.set(fn.memberName ?? "", effectTrace(fn));
     }
     if ((index & 127) === 127 || index + 1 === functions.length) {
       onProgress?.({ phase: "summarize", current: index + 1, total: summarizeTotal });

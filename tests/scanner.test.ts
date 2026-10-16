@@ -5032,6 +5032,234 @@ return Component
   );
 });
 
+test("source effects ignore private tables only filled by memoizing lookups", async (t) => {
+  const root = tempProject(t, "memoized-caches", {
+    "Registry.luau": `local byKey = setmetatable({}, { __mode = "k" })
+local keyByEntry = setmetatable({}, { __mode = "k" })
+local byGroup = {}
+local recent = {}
+local seen = {}
+local log = {}
+
+local Registry = {}
+
+function Registry.fromKey(key)
+  if byKey[key] then
+    return byKey[key]
+  end
+
+  local entry = { key = key }
+  byKey[key] = entry
+  keyByEntry[entry] = key
+
+  if key.Group ~= nil then
+    byGroup[key.Group] = byGroup[key.Group] or {}
+    table.insert(byGroup[key.Group], entry)
+  end
+
+  return entry
+end
+
+function Registry.getByGroup(group, key)
+  local list = byGroup[group]
+  if not list then
+    return Registry.fromKey(key)
+  end
+
+  for index = #list, 1, -1 do
+    if not keyByEntry[list[index]].Parent then
+      table.remove(list, index)
+    end
+  end
+
+  if #list == 0 then
+    byGroup[group] = nil
+    return Registry.fromKey(key)
+  end
+
+  return list[1]
+end
+
+function Registry.track(group, entry)
+  recent[group] = recent[group] or {}
+  table.insert(recent[group], entry)
+end
+
+function Registry.recentFor(group)
+  local list = recent[group]
+  if list and #list > 10 then
+    table.remove(list, 1)
+  end
+  return list
+end
+
+function Registry.markSeen(key)
+  if seen[key] then
+    return
+  end
+  seen[key] = true
+  table.insert(log, key)
+end
+
+return Registry
+`,
+    "Component.luau": `local React = require(script.Parent.React)
+local Registry = require(script.Parent.Registry)
+
+local function Component(props)
+  local label = React.useMemo(function()
+    local entry = Registry.getByGroup(props.group, props.key)
+    local recent = Registry.recentFor(props.group)
+    Registry.markSeen(props.key)
+    return tostring(entry) .. tostring(recent)
+  end, { props.group, props.key })
+  return React.createElement("TextLabel", { Text = label })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render").map((diagnostic) => diagnostic.location.line),
+    [7, 8],
+  );
+});
+
+test("source effects ignore fresh engine values and lazy defaults but not parenting or world writes", async (t) => {
+  const root = tempProject(t, "fresh-engine-values", {
+    "Lib.luau": `local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+
+local Lib = {}
+local shared = nil
+local byKey = {}
+
+function Lib.sortedPlayers()
+  local players = Players:GetPlayers()
+  table.sort(players, function(a, b) return a.Name < b.Name end)
+  return players
+end
+
+function Lib.decode(text)
+  local data = HttpService:JSONDecode(text)
+  data.decoded = true
+  return data
+end
+
+function Lib.withParent(parent)
+  local list = parent:GetChildren()
+  table.insert(list, parent)
+  return list
+end
+
+function Lib.getShared()
+  shared = shared or {}
+  return shared
+end
+
+function Lib.lookup(key)
+  byKey[key] = byKey[key] or { key = key }
+  return byKey[key]
+end
+
+function Lib.makeLabel(text)
+  local label = Instance.new("TextLabel")
+  label.Text = text
+  return label
+end
+
+function Lib.mountLabel(text, parent)
+  local label = Instance.new("TextLabel")
+  label.Text = text
+  label.Parent = parent
+  return label
+end
+
+function Lib.create(className, properties)
+  local object = Instance.new(className)
+  for key, value in properties do
+    object[key] = value
+  end
+  return object
+end
+
+local function renameWorld()
+  local target = workspace:FindFirstChild("Target")
+  target.Name = "Renamed"
+end
+
+function Lib.renameTarget()
+  renameWorld()
+end
+
+return Lib
+`,
+    "Component.luau": `local React = require(script.Parent.React)
+local Lib = require(script.Parent.Lib)
+
+local function Component(props)
+  local players = Lib.sortedPlayers()
+  local data = Lib.decode(props.json)
+  local children = Lib.withParent(props.parent)
+  local shared = Lib.getShared()
+  local entry = Lib.lookup(props.key)
+  local label = Lib.makeLabel(props.text)
+  local mounted = Lib.mountLabel(props.text, props.parent)
+  local created = Lib.create("Frame", { Parent = props.parent })
+  Lib.renameTarget()
+  return React.createElement("TextLabel", { Text = tostring(players) .. tostring(data) .. tostring(children) .. tostring(shared) .. tostring(entry) .. tostring(label) .. tostring(mounted) .. tostring(created) })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics
+      .filter((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render" || diagnostic.rule === "react-luau/no-prop-mutation")
+      .map((diagnostic) => `${diagnostic.rule}:${diagnostic.location.line}`),
+    [11, 12, 13].map((line) => `react-luau/no-side-effects-in-render:${line}`),
+  );
+  assert.equal(
+    report.diagnostics.find((diagnostic) => diagnostic.location.line === 13)?.explanation,
+    "Doctor followed the code behind this call. Lib.renameTarget calls renameWorld at Lib.luau:63, then renameWorld changes state outside the render at Lib.luau:59 (`target.Name = \"Renamed\"`). If React abandons this render, that change still happens",
+  );
+});
+
+test("plain helpers named like hooks do not turn callbacks into components", async (t) => {
+  const root = tempProject(t, "hook-named-helper", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component(props)
+  local function useLabel(label)
+    label.Text = props.text
+  end
+
+  return React.createElement("TextButton", {
+    [React.Event.Activated] = function()
+      task.spawn(function()
+        local label = Instance.new("TextLabel")
+        useLabel(label)
+        label.Parent = props.container
+      end)
+    end,
+  })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(
+    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render"),
+    [],
+  );
+});
+
 test("source effects follow returned parameters, fresh reassignments, and casts", async (t) => {
   const root = tempProject(t, "returned-parameters", {
     "withA.luau": `local function withA(props, base)

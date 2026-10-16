@@ -113,7 +113,18 @@ for (const [type, members] of Object.entries({
 }
 
 const instanceMethods = new Map<string, ApiFunctionReference>([
-  ...["GetChildren", "GetDescendants", "GetAttributes", "GetTags"].map(
+  ...[
+    "GetChildren",
+    "GetDescendants",
+    "GetAttributes",
+    "GetTags",
+    "GetPlayers",
+    "GetTagged",
+    "GetPartsInPart",
+    "GetPartBoundsInBox",
+    "GetPartBoundsInRadius",
+    "JSONDecode",
+  ].map(
     (member): [string, ApiFunctionReference] => [
       member,
       { returnType: "table", allocation: "new", equality: "reference" },
@@ -124,6 +135,12 @@ const instanceMethods = new Map<string, ApiFunctionReference>([
     { returnType: "Instance", allocation: "new", equality: "reference" },
   ],
 ]);
+
+export function apiInstanceMethodReference(
+  member: string,
+): ApiFunctionReference | null {
+  return instanceMethods.get(member) ?? null;
+}
 
 export function apiFunctionReference(
   path: string,
