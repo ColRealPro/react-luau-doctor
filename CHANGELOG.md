@@ -9,7 +9,7 @@
 ### Fixed
 
 - `no-side-effects-in-render` no longer flags lookup caches, lazy defaults, or edits to fresh values such as `GetChildren()` results in called code
-- Helpers named like hooks that never call a hook no longer make their callers count as components
+- Event handlers and other callbacks no longer count as components just because they call a hook or a helper named like one
 - `no-prop-mutation` no longer flags helpers that parent a new Instance into a passed Instance
 
 ## 0.21.1

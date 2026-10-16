@@ -5229,7 +5229,7 @@ return Component
   );
 });
 
-test("plain helpers named like hooks do not turn callbacks into components", async (t) => {
+test("hook calls do not turn nested callbacks into components", async (t) => {
   const root = tempProject(t, "hook-named-helper", {
     "Component.luau": `local React = require(script.Parent.React)
 
@@ -5246,6 +5246,10 @@ local function Component(props)
         label.Parent = props.container
       end)
     end,
+    [React.Event.MouseEnter] = function()
+      local hovered = React.useState(false)
+      Instance.new("Part").Parent = props.container
+    end,
   })
 end
 
@@ -5255,8 +5259,10 @@ return Component
 
   const report = await scanPath(root);
   assert.deepEqual(
-    report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render"),
-    [],
+    report.diagnostics
+      .filter((diagnostic) => diagnostic.rule === "react-luau/no-side-effects-in-render" || diagnostic.rule === "react-luau/rules-of-hooks")
+      .map((diagnostic) => `${diagnostic.rule}:${diagnostic.location.line}`),
+    ["react-luau/rules-of-hooks:12", "react-luau/rules-of-hooks:17"],
   );
 });
 
