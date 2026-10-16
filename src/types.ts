@@ -149,8 +149,20 @@ export interface ExternalCallbackFunctionSummary {
   highFrequency: boolean;
 }
 
+/** One function on the path from a called function to the code that changes outside state */
+export interface SourceEffectStep {
+  name: string;
+  file: string;
+  line?: number;
+  code?: string;
+}
+
 export interface SourceEffectModuleSummary {
   effectfulMembers: Set<string>;
+  /** Path to the outside change for each effectful member, keyed by member name or "" for the export */
+  effectTraces?: Map<string, SourceEffectStep[]>;
+  /** Where each receiver-mutating member changes its receiver */
+  receiverTraces?: Map<string, SourceEffectStep[]>;
   effectfulExport: boolean;
   /** Members that mutate their receiver but are not otherwise proven globally effectful. */
   mutatingMembers: Set<string>;

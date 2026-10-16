@@ -142,6 +142,17 @@ function isMemoWrappedFunction(
   return resolvePath(name, aliases, reactNamespaces, new Set()) === "React.memo";
 }
 
+function isReturnedFunction(node: SyntaxNode): boolean {
+  return node.parent?.type === "expression_list" && node.parent.parent?.type === "return_statement";
+}
+
+function isNestedFunction(node: SyntaxNode): boolean {
+  for (let current = node.parent; current; current = current.parent) {
+    if (current.type === "function_definition" || current.type === "function_declaration") return true;
+  }
+  return false;
+}
+
 function isModuleReturnedFunction(node: SyntaxNode): boolean {
   const expressionList = node.parent;
   const returnStatement = expressionList?.type === "expression_list" ? expressionList.parent : null;
@@ -380,6 +391,28 @@ export function buildReactModel(root: SyntaxNode, project?: ProjectModel): React
     functionsBySimpleName.set(info.name, existing);
   }
 
+  // Like imported hooks, a local function named like a hook only counts as one
+  // when it calls a hook, so calling a plain helper does not make a component
+  const hookKinds = new Map(projectHookKinds);
+  const localHookNames = new Set(
+    functions
+      .filter((info) => info.isHook && info.name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(info.name) && !projectHookKinds.has(info.name))
+      .map((info) => info.name!),
+  );
+  for (const name of localHookNames) hookKinds.set(name, false);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const name of localHookNames) {
+      if (hookKinds.get(name)) continue;
+      const callsHook = (functionsBySimpleName.get(name) ?? []).some((info) =>
+        info.body && hasDirectHookCall(info.body, aliases, reactNamespaces, reactRobloxNamespaces, hookKinds),
+      );
+      if (!callsHook) continue;
+      hookKinds.set(name, true);
+      changed = true;
+    }
+  }
+
   for (const info of functions) {
     if (!isReactFile || !info.body || info.isHook) continue;
     const simplePascalName = Boolean(info.name && /^[A-Z][A-Za-z0-9_]*$/.test(info.name));
@@ -388,10 +421,14 @@ export function buildReactModel(root: SyntaxNode, project?: ProjectModel): React
       aliases,
       reactNamespaces,
       reactRobloxNamespaces,
-      projectHookKinds,
+      hookKinds,
     );
     const renders = hasDirectCreateElementCall(info.body, aliases, reactNamespaces, reactRobloxNamespaces);
-    if (hasHooks || isMemoWrappedFunction(info.node, aliases, reactNamespaces) || (simplePascalName && renders)) {
+    // A callback nested in another function, such as an event handler or task,
+    // is not a component just because it calls a hook. Named and returned
+    // functions can still be local or factory-made components
+    const hookEvidence = hasHooks && (simplePascalName || isReturnedFunction(info.node) || !isNestedFunction(info.node));
+    if (hookEvidence || isMemoWrappedFunction(info.node, aliases, reactNamespaces) || (simplePascalName && renders)) {
       info.isComponent = true;
     } else if (!info.name && isModuleReturnedFunction(info.node) && hasHooks) {
       info.isComponent = true;

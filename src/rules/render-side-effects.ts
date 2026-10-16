@@ -6,6 +6,7 @@ import type {
   RuleContext,
   RuleDefinition,
   SourceEffectModuleSummary,
+  SourceEffectStep,
 } from "../types";
 
 import {
@@ -385,46 +386,76 @@ function sourceEffectInstances(
   return result;
 }
 
+interface InferredEffect {
+  trace?: SourceEffectStep[];
+}
+
 function sourceInferredEffectCall(
   call: SyntaxNode,
   context: RuleContext,
   imports: SourceBindings<SourceEffectModuleSummary>,
   instances: SourceBindings<EffectInstance>,
-): boolean {
+): InferredEffect | null {
   const path = context.getCallPath(call)?.replace(/\s+/g, "") ?? "";
 
   if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(path)) {
     const direct = resolveSourceBinding(imports, path, call, context);
 
-    if (direct?.effectfulExport) return true;
+    if (direct?.effectfulExport) return { trace: direct.effectTraces?.get("") };
   }
 
   const member = path.match(
     /^([A-Za-z_][A-Za-z0-9_]*)[.:]([A-Za-z_][A-Za-z0-9_]*)$/,
   );
 
-  if (!member) return false;
+  if (!member) return null;
+
+  const effectful = (summary: SourceEffectModuleSummary) =>
+    summary.effectfulMembers.has(member[2])
+      ? { trace: summary.effectTraces?.get(member[2]) }
+      : null;
 
   const instance = resolveSourceBinding(instances, member[1], call, context);
 
   if (instance) {
-    if (instance.summary.effectfulMembers.has(member[2])) return true;
-
     return (
-      instance.persistent && instance.summary.mutatingMembers.has(member[2])
+      effectful(instance.summary) ??
+      (instance.persistent && instance.summary.mutatingMembers.has(member[2])
+        ? { trace: instance.summary.receiverTraces?.get(member[2]) }
+        : null)
     );
   }
 
   const imported = resolveSourceBinding(imports, member[1], call, context);
 
-  if (!imported) return false;
+  if (!imported) return null;
 
   // The imported module table is itself persistent project state, so a method
   // that mutates its receiver is observable even if it has no other effects.
   return (
-    imported.effectfulMembers.has(member[2]) ||
-    imported.mutatingMembers.has(member[2])
+    effectful(imported) ??
+    (imported.mutatingMembers.has(member[2])
+      ? { trace: imported.receiverTraces?.get(member[2]) }
+      : null)
   );
+}
+
+function stepLocation(step: SourceEffectStep): string {
+  return step.line === undefined ? step.file : `${step.file}:${step.line}`;
+}
+
+function describeEffectTrace(trace: SourceEffectStep[]): string | null {
+  const last = trace.at(-1);
+
+  if (!last) return null;
+
+  const calls = trace
+    .slice(0, -1)
+    .map((step, index) => `${step.name} calls ${trace[index + 1].name} at ${stepLocation(step)}`);
+
+  const change = `${last.name} changes state outside the render at ${stepLocation(last)}${last.code ? ` (\`${last.code}\`)` : ""}`;
+
+  return `Doctor followed the code behind this call. ${[...calls, change].join(", then ")}. If React abandons this render, that change still happens`;
 }
 
 const RENDER_EFFECT_PATTERNS = [
@@ -604,7 +635,7 @@ export const noSideEffectsInRender: RuleDefinition = {
         pattern.test(path),
       );
 
-      let inferredFromSource = sourceInferredEffectCall(
+      let inferred = sourceInferredEffectCall(
         call,
         context,
         effectImports,
@@ -612,8 +643,10 @@ export const noSideEffectsInRender: RuleDefinition = {
       );
 
       // Report the inner operation rather than duplicating it on an inferred wrapper.
-      if (inferredFromSource && hasNestedKnownRenderSideEffect(call, context))
-        inferredFromSource = false;
+      if (inferred && hasNestedKnownRenderSideEffect(call, context))
+        inferred = null;
+
+      const inferredFromSource = inferred !== null;
 
       if (!knownPattern && !inferredFromSource) continue;
 
@@ -631,7 +664,8 @@ export const noSideEffectsInRender: RuleDefinition = {
 
         explanation:
           inferredFromSource && !knownPattern
-            ? "Doctor is not judging this call by its name. It followed the code behind the call and found a mutation that can affect existing state outside this render. That means the call can change the app even if React later abandons this render."
+            ? (inferred?.trace && describeEffectTrace(inferred.trace)) ??
+              "Doctor is not judging this call by its name. It followed the code behind the call and found a mutation that can affect existing state outside this render. That means the call can change the app even if React later abandons this render."
             : `${path} performs work outside React's render calculation.`,
 
         help:
