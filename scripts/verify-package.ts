@@ -38,8 +38,8 @@ try {
   for (const required of [
     "dist/cli.js",
     "dist/config.schema.json",
-    "vendor/tree-sitter-luau.wasm",
-    "vendor/tree-sitter-luau.LICENSE",
+    "vendor/luau-parser.wasm",
+    "vendor/luau.LICENSE",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     "README.md",

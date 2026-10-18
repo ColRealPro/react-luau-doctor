@@ -21,7 +21,13 @@ export interface SyntaxNode {
   childrenForFieldName(name: string): SyntaxNode[];
 }
 
+export interface SyntaxError {
+  node: SyntaxNode;
+  message: string;
+}
+
 export interface SyntaxTree {
   rootNode: SyntaxNode;
+  errors: SyntaxError[];
   delete?(): void;
 }

@@ -201,7 +201,7 @@ function currentAnalyzerHash(namespace = "cli"): string {
   hashAnalyzerFile(
     hash,
     packageRoot,
-    path.join(packageRoot, "vendor", "tree-sitter-luau.wasm"),
+    path.join(packageRoot, "vendor", "luau-parser.wasm"),
   );
 
   const result = hash.digest("hex");

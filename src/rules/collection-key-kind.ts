@@ -1,7 +1,6 @@
 import type { SyntaxNode } from "../syntax";
 import type { RuleContext } from "../types";
 import { variableListTargets } from "../ast/walk";
-import { simpleTypeAliases } from "../parser-compat";
 import { assignmentLeft, declarationNames } from "./helpers";
 
 export type CollectionKeyKind = "array" | "dictionary" | "unknown";
@@ -29,17 +28,18 @@ export function isUnshadowedBuiltin(site: SyntaxNode, name: string): boolean {
 
 // These are local syntax hints, not a replacement for Luau type checking.
 export function collectionKeyKindResolver(context: RuleContext): (expression: SyntaxNode, site: SyntaxNode) => CollectionKeyKind {
-  const scopes = [...context.walk()].filter((node) => node.type === "block" || node.type === "chunk");
   const writes = [...context.walk()].filter((node) => node.type === "assignment_statement" && node.parent?.type !== "variable_declaration");
-  const aliases = simpleTypeAliases(context.source).map((alias) => ({
-    ...alias,
-    // Compatibility parsing masks aliases. A function's first alias can
-    // therefore precede the parser's reported body start.
-    scope: scopes.filter((scope) => (scope.startIndex <= alias.startIndex ||
-      ((scope.parent?.type === "function_definition" || scope.parent?.type === "function_declaration") &&
-        (scope.parent.childForFieldName("parameters")?.endIndex ?? scope.startIndex) < alias.startIndex)) && scope.endIndex > alias.startIndex)
-      .sort((a, b) => b.startIndex - a.startIndex)[0] ?? context.root,
-  }));
+
+  const aliases = [...context.walk()].flatMap((node) => {
+    // Generic aliases have no `=` directly after their name and stay unresolved
+    const name = node.type === "type_definition" ? node.childForFieldName("name") : null;
+    const equals = node.children.find((child) => child.type === "=");
+    const type = equals ? node.namedChildren.find((child) => child.startIndex >= equals.endIndex) : null;
+
+    if (!name || !type || !node.parent) return [];
+
+    return [{ name: name.text, type: type.text, startIndex: node.startIndex, scope: node.parent }];
+  });
 
   function enclosingScopes(site: SyntaxNode): SyntaxNode[] {
     const result = [];

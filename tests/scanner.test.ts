@@ -1505,14 +1505,38 @@ test("accepts modern Luau const, export-by-value, attributes, type functions, ex
   assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/parse-error"), false);
   assert.equal(report.scannedFiles, 1);
   const propMutation = report.diagnostics.find((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation");
-  assert.equal(propMutation?.location.line, 31);
+  assert.equal(propMutation?.location.line, 30);
   assert.equal(propMutation?.location.column, 2);
+});
+
+test("typed hook syntax parses and diagnostics after non-ASCII text keep source columns", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-luau-syntax-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const mutation = '\tlocal greeting: typeof(props.label) = "h\u00e9llo \u{1f600}"; props.label = greeting';
+
+  fs.writeFileSync(path.join(root, "Component.luau"), [
+    "local React = require(script.Parent.React)",
+    "local function Component<T...>(props: { label: string }, ...: T...): React.Element",
+    mutation,
+    "\tlocal value = React.useMemo(function() return nil :: { hasValue: true } | nil end, {})",
+    '\treturn React.createElement("TextLabel", { Text = tostring(value) })',
+    "end",
+    "return Component",
+  ].join("\n"));
+
+  const report = await scanPath(root, { parallel: false });
+  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/parse-error"), false);
+  const propMutation = report.diagnostics.find((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation");
+  assert.equal(propMutation?.location.line, 3);
+  assert.equal(propMutation?.location.column, mutation.indexOf("props.label =") + 1);
 });
 
 test("scan progress advances across every candidate file", async () => {
   const progress: Array<{ current: number; total: number; partial?: boolean }> = [];
+
   const report = await scanPath(fixtures, {
     cache: false,
+
     onProgress(value) {
       progress.push(value);
     },

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { sourceWithoutComments } from "./parser-compat";
+import { sourceWithoutComments } from "./source-comments";
 
 import {
   buildUniqueFeatureAliases,
