@@ -241,7 +241,7 @@ export async function scanPath(
     });
   };
 
-  const cacheSession = timeStage("Index project", () =>
+  const cacheSession = await timeStage("Index project", () =>
     prepareProjectCache(
       root,
       modelCandidates,
@@ -517,8 +517,10 @@ export async function scanPath(
         candidate.relativePath ?? path.relative(root, candidate.absolutePath),
       );
 
+      // Indexing already found every project file that exists
       if (
         candidate.source === undefined &&
+        !cacheSession.files[relativePath] &&
         !fs.existsSync(candidate.absolutePath)
       )
         return null;

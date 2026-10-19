@@ -309,13 +309,22 @@ function fileStateMatches(
   );
 }
 
-export function prepareProjectCache(
+// Reading files one at a time is several times slower on Windows, where each
+// file system call has a high fixed cost
+const FILE_READ_CONCURRENCY = 64;
+
+interface DiskFile {
+  stat: fs.Stats;
+  source?: string;
+}
+
+export async function prepareProjectCache(
   root: string,
   candidates: ScanFileInput[],
   enabled = true,
   onProgress?: (current: number, total: number, file?: string) => void,
   namespace = "cli",
-): ProjectCacheSession {
+): Promise<ProjectCacheSession> {
   const cacheEnabled =
     enabled && process.env.REACT_LUAU_DOCTOR_DISABLE_CACHE !== "1";
 
@@ -327,13 +336,45 @@ export function prepareProjectCache(
 
   onProgress?.(0, candidates.length);
 
+  const relativePaths = candidates.map((candidate) =>
+    normalizeRelative(
+      candidate.relativePath ?? path.relative(root, candidate.absolutePath),
+    ),
+  );
+
+  const disk = new Array<DiskFile | null>(candidates.length).fill(null);
+  let completed = 0;
+  let next = 0;
+
+  const readNext = async (): Promise<void> => {
+    while (next < candidates.length) {
+      const index = next;
+      next += 1;
+
+      const candidate = candidates[index];
+
+      if (candidate.source === undefined) {
+        try {
+          const stat = await fs.promises.stat(candidate.absolutePath);
+
+          disk[index] = fileStateMatches(previous?.files[relativePaths[index]], stat)
+            ? { stat }
+            : { stat, source: await fs.promises.readFile(candidate.absolutePath, "utf8") };
+        } catch {
+          disk[index] = null;
+        }
+      }
+
+      completed += 1;
+      onProgress?.(completed, candidates.length, relativePaths[index]);
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(FILE_READ_CONCURRENCY, candidates.length) }, readNext));
+
   for (let index = 0; index < candidates.length; index += 1) {
     const candidate = candidates[index];
-
-    const relativePath = normalizeRelative(
-      candidate.relativePath ?? path.relative(root, candidate.absolutePath),
-    );
-
+    const relativePath = relativePaths[index];
     const previousState = previous?.files[relativePath];
     let state: CachedFileState;
 
@@ -348,37 +389,32 @@ export function prepareProjectCache(
           previousState?.hash === hash ? previousState.isReactFile : undefined,
       };
     } else {
-      try {
-        const stat = fs.statSync(candidate.absolutePath);
+      const file = disk[index];
 
-        if (fileStateMatches(previousState, stat)) {
-          state = { ...previousState! };
-        } else {
-          const source = fs.readFileSync(candidate.absolutePath, "utf8");
-          const hash = hashText(source);
-          sources.set(relativePath, source);
+      if (!file) continue;
 
-          state = {
-            size: stat.size,
-            mtimeMs: stat.mtimeMs,
-            ctimeMs: stat.ctimeMs,
-            hash,
+      if (file.source === undefined) {
+        state = { ...previousState! };
+      } else {
+        const hash = hashText(file.source);
+        sources.set(relativePath, file.source);
 
-            isReactFile:
-              previousState?.hash === hash
-                ? previousState.isReactFile
-                : undefined,
-          };
-        }
-      } catch {
-        onProgress?.(index + 1, candidates.length, relativePath);
-        continue;
+        state = {
+          size: file.stat.size,
+          mtimeMs: file.stat.mtimeMs,
+          ctimeMs: file.stat.ctimeMs,
+          hash,
+
+          isReactFile:
+            previousState?.hash === hash
+              ? previousState.isReactFile
+              : undefined,
+        };
       }
     }
 
     files[relativePath] = state;
     fingerprintParts.push(`${relativePath}\0${state.hash}`);
-    onProgress?.(index + 1, candidates.length, relativePath);
   }
 
   const fingerprint = hashText(fingerprintParts.join("\0"));

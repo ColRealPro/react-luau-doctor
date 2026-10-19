@@ -167,7 +167,7 @@ test("deep editor overlays agree with a normal Doctor scan", async (t) => {
   );
 });
 
-test("editor cache writes do not overwrite the CLI cache", (t) => {
+test("editor cache writes do not overwrite the CLI cache", async (t) => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "doctor-cache-namespaces-"),
   );
@@ -186,11 +186,11 @@ test("editor cache writes do not overwrite the CLI cache", (t) => {
   fs.writeFileSync(filename, "return 1\n");
   const candidates = [{ absolutePath: filename }];
   const project = buildProjectModel(root, candidates);
-  saveProjectCache(prepareProjectCache(root, candidates), project);
+  saveProjectCache(await prepareProjectCache(root, candidates), project);
   const cliBytes = fs.readFileSync(projectCachePath(root));
 
   saveProjectCache(
-    prepareProjectCache(root, candidates, true, undefined, "lsp"),
+    await prepareProjectCache(root, candidates, true, undefined, "lsp"),
     project,
   );
 
