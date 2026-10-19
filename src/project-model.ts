@@ -58,6 +58,8 @@ const CALLBACK_PARAMETER_NAME =
 
 interface SourceRecord extends ModuleIdentity {
   source: string;
+  // `source` with strings and comments blanked, keeping every offset
+  code: string;
 }
 
 export interface ProjectModelModuleAnalysis {
@@ -617,7 +619,7 @@ function collectConditionalHookModeCallSites(
 
     if (imports.size === 0) continue;
 
-    const masked = maskLuauNonCode(record.source);
+    const masked = record.code;
     const constants = stableLiteralConstants(masked);
 
     for (const [localName, summary] of imports) {
@@ -1641,8 +1643,7 @@ function atLineStart(code: string, index: number): boolean {
  * functions, bracket writes, method calls, and escaping references disqualify
  * the fields they could affect.
  */
-function findLoadTimeExportFields(source: string): Set<string> | null {
-  const code = maskLuauNonCode(source);
+function findLoadTimeExportFields(code: string): Set<string> | null {
   const direct = /^return\s*\{/m.exec(code);
 
   if (direct) {
@@ -1707,7 +1708,7 @@ function invalidateExternalFieldWrites(
   loadTimeFields: Map<string, Set<string>>,
 ): void {
   for (const record of records) {
-    const code = maskLuauNonCode(record.source);
+    const code = record.code;
 
     for (const match of code.matchAll(/\brequire\s*\(/g)) {
       const open = match.index + match[0].length - 1;
@@ -1774,7 +1775,7 @@ export function buildProjectModel(
       candidate.source ?? fs.readFileSync(candidate.absolutePath, "utf8");
     const source = sourceWithoutComments(originalSource);
     const id = relativePath.toLowerCase();
-    const record: SourceRecord = { id, source, keys: moduleKeys(relativePath) };
+    const record: SourceRecord = { id, source, code: maskLuauNonCode(source), keys: moduleKeys(relativePath) };
     const memoArguments = findMemoCall(source);
 
     const analysis: ProjectModelModuleAnalysis = {
@@ -1793,7 +1794,7 @@ export function buildProjectModel(
       bindingCompatibleProps:
         findBindingCompatibleComponentProps(source) ?? undefined,
       staticIterationTables: findStaticIterationTables(source) ?? undefined,
-      loadTimeExportFields: findLoadTimeExportFields(source) ?? undefined,
+      loadTimeExportFields: findLoadTimeExportFields(record.code) ?? undefined,
       conditionalHookMode: findConditionalHookMode(source) ?? undefined,
       declaredMethods: findDeclaredMethods(source),
     };
