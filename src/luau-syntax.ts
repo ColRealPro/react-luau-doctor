@@ -15,7 +15,8 @@ interface RawNode {
 type RawRange = [number, number];
 
 export interface LuauParseOutput {
-  root: RawNode;
+  // Null when Luau stops at its error limit
+  root: RawNode | null;
   errors: Array<{ range: RawRange; message: string }>;
   comments: RawRange[];
 }
@@ -187,7 +188,6 @@ class Builder {
   private readonly state: TreeState;
   private readonly toUtf16: ((offset: number) => number) | null;
   private readonly comments: RawRange[];
-  private commentCursor = 0;
   private readonly errorNodes: LuauNode[] = [];
 
   constructor(private readonly source: string, comments: RawRange[]) {
@@ -217,17 +217,18 @@ class Builder {
     return node;
   }
 
+  // Tokens aren't always looked up in source order, so this can't keep a cursor
   private commentAt(position: number): RawRange | null {
-    while (this.commentCursor < this.comments.length && this.comments[this.commentCursor][1] <= position) {
-      this.commentCursor += 1;
-    }
+    let low = 0;
+    let high = this.comments.length - 1;
 
-    for (let index = this.commentCursor; index < this.comments.length; index += 1) {
-      const comment = this.comments[index];
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      const comment = this.comments[middle];
 
-      if (comment[0] > position) return null;
-
-      if (comment[0] <= position && position < comment[1]) return comment;
+      if (comment[1] <= position) low = middle + 1;
+      else if (comment[0] > position) high = middle - 1;
+      else return comment;
     }
 
     return null;
@@ -289,7 +290,7 @@ class Builder {
   build(output: LuauParseOutput): LuauSyntaxTree {
     const root = this.node("chunk", 0, this.source.length);
 
-    for (const statement of this.statements(output.root.body)) root.append(...statement);
+    for (const statement of this.statements(output.root?.body ?? [])) root.append(...statement);
 
     root.endIndex = this.source.length;
     this.attachComments(root);

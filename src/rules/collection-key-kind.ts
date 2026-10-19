@@ -1,6 +1,7 @@
 import type { SyntaxNode } from "../syntax";
 import type { RuleContext } from "../types";
 import { variableListTargets } from "../ast/walk";
+import { sourceWithoutComments } from "../source-comments";
 import { assignmentLeft, declarationNames } from "./helpers";
 
 export type CollectionKeyKind = "array" | "dictionary" | "unknown";
@@ -52,7 +53,7 @@ export function collectionKeyKindResolver(context: RuleContext): (expression: Sy
   }
 
   function typeKind(text: string, fields: string[], site: SyntaxNode, seen = new Set<string>()): CollectionKeyKind {
-    const type = text.trim();
+    const type = sourceWithoutComments(text).trim();
     if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(type)) {
       if (seen.has(type)) return "unknown";
       seen.add(type);

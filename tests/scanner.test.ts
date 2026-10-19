@@ -1063,6 +1063,45 @@ test("reports Luau parse errors before downstream analysis", async () => {
 });
 
 
+test("comments and Luau's parse error limit don't change analysis of surrounding code", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-parser-trivia-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Broken.luau"), `local React = require(script.Parent.React)\n${"!".repeat(101)}\n`);
+
+  fs.writeFileSync(
+    path.join(root, "Parent.luau"),
+    `local React = require(script.Parent.React)
+local Child = React.memo(function() return React.createElement("Frame") end)
+local function Parent(props)
+  return React.createElement(Child, { value = props.enabled --[[a]] and { key --[[b]] = 1 } })
+end
+return Parent`,
+  );
+
+  fs.writeFileSync(
+    path.join(root, "List.luau"),
+    `local React = require(script.Parent.React)
+type Items = { -- keyed by id
+  [string]: number
+}
+local function List(props: { items: Items })
+  local children = {}
+  for id, value in pairs(props.items) do
+    children[id] = React.createElement("Frame")
+  end
+  return React.createElement("Frame", nil, children)
+end
+return List`,
+  );
+
+  const report = await scanPath(root, { cache: false, parallel: false });
+  const rules = (file: string) => report.diagnostics.filter((entry) => entry.file === file).map((entry) => entry.rule);
+
+  assert.deepEqual(rules("Parent.luau"), ["react-luau/rerender-unstable-memo-props"]);
+  assert.deepEqual(rules("List.luau"), []);
+});
+
 test("effect cleanup recognizes named cleanup functions and Maid-style ownership", async () => {
   const ids = await ruleIds("cleanup-patterns.luau");
   assert.equal(ids.has("react-luau/effect-needs-cleanup"), false);
