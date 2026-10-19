@@ -31,8 +31,10 @@ export function collectionKeyKindResolver(context: RuleContext): (expression: Sy
   const writes = [...context.walk()].filter((node) => node.type === "assignment_statement" && node.parent?.type !== "variable_declaration");
 
   const aliases = [...context.walk()].flatMap((node) => {
+    if (node.type !== "type_definition") return [];
+
     // Generic aliases have no `=` directly after their name and stay unresolved
-    const name = node.type === "type_definition" ? node.childForFieldName("name") : null;
+    const name = node.childForFieldName("name");
     const equals = node.children.find((child) => child.type === "=");
     const type = equals ? node.namedChildren.find((child) => child.startIndex >= equals.endIndex) : null;
 
