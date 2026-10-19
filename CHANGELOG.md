@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `--timings` shows how long each analysis stage, parse step, and rule took
+
 ### Changed
 
 - Files are now parsed with the official Luau parser, so there should be better compatibility with modern Luau features, as well as faster parse times

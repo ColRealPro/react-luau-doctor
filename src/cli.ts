@@ -40,7 +40,10 @@ import {
   renderAnnotations,
   renderRulesList,
   renderTextReport,
+  renderTimings,
 } from "./reporter";
+
+import { takeTimings } from "./timings";
 
 import { rules } from "./rules";
 import { scanPath } from "./scanner";
@@ -63,6 +66,7 @@ interface CliOptions {
   target: string;
   verbose?: boolean;
   debug: boolean;
+  timings: boolean;
   outputDir?: string;
   scoreOnly: boolean;
   json: boolean;
@@ -115,6 +119,7 @@ Usage:
 Scan options:
   --verbose                              Show every finding and per-file details
   --debug                                Print resolved local scan details to stderr
+  --timings                              Print how long each analysis stage took to stderr
   --output-dir <dir>                     Write report.json, diagnostics.json, and summary.json
   --score                                Output only the numeric score
   --json                                 Output one structured JSON report
@@ -406,6 +411,7 @@ function parseArgs(argv: string[]): CliOptions {
   const options: CliOptions = {
     target: ".",
     debug: false,
+    timings: false,
     scoreOnly: false,
     json: false,
     jsonCompact: false,
@@ -429,6 +435,7 @@ function parseArgs(argv: string[]): CliOptions {
 
     if (arg === "--verbose") options.verbose = true;
     else if (arg === "--debug") options.debug = true;
+    else if (arg === "--timings") options.timings = true;
     else if (arg === "--score") options.scoreOnly = true;
     else if (arg === "--json") options.json = true;
     else if (arg === "--json-compact") options.jsonCompact = true;
@@ -1483,6 +1490,11 @@ async function main(): Promise<void> {
       process.stdout.write(
         `${renderTextReport(report, showScore, colorized, verbose, process.stdout.columns ?? 120)}\n`,
       );
+
+    if (options.timings)
+      process.stderr.write(`
+${renderTimings(takeTimings(), shouldUseColor(options.noColor, false))}
+`);
 
     if (updateNoticeEnabled) {
       const update = getCachedUpdateNotice(VERSION);

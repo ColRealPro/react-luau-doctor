@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LuauParseOutput } from "./luau-syntax";
+import { timeWork } from "./timings";
 
 interface LuauExports {
   memory: WebAssembly.Memory;
@@ -35,12 +36,18 @@ export class LuauParser {
     const pointer = this.exports.luau_alloc(encoded.length + 1);
 
     try {
-      new Uint8Array(this.exports.memory.buffer, pointer, encoded.length).set(encoded);
-      const result = this.exports.luau_parse(pointer, encoded.length);
-      const memory = new Uint8Array(this.exports.memory.buffer);
-      const end = memory.indexOf(0, result);
+      const result = timeWork("Parse/Luau WASM", () => {
+        new Uint8Array(this.exports.memory.buffer, pointer, encoded.length).set(encoded);
 
-      return JSON.parse(decoder.decode(memory.subarray(result, end)));
+        return this.exports.luau_parse(pointer, encoded.length);
+      });
+
+      return timeWork("Parse/Decode JSON", () => {
+        const memory = new Uint8Array(this.exports.memory.buffer);
+        const end = memory.indexOf(0, result);
+
+        return JSON.parse(decoder.decode(memory.subarray(result, end)));
+      });
     } finally {
       this.exports.luau_free(pointer);
     }
