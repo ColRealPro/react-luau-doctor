@@ -433,7 +433,7 @@ class Builder {
         return this.errorNode(raw, [...raw.expressions.map((item: RawNode) => this.expression(item)), ...raw.statements.map((item: RawNode) => this.statement(item))]);
 
       default:
-        return this.errorNode(raw, []);
+        return this.node("unknown_statement", this.start(raw), this.end(raw));
     }
   }
 
@@ -857,7 +857,7 @@ class Builder {
         return this.errorNode(raw, raw.expressions.map((item: RawNode) => this.expression(item)));
 
       default:
-        return this.errorNode(raw, []);
+        return this.node("unknown_expression", start, end);
     }
   }
 
