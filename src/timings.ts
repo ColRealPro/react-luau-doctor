@@ -12,6 +12,14 @@ export interface Timings {
 
 let totals: Timings = { stages: {}, work: {} };
 
+// Workers inherit the environment, so enabling timings also covers them
+let enabled = process.env.REACT_LUAU_DOCTOR_TIMINGS === "1";
+
+export function enableTimings(): void {
+  enabled = true;
+  process.env.REACT_LUAU_DOCTOR_TIMINGS = "1";
+}
+
 function add(group: Record<string, TimingEntry>, name: string, ms: number, count = 1): void {
   const entry = (group[name] ??= { ms: 0, count: 0 });
 
@@ -20,6 +28,8 @@ function add(group: Record<string, TimingEntry>, name: string, ms: number, count
 }
 
 function measure<T>(group: Record<string, TimingEntry>, name: string, run: () => T): T {
+  if (!enabled) return run();
+
   const startedAt = performance.now();
   const finish = (): void => add(group, name, performance.now() - startedAt);
 
@@ -40,6 +50,8 @@ function measure<T>(group: Record<string, TimingEntry>, name: string, run: () =>
 }
 
 export function addStageTiming(name: string, ms: number): void {
+  if (!enabled) return;
+
   add(totals.stages, name, ms);
 }
 

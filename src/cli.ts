@@ -43,7 +43,7 @@ import {
   renderTimings,
 } from "./reporter";
 
-import { takeTimings } from "./timings";
+import { enableTimings, takeTimings } from "./timings";
 
 import { rules } from "./rules";
 import { scanPath } from "./scanner";
@@ -1452,6 +1452,8 @@ async function main(): Promise<void> {
     });
 
     let report: ScanReport;
+
+    if (options.timings) enableTimings();
 
     try {
       report = await runScan(options, (scanProgress) =>
