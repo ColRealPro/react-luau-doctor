@@ -11,6 +11,16 @@ interface LocalValue {
 const valueCache = new WeakMap<RuleContext, Map<number, LocalValue | null>>();
 const apiCache = new WeakMap<RuleContext, Map<number, string | null>>();
 
+const reassignmentCache = new WeakMap<
+  RuleContext,
+  Map<number, Map<string, Set<FunctionInfo | null>>>
+>();
+
+const blockBindingCache = new WeakMap<
+  RuleContext,
+  Map<number, Map<string, SyntaxNode[]>>
+>();
+
 export function isUnboundIdentifier(
   context: RuleContext,
   node: SyntaxNode,
@@ -75,6 +85,111 @@ function assignedValue(
   return { value, returnIndex };
 }
 
+function nestedReassignments(
+  context: RuleContext,
+  statement: SyntaxNode,
+): Map<string, Set<FunctionInfo | null>> {
+  let cache = reassignmentCache.get(context);
+
+  if (!cache) {
+    cache = new Map();
+    reassignmentCache.set(context, cache);
+  }
+
+  const cached = cache.get(statement.id);
+
+  if (cached) return cached;
+
+  const names = new Map<string, Set<FunctionInfo | null>>();
+
+  for (const nested of context.walk(statement)) {
+    if (
+      nested.type !== "assignment_statement" ||
+      nested.parent?.type === "variable_declaration"
+    )
+      continue;
+
+    const variables = nested.namedChildren.find(
+      (child) => child.type === "variable_list",
+    );
+
+    const owner = context.nearestFunction(nested);
+
+    for (const target of variableListTargets(variables)) {
+      if (target.type !== "identifier") continue;
+
+      const owners = names.get(target.text) ?? new Set();
+      owners.add(owner);
+      names.set(target.text, owners);
+    }
+  }
+
+  cache.set(statement.id, names);
+
+  return names;
+}
+
+function assignedNames(statement: SyntaxNode): string[] {
+  const assignment =
+    statement.type === "variable_declaration"
+      ? statement.namedChildren.find(
+          (child) => child.type === "assignment_statement",
+        )
+      : statement;
+
+  const variables = assignment?.namedChildren.find(
+    (child) => child.type === "variable_list",
+  );
+
+  return variableListTargets(variables)
+    .filter((child) => child.type === "identifier")
+    .map((child) => child.text);
+}
+
+function blockBindings(
+  context: RuleContext,
+  block: SyntaxNode,
+): Map<string, SyntaxNode[]> {
+  let cache = blockBindingCache.get(context);
+
+  if (!cache) {
+    cache = new Map();
+    blockBindingCache.set(context, cache);
+  }
+
+  const cached = cache.get(block.id);
+
+  if (cached) return cached;
+
+  const bindings = new Map<string, SyntaxNode[]>();
+
+  const add = (name: string, statement: SyntaxNode): void => {
+    const statements = bindings.get(name);
+
+    if (!statements) bindings.set(name, [statement]);
+    else if (statements.at(-1) !== statement) statements.push(statement);
+  };
+
+  for (const child of block.namedChildren) {
+    if (child.type === "function_declaration") {
+      const name = child.childForFieldName("name")?.text;
+
+      if (name) add(name, child);
+    } else if (
+      child.type === "variable_declaration" ||
+      child.type === "assignment_statement"
+    ) {
+      for (const name of assignedNames(child)) add(name, child);
+    } else {
+      for (const name of nestedReassignments(context, child).keys()) add(name, child);
+    }
+  }
+
+  cache.set(block.id, bindings);
+
+  return bindings;
+}
+
 function visibleValue(
   context: RuleContext,
   node: SyntaxNode,
@@ -103,7 +218,11 @@ function visibleValue(
     }
 
     if (current.type === "block" || current.id === context.root.id) {
-      for (const child of [...current.namedChildren].reverse()) {
+      const statements = blockBindings(context, current).get(name) ?? [];
+
+      for (let index = statements.length - 1; index >= 0; index -= 1) {
+        const child = statements[index];
+
         if (child.startIndex >= node.startIndex) continue;
 
         if (
@@ -127,20 +246,9 @@ function visibleValue(
           child.type !== "function_declaration"
         ) {
           // A conditional reassignment makes the earlier value uncertain
-          for (const nested of context.walk(child)) {
-            if (
-              nested.type !== "assignment_statement" ||
-              nested.parent?.type === "variable_declaration"
-            )
-              continue;
+          const owners = nestedReassignments(context, child).get(name);
 
-            if (
-              context.nearestFunction(nested) !== context.nearestFunction(node)
-            )
-              continue;
-
-            if (assignedValue(nested, name) !== undefined) return null;
-          }
+          if (owners?.has(context.nearestFunction(node))) return null;
         }
       }
     }
