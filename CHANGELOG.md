@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Files are now parsed with the official Luau parser, so there should be better compatibility with modern Luau features, as well as faster parse times
+
 ## 0.21.2
 
 ### Changed
