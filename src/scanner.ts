@@ -334,7 +334,86 @@ export async function scanPath(
     workerCount > 1 ? new AnalysisWorkerPool(workerCount) : null;
 
   try {
-    let project = cachedProjectModel(cacheSession);
+    const cachedProject = cachedProjectModel(cacheSession);
+
+    const effectPhases = phaseTimer("Build project effects");
+
+    const reportEffectPhase: typeof progress = (phase, label, ...rest) => {
+      effectPhases.mark(label);
+      progress(phase, label, ...rest);
+    };
+
+    // Effects don't need the project model, so workers parse while the main
+    // thread builds it
+    const effectBuild = cachedProject?.sourceEffects.size
+      ? null
+      : timeStage("Build project effects", () =>
+          buildProjectSourceEffects(
+            root,
+            materializedCandidates,
+            projectParseCache,
+            (effectProgress) => {
+              if (effectProgress.phase === "parse") {
+                reportEffectPhase(
+                  "effects-parse",
+                  "Parsing effect sources",
+                  effectProgress.current,
+                  effectProgress.total,
+                  effectProgress.file,
+                );
+              } else if (effectProgress.phase === "index-functions") {
+                reportEffectPhase(
+                  "effects-index-functions",
+                  "Indexing effect functions",
+                  effectProgress.current,
+                  effectProgress.total,
+                );
+              } else if (effectProgress.phase === "analyze-calls") {
+                reportEffectPhase(
+                  "effects-analyze-calls",
+                  "Resolving effect calls",
+                  effectProgress.current,
+                  effectProgress.total,
+                );
+              } else if (effectProgress.phase === "assemble-graph") {
+                reportEffectPhase(
+                  "effects-assemble-graph",
+                  "Building effect graph",
+                  effectProgress.current,
+                  effectProgress.total,
+                );
+              } else if (effectProgress.phase === "resolve") {
+                reportEffectPhase(
+                  "effects-resolve",
+                  "Linking effect dependencies",
+                  effectProgress.current,
+                  effectProgress.total,
+                );
+              } else if (effectProgress.phase === "propagate") {
+                reportEffectPhase(
+                  "effects-propagate",
+                  "Propagating project effects",
+                  effectProgress.current,
+                  effectProgress.total,
+                );
+              } else {
+                reportEffectPhase(
+                  "effects-summarize",
+                  "Finalizing project effects",
+                  effectProgress.current,
+                  effectProgress.total,
+                );
+              }
+            },
+            fileHashes,
+            previousEffectModules,
+            workerPool ?? undefined,
+          ),
+        );
+
+    void effectBuild?.catch(() => undefined);
+
+    let project = cachedProject;
 
     if (project && !options.analysisSession) {
       progress("project-cache", "Loading cached project analysis", 1, 1);
@@ -358,82 +437,12 @@ export async function scanPath(
       progress("model", "Building project model", 1, 1);
     }
 
-    if (project.sourceEffects.size === 0) {
-      const effectPhases = phaseTimer("Build project effects");
-
-      const reportEffectPhase: typeof progress = (phase, label, ...rest) => {
-        effectPhases.mark(label);
-        progress(phase, label, ...rest);
-      };
-
-      const effectBuild = await timeStage("Build project effects", () =>
-        buildProjectSourceEffects(
-          root,
-          materializedCandidates,
-          projectParseCache,
-          (effectProgress) => {
-            if (effectProgress.phase === "parse") {
-              reportEffectPhase(
-                "effects-parse",
-                "Parsing effect sources",
-                effectProgress.current,
-                effectProgress.total,
-                effectProgress.file,
-              );
-            } else if (effectProgress.phase === "index-functions") {
-              reportEffectPhase(
-                "effects-index-functions",
-                "Indexing effect functions",
-                effectProgress.current,
-                effectProgress.total,
-              );
-            } else if (effectProgress.phase === "analyze-calls") {
-              reportEffectPhase(
-                "effects-analyze-calls",
-                "Resolving effect calls",
-                effectProgress.current,
-                effectProgress.total,
-              );
-            } else if (effectProgress.phase === "assemble-graph") {
-              reportEffectPhase(
-                "effects-assemble-graph",
-                "Building effect graph",
-                effectProgress.current,
-                effectProgress.total,
-              );
-            } else if (effectProgress.phase === "resolve") {
-              reportEffectPhase(
-                "effects-resolve",
-                "Linking effect dependencies",
-                effectProgress.current,
-                effectProgress.total,
-              );
-            } else if (effectProgress.phase === "propagate") {
-              reportEffectPhase(
-                "effects-propagate",
-                "Propagating project effects",
-                effectProgress.current,
-                effectProgress.total,
-              );
-            } else {
-              reportEffectPhase(
-                "effects-summarize",
-                "Finalizing project effects",
-                effectProgress.current,
-                effectProgress.total,
-              );
-            }
-          },
-          fileHashes,
-          previousEffectModules,
-          workerPool ?? undefined,
-        ),
-      );
-
+    if (effectBuild) {
+      const { effects, cacheModules } = await effectBuild;
       effectPhases.end();
 
-      project.sourceEffects = effectBuild.effects;
-      cacheSession.effectModules = effectBuild.cacheModules;
+      project.sourceEffects = effects;
+      cacheSession.effectModules = cacheModules;
     } else if (!cacheSession.effectModules) {
       cacheSession.effectModules = previousEffectModules;
     }
