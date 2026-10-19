@@ -313,9 +313,10 @@ function fileStateMatches(
 // file system call has a high fixed cost
 const FILE_READ_CONCURRENCY = 64;
 
-interface DiskFile {
+export interface DiskFile {
   stat: fs.Stats;
   source?: string;
+  hash?: string;
 }
 
 export async function prepareProjectCache(
@@ -324,6 +325,8 @@ export async function prepareProjectCache(
   enabled = true,
   onProgress?: (current: number, total: number, file?: string) => void,
   namespace = "cli",
+  // Reads shared with another pass over the same files, keyed by absolute path
+  diskFiles?: Map<string, DiskFile | null>,
 ): Promise<ProjectCacheSession> {
   const cacheEnabled =
     enabled && process.env.REACT_LUAU_DOCTOR_DISABLE_CACHE !== "1";
@@ -353,7 +356,9 @@ export async function prepareProjectCache(
 
       const candidate = candidates[index];
 
-      if (candidate.source === undefined) {
+      if (candidate.source === undefined && diskFiles?.has(candidate.absolutePath)) {
+        disk[index] = diskFiles.get(candidate.absolutePath)!;
+      } else if (candidate.source === undefined) {
         try {
           const stat = await fs.promises.stat(candidate.absolutePath);
 
@@ -363,6 +368,8 @@ export async function prepareProjectCache(
         } catch {
           disk[index] = null;
         }
+
+        diskFiles?.set(candidate.absolutePath, disk[index]);
       }
 
       completed += 1;
@@ -396,7 +403,7 @@ export async function prepareProjectCache(
       if (file.source === undefined) {
         state = { ...previousState! };
       } else {
-        const hash = hashText(file.source);
+        const hash = (file.hash ??= hashText(file.source));
         sources.set(relativePath, file.source);
 
         state = {

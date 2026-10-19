@@ -6,6 +6,7 @@ import {
   cachedEffectModules,
   cachedProjectModel,
   cachedReport,
+  type DiskFile,
   changedProjectFiles,
   knownReactFile,
   previousCachedReport,
@@ -57,10 +58,12 @@ export interface ScanAnalysisSession {
   projectModelModules: Map<string, ProjectModelModuleCacheEntry>;
   effectModules?: Record<string, CachedSourceEffectModule>;
   effectModuleIds?: string[];
+  projectFiles?: Map<string, string[]>;
+  diskFiles?: Map<string, DiskFile | null>;
 }
 
 export function createScanAnalysisSession(): ScanAnalysisSession {
-  return { projectModelModules: new Map() };
+  return { projectModelModules: new Map(), projectFiles: new Map(), diskFiles: new Map() };
 }
 
 type ScanRuntimeOptions = ScanOptions & {
@@ -147,8 +150,16 @@ function projectInputs(
   root: string,
   config: DoctorConfig,
   scopedCandidates: ScanFileInput[],
+  discovered?: Map<string, string[]>,
 ): ScanFileInput[] {
-  const all = discoverLuauFiles(root, config).map(
+  let files = discovered?.get(root);
+
+  if (!files) {
+    files = discoverLuauFiles(root, config);
+    discovered?.set(root, files);
+  }
+
+  const all = files.map(
     (absolutePath) => ({ absolutePath }) satisfies ScanFileInput,
   );
 
@@ -208,7 +219,7 @@ export async function scanPath(
 
   const modelCandidates =
     options.files || !targetIsProjectRoot
-      ? timeStage("Find files", () => projectInputs(root, config, candidates))
+      ? timeStage("Find files", () => projectInputs(root, config, candidates, options.analysisSession?.projectFiles))
       : candidates;
 
   const hasSourceOverlays = modelCandidates.some(
@@ -249,6 +260,8 @@ export async function scanPath(
       options.cache ?? true,
       (current, total, file) =>
         progress("index", "Indexing project", current, total, file),
+      undefined,
+      options.analysisSession?.diskFiles,
     ),
   );
 
