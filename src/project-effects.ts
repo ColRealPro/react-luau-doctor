@@ -73,6 +73,8 @@ export interface ProjectSourceEffectsBuildResult {
   cacheModules: Record<string, CachedSourceEffectModule>;
   // False when targets left some modules unanalyzed
   complete: boolean;
+  // Every module the build saw, analyzed or not
+  moduleIds: string[];
 }
 
 export interface EffectWorkerIndexInput extends ModuleIdentity {
@@ -1298,6 +1300,8 @@ export async function buildProjectSourceEffects(
   cachedModules: Readonly<Record<string, CachedSourceEffectModule>> = {},
   workerPool?: AnalysisWorkerPool,
   targets?: ReadonlySet<string>,
+  // The module set `cachedModules` came from, when they cover only part of it
+  cachedModuleIds?: ReadonlySet<string>,
 ): Promise<ProjectSourceEffectsBuildResult> {
   interface CandidateIdentity extends ModuleIdentity {
     relativePath: string;
@@ -1321,7 +1325,7 @@ export async function buildProjectSourceEffects(
   const moduleIdFeatures = new Map(identities.map((record) => [record.id, record.id] as const));
   const moduleAliases = buildUniqueFeatureAliases(identities, moduleIdFeatures);
   const currentIds = new Set(identities.map((identity) => identity.id));
-  const cachedIds = new Set(Object.values(cachedModules).map((module) => module.id));
+  const cachedIds = cachedModuleIds ?? new Set(Object.values(cachedModules).map((module) => module.id));
   const sameFileSet = currentIds.size === cachedIds.size && [...currentIds].every((id) => cachedIds.has(id));
 
   const dirtyIds = new Set<string>();
@@ -1745,6 +1749,7 @@ export async function buildProjectSourceEffects(
     effects,
     cacheModules: cacheModulesResult,
     complete: [...dirtyIds].every((id) => included.has(id)),
+    moduleIds: [...currentIds],
   };
 }
 

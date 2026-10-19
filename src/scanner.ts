@@ -56,6 +56,7 @@ const REACT_SOURCE_MARKER = /\b(?:React(?:Roblox)?|Roact(?:Compat)?)\b/i;
 export interface ScanAnalysisSession {
   projectModelModules: Map<string, ProjectModelModuleCacheEntry>;
   effectModules?: Record<string, CachedSourceEffectModule>;
+  effectModuleIds?: string[];
 }
 
 export function createScanAnalysisSession(): ScanAnalysisSession {
@@ -284,6 +285,10 @@ export async function scanPath(
   const previousEffectModules =
     options.analysisSession?.effectModules ?? cachedEffectModules(cacheSession);
 
+  let effectModuleIds = options.analysisSession?.effectModules
+    ? options.analysisSession.effectModuleIds
+    : undefined;
+
   const changedFiles = changedProjectFiles(cacheSession);
 
   if (canCacheWholeReport) {
@@ -419,6 +424,7 @@ export async function scanPath(
                     ),
                   ),
                 ),
+            effectModuleIds && new Set(effectModuleIds),
           ),
         );
 
@@ -449,19 +455,23 @@ export async function scanPath(
     }
 
     if (effectBuild) {
-      const { effects, cacheModules, complete } = await effectBuild;
+      const { effects, cacheModules, complete, moduleIds } = await effectBuild;
       effectPhases.end();
 
       project.sourceEffects = effects;
       cacheSession.effectModules = cacheModules;
       effectsComplete = complete;
+      effectModuleIds = moduleIds;
     } else if (!cacheSession.effectModules) {
       cacheSession.effectModules = previousEffectModules;
     }
 
-    if (options.analysisSession)
+    if (options.analysisSession) {
       options.analysisSession.effectModules =
         cacheSession.effectModules ?? previousEffectModules;
+
+      options.analysisSession.effectModuleIds = effectModuleIds;
+    }
 
     const diagnostics: Diagnostic[] = [];
     const skippedFiles: string[] = [];
