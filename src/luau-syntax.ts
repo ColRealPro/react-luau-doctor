@@ -71,11 +71,16 @@ function lineStarts(source: string): number[] {
   return starts;
 }
 
+// Most nodes are leaf tokens or have no field names, so they share these
+// instead of allocating their own
+const NO_CHILDREN = Object.freeze([]) as unknown as LuauNode[];
+const NO_FIELDS = Object.freeze([]) as unknown as Array<string | null>;
+
 export class LuauNode implements SyntaxNode {
   readonly id: number;
   parent: LuauNode | null = null;
-  readonly children: LuauNode[] = [];
-  readonly fields: Array<string | null> = [];
+  children = NO_CHILDREN;
+  fields = NO_FIELDS;
   isError = false;
   readonly isMissing = false;
   hasError = false;
@@ -104,6 +109,8 @@ export class LuauNode implements SyntaxNode {
   }
 
   get namedChildren(): LuauNode[] {
+    if (this.children === NO_CHILDREN) return NO_CHILDREN;
+
     return (this.named ??= this.children.filter((child) => child.isNamed));
   }
 
@@ -121,16 +128,30 @@ export class LuauNode implements SyntaxNode {
     if (!child) return;
 
     child.parent = this;
+
+    if (this.children === NO_CHILDREN) this.children = [];
+
     this.children.push(child);
-    this.fields.push(field);
     this.named = null;
+
+    if (field !== null) {
+      if (this.fields === NO_FIELDS) this.fields = new Array(this.children.length - 1).fill(null);
+
+      this.fields.push(field);
+    } else if (this.fields !== NO_FIELDS) {
+      this.fields.push(null);
+    }
   }
 
   insert(index: number, child: LuauNode): void {
     child.parent = this;
+
+    if (this.children === NO_CHILDREN) this.children = [];
+
     this.children.splice(index, 0, child);
-    this.fields.splice(index, 0, null);
     this.named = null;
+
+    if (this.fields !== NO_FIELDS) this.fields.splice(index, 0, null);
   }
 }
 
