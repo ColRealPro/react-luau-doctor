@@ -9,6 +9,9 @@
 ### Changed
 
 - Files are now parsed with the official Luau parser, so there should be better compatibility with modern Luau features, as well as faster parse times
+- `--scope changed` and `--scope lines` scans, like the ones CI runs, are about 2-6x faster on large projects, since they now only analyze the code that changed files depend on
+- Full scans are about 25% faster on a single thread and 35% faster in parallel
+- Scans with a warm cache take about half as long
 
 ## 0.21.2
 
