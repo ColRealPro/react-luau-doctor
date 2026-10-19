@@ -335,6 +335,7 @@ export async function scanPath(
 
   try {
     const cachedProject = cachedProjectModel(cacheSession);
+    let effectsComplete = true;
 
     const effectPhases = phaseTimer("Build project effects");
 
@@ -408,6 +409,16 @@ export async function scanPath(
             fileHashes,
             previousEffectModules,
             workerPool ?? undefined,
+            modelCandidates === candidates
+              ? undefined
+              : new Set(
+                  candidates.map((candidate) =>
+                    normalizeRelative(
+                      candidate.relativePath ??
+                        path.relative(root, candidate.absolutePath),
+                    ),
+                  ),
+                ),
           ),
         );
 
@@ -438,11 +449,12 @@ export async function scanPath(
     }
 
     if (effectBuild) {
-      const { effects, cacheModules } = await effectBuild;
+      const { effects, cacheModules, complete } = await effectBuild;
       effectPhases.end();
 
       project.sourceEffects = effects;
       cacheSession.effectModules = cacheModules;
+      effectsComplete = complete;
     } else if (!cacheSession.effectModules) {
       cacheSession.effectModules = previousEffectModules;
     }
@@ -705,7 +717,8 @@ export async function scanPath(
       timeStage("Save cache", () =>
         saveProjectCache(
           cacheSession,
-          project,
+          // A later full scan must rebuild effects rather than trust a partial set
+          effectsComplete ? project : { ...project, sourceEffects: new Map() },
           cacheSession.effectModules ?? cachedEffectModules(cacheSession),
           canCacheWholeReport && !report.partial ? reportCacheKey : undefined,
           canCacheWholeReport && !report.partial

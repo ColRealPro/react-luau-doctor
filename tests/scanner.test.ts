@@ -3798,6 +3798,56 @@ return Component
   assert.match(diagnostic.message, /performWork runs during render, and code it calls eventually changes state outside the current render/);
 });
 
+test("scans of part of a project keep transitive effects without caching a partial effect set", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-scoped-effects-"));
+  const cacheDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-scoped-effects-cache-"));
+  const previousCache = process.env.REACT_LUAU_DOCTOR_CACHE_DIR;
+  process.env.REACT_LUAU_DOCTOR_CACHE_DIR = cacheDirectory;
+
+  t.after(() => {
+    if (previousCache === undefined) delete process.env.REACT_LUAU_DOCTOR_CACHE_DIR;
+    else process.env.REACT_LUAU_DOCTOR_CACHE_DIR = previousCache;
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(cacheDirectory, { recursive: true, force: true });
+  });
+
+  for (const area of ["First", "Second"]) {
+    fs.mkdirSync(path.join(root, area));
+
+    fs.writeFileSync(path.join(root, area, `${area}Mutator.luau`), `local stored = {}
+local function mutateStored()
+  stored.changed = true
+end
+return mutateStored
+`);
+
+    fs.writeFileSync(path.join(root, area, `${area}Wrapper.luau`), `local mutateStored = require(script.Parent.${area}Mutator)
+local function performWork()
+  mutateStored()
+end
+return performWork
+`);
+
+    fs.writeFileSync(path.join(root, area, `${area}Component.luau`), `local React = require(script.Parent.React)
+local performWork = require(script.Parent.${area}Wrapper)
+local function Component()
+  performWork()
+  return React.createElement("Frame")
+end
+return Component
+`);
+  }
+
+  for (const area of ["First", "Second"]) {
+    const report = await scanPath(path.join(root, area), { projectRoot: root, parallel: false });
+
+    assert.ok(
+      report.diagnostics.some((entry) => entry.rule === "react-luau/no-side-effects-in-render"),
+      `${area} keeps its transitive effect`,
+    );
+  }
+});
+
 
 test("source effect inference does not confuse function-local imports or shadowed aliases", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-source-effects-import-shadow-"));
