@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Highlights
+
+- Files are now parsed with the official Luau parser, so modern Luau syntax is supported and parsing is faster
+- `--scope changed` and `--scope lines` scans, like the ones CI runs, are about 2-6x faster on large projects, since they now only analyze the code that changed files depend on
+- Full scans are about 25% faster on a single thread and 35% faster in parallel
+- Scans with a warm cache take about half as long
+
 ### New rules
 
 - `react-luau/no-function-host-prop` catches functions set as plain props on host elements, such as `Activated = function() end` instead of `[React.Event.Activated]`
@@ -15,10 +22,6 @@
 
 ### Changed
 
-- Files are now parsed with the official Luau parser, so there should be better compatibility with modern Luau features, as well as faster parse times
-- `--scope changed` and `--scope lines` scans, like the ones CI runs, are about 2-6x faster on large projects, since they now only analyze the code that changed files depend on
-- Full scans are about 25% faster on a single thread and 35% faster in parallel
-- Scans with a warm cache take about half as long
 - `no-prop-mutation` suggests `React.forwardRef` or a callback prop when a component writes to a ref passed through props
 - `effect-needs-cleanup` reports effects that return a connection or other resource instead of a cleanup function as errors
 
