@@ -13,6 +13,10 @@
 - Full scans are about 25% faster on a single thread and 35% faster in parallel
 - Scans with a warm cache take about half as long
 
+### Fixed
+
+- `no-array-index-as-key` no longer flags counted loops that build fixed slots, and tells arrays and dictionaries apart from how a table is filled
+
 ## 0.21.2
 
 ### Changed

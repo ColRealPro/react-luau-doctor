@@ -3,13 +3,32 @@ import type { RuleContext, RuleDefinition } from "../types";
 import { assignmentLeft, fieldName, fieldValue } from "./helpers";
 import { collectionKeyKindResolver, isUnshadowedBuiltin, type CollectionKeyKind } from "./collection-key-kind";
 
+// A counted loop only builds fixed slots, so its index is the identity unless it walks a collection's positions
+function followsCollection(context: RuleContext, loop: SyntaxNode, clause: SyntaxNode, index: string): boolean {
+  const bounds = clause.namedChildren.slice(1);
+  if (bounds.some((bound) => [...context.walk(bound)].some((node) => node.type === "unary_expression" && node.text.trimStart().startsWith("#")))) return true;
+
+  const body = loop.namedChildren.find((child) => child.type === "block");
+  if (!body) return false;
+
+  return [...context.walk(body)].some((node) =>
+    node.type === "bracket_index_expression" &&
+    node.namedChildren[1]?.type === "identifier" &&
+    node.namedChildren[1].text === index &&
+    node.parent?.type !== "variable_list"
+  );
+}
+
 function loopIdentity(
   context: RuleContext,
   loop: SyntaxNode,
   kindFor: (expression: SyntaxNode, site: SyntaxNode) => CollectionKeyKind,
 ): { index: string; kind: CollectionKeyKind } | null {
-  const numeric = loop.text.match(/^\s*for\s+([A-Za-z_][A-Za-z0-9_]*)\s*=/s);
-  if (numeric) return { index: numeric[1], kind: "array" };
+  const numeric = loop.namedChildren.find((child) => child.type === "for_numeric_clause");
+  if (numeric) {
+    const index = numeric.namedChildren[0]?.text;
+    return index && followsCollection(context, loop, numeric, index) ? { index, kind: "array" } : null;
+  }
   const clause = loop.namedChildren.find((child) => child.type === "for_generic_clause");
   const variables = clause?.namedChildren.find((child) => child.type === "variable_list")?.namedChildren;
   if (!variables || variables.length < 2) return null;

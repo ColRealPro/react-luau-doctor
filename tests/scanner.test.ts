@@ -4485,7 +4485,7 @@ return BadReactComponent
   );
 });
 
-test("suggests reviewing unknown collection keys returned from useMemo and passed to a fragment", async (t) => {
+test("reports sorted collection positions returned from useMemo and passed to a fragment", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-memo-child-index-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const source = `local React = require(script.Parent.React)
@@ -4512,8 +4512,7 @@ return Inventory
   const diagnostics = report.diagnostics.filter((item) => item.rule === "react-luau/no-array-index-as-key");
   assert.equal(diagnostics.length, 1);
   assert.equal(diagnostics[0].severity, "suggestion");
-  assert.equal(diagnostics[0].message, "Loop key i may be an array position used as React child identity.");
-  assert.match(diagnostics[0].caveat ?? "", /stable dictionary key is valid/);
+  assert.equal(diagnostics[0].message, "Loop index i is used as React child identity.");
   const location = diagnostics[0].location;
   assert.equal(location.line, 11);
   assert.equal(source.split("\n")[location.line - 1].slice(location.column - 1, location.endColumn - 1), "i");
@@ -4545,6 +4544,12 @@ test("recognizes positional and unknown keys without relying on variable names",
     Stable: `for i, item in props.items do
       children[item.id] = React.createElement(Row, { LayoutOrder = i })
     end`,
+    FixedSlots: `for i = 1, props.count do
+      children[i] = React.createElement(Row, {})
+    end`,
+    SlotData: `for i = 1, props.count do
+      children[i] = React.createElement(Row, { item = props.items[i] })
+    end`,
   };
   for (const [name, loop] of Object.entries(loops)) {
     fs.writeFileSync(path.join(root, `${name}.luau`), `local React = require(script.Parent.React)
@@ -4559,9 +4564,9 @@ return Component
 
   const report = await scanPath(root);
   const diagnostics = report.diagnostics.filter((item) => item.rule === "react-luau/no-array-index-as-key");
-  assert.deepEqual(diagnostics.map((item) => item.file).sort(), ["ExplicitKey.luau", "Generic.luau", "Ipairs.luau", "Numeric.luau", "ShadowedIpairs.luau", "UnknownK.luau"]);
+  assert.deepEqual(diagnostics.map((item) => item.file).sort(), ["ExplicitKey.luau", "Generic.luau", "Ipairs.luau", "Numeric.luau", "ShadowedIpairs.luau", "SlotData.luau", "UnknownK.luau"]);
   for (const diagnostic of diagnostics) {
-    assert.equal(diagnostic.message.includes("may be"), !["Ipairs.luau", "Numeric.luau"].includes(diagnostic.file));
+    assert.equal(diagnostic.message.includes("may be"), !["Ipairs.luau", "Numeric.luau", "SlotData.luau"].includes(diagnostic.file));
   }
 });
 
@@ -4605,9 +4610,9 @@ test("uses visible collection shapes and types to distinguish positional and dic
   const cases = [
     { name: "StringDictionary", type: "{ [string]: Item }", expected: "none" },
     { name: "Array", type: "{ Item }", expected: "array" },
-    // Numeric keys can represent stable IDs, so the indexer alone proves no position.
-    { name: "NumericMap", type: "{ [number]: Item }", expected: "unknown" },
-    { name: "ImportedType", type: "Types.Items", expected: "unknown" },
+    // Numeric indexers can be stable IDs, but table.sort only orders positions
+    { name: "NumericMap", type: "{ [number]: Item }", expected: "array" },
+    { name: "ImportedType", type: "Types.Items", expected: "array" },
   ];
   for (const entry of cases) {
     fs.writeFileSync(path.join(root, `${entry.name}.luau`), `local React = require(script.Parent.React)
@@ -4659,6 +4664,23 @@ test("respects local type hints, aliases, dictionary literals and shadowed colle
   if props.replace then items = props.items end`,
     NumericLiteralMap: `local items = { [100] = props.first, [200] = props.second }`,
     MixedLiteral: `local items = { props.first, Named = props.second }`,
+    NamedWrites: `local items = {}
+  for _, child in props.folder:GetChildren() do
+    items[child.Name] = child
+  end`,
+    InsertedItems: `local items = {}
+  table.insert(items, props.first)`,
+    MemoFactory: `local function build()
+    local result = {}
+    if not props.first then
+      return result
+    end
+    result[props.prefix .. "First"] = props.first
+    return result
+  end
+  local items = React.useMemo(build, {})`,
+    UnknownWrites: `local items = {}
+  items[props.key] = props.first`,
   };
   for (const [name, setup] of Object.entries(cases)) {
     fs.writeFileSync(path.join(root, `${name}.luau`), `local React = require(script.Parent.React)
@@ -4675,9 +4697,9 @@ return Component
   }
   const report = await scanPath(root);
   const diagnostics = report.diagnostics.filter((item) => item.rule === "react-luau/no-array-index-as-key");
-  assert.deepEqual(diagnostics.map((item) => item.file).sort(), ["Alias.luau", "ArrayAnnotation.luau", "ArrayLiteral.luau", "ConditionalReassignment.luau", "MixedLiteral.luau", "NumericLiteralMap.luau", "Reassigned.luau"]);
+  assert.deepEqual(diagnostics.map((item) => item.file).sort(), ["Alias.luau", "ArrayAnnotation.luau", "ArrayLiteral.luau", "ConditionalReassignment.luau", "InsertedItems.luau", "MixedLiteral.luau", "NumericLiteralMap.luau", "Reassigned.luau", "UnknownWrites.luau"]);
   for (const diagnostic of diagnostics) {
-    assert.equal(diagnostic.message.includes("may be"), ["ConditionalReassignment.luau", "MixedLiteral.luau", "NumericLiteralMap.luau", "Reassigned.luau"].includes(diagnostic.file));
+    assert.equal(diagnostic.message.includes("may be"), ["ConditionalReassignment.luau", "MixedLiteral.luau", "NumericLiteralMap.luau", "Reassigned.luau", "UnknownWrites.luau"].includes(diagnostic.file));
   }
 });
 
