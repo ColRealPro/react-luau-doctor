@@ -38,6 +38,7 @@ Add `react-luau/` before the names below when using them in your [config](cli.md
 | `no-set-state-in-render`        | warning    | A component calls its state setter during render without a condition                     |
 | `no-mutating-state-updater`     | error      | A state updater changes the previous state table in place                                |
 | `no-setter-as-event-handler`    | error      | A setter is passed directly as a `React.Change` or `React.Event` handler                 |
+| `no-ref-on-function-component`  | error      | A ref is passed to a function component that does not use `React.forwardRef`             |
 | `no-call-component-as-function` | warning    | Code calls a component directly instead of creating an element                           |
 | `no-create-binding-in-render`   | warning    | `createBinding` creates a new binding on each render                                     |
 | `no-binding-getvalue-in-render` | warning    | Render reads a binding snapshot instead of subscribing, except for hook initialization   |

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { CachedSourceEffectModule } from "./project-effects";
 
 import type {
+  ComponentExportSummary,
   Diagnostic,
   ProjectModel,
   ScanFileInput,
@@ -71,6 +72,7 @@ interface SerializedProjectModel {
   >;
 
   reactHookModules: Array<[string, boolean]>;
+  componentExports?: Array<[string, ComponentExportSummary]>;
   sourceEffects: Array<[string, SerializedSourceEffectSummary]>;
 }
 
@@ -551,6 +553,7 @@ export function serializeProjectModel(
 
     conditionalHookModes: [...project.conditionalHookModes],
     reactHookModules: [...project.reactHookModules],
+    componentExports: [...project.componentExports],
 
     sourceEffects: [...project.sourceEffects].map(([key, value]) => [
       key,
@@ -591,6 +594,7 @@ export function deserializeProjectModel(
 
     conditionalHookModes: new Map(project.conditionalHookModes),
     reactHookModules: new Map(project.reactHookModules ?? []),
+    componentExports: new Map(project.componentExports ?? []),
 
     sourceEffects: new Map(
       project.sourceEffects.map(([key, value]) => [
@@ -632,6 +636,7 @@ export function projectModelFeatureKey(project: ProjectModel): string {
     loadTimeModuleFields: serialized.loadTimeModuleFields,
     conditionalHookModes: serialized.conditionalHookModes,
     reactHookModules: serialized.reactHookModules,
+    componentExports: serialized.componentExports,
   });
 }
 

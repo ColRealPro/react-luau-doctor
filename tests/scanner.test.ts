@@ -5659,3 +5659,56 @@ return Component
   const report = await scanPath(root);
   assert.deepEqual(ruleLines(report, "no-instance-as-event-value"), ["Component.luau:13", "Component.luau:22", "Component.luau:7"]);
 });
+
+test("refs passed to function components without forwardRef are reported across modules", async (t) => {
+  const root = tempProject(t, "ref-on-function-component", {
+    "Plain.luau": `local React = require(script.Parent.React)
+local function Plain(props)
+  return React.createElement("Frame", {})
+end
+return Plain
+`,
+    "Forwarded.luau": `local React = require(script.Parent.React)
+local Forwarded = React.forwardRef(function(props, ref)
+  return React.createElement("Frame", { ref = ref })
+end)
+return Forwarded
+`,
+    "Memoized.luau": `local React = require(script.Parent.React)
+return React.memo(function(props)
+  return React.createElement("Frame", {})
+end)
+`,
+    "Component.luau": `local React = require(script.Parent.React)
+local Plain = require(script.Parent.Plain)
+local Forwarded = require(script.Parent.Forwarded)
+local Memoized = require(script.Parent.Memoized)
+
+local function Local(props)
+  return React.createElement("Frame", {})
+end
+
+local LocalForwarded = React.forwardRef(function(props, ref)
+  return React.createElement("Frame", { ref = ref })
+end)
+
+local function Component(props)
+  local ref = React.useRef(nil)
+  return React.createElement("Frame", {}, {
+    A = React.createElement(Plain, { ref = ref }),
+    B = React.createElement(Forwarded, { ref = ref }),
+    C = React.createElement(Memoized, { ref = ref }),
+    D = React.createElement(Local, { ref = ref }),
+    E = React.createElement(LocalForwarded, { ref = ref }),
+    F = React.createElement(props.component, { ref = ref }),
+    G = React.createElement("Frame", { ref = ref }),
+  })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(ruleLines(report, "no-ref-on-function-component"), ["Component.luau:17", "Component.luau:19", "Component.luau:20"]);
+});

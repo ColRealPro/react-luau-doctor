@@ -480,6 +480,16 @@ root:render(element)`,
     note: "Event arguments start at the second parameter, such as function(rbx, input)",
   },
 
+  "react-luau/no-ref-on-function-component": {
+    before: `local function Child(props)
+\treturn React.createElement("Frame", {})
+end`,
+    after: `local Child = React.forwardRef(function(props, ref)
+\treturn React.createElement("Frame", { ref = ref })
+end)`,
+    note: "Pass the Instance to the parent through a callback prop instead when it only needs it at certain moments",
+  },
+
   "react-luau/no-static-name-prop": {
     before: `return React.createElement("Frame", {}, {
 \tChild = React.createElement("TextLabel", {

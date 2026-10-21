@@ -14,6 +14,7 @@ import { sourceHasHighFrequencyRobloxEvent } from "./roblox-semantics";
 
 import type {
   BindingCandidateHookSummary,
+  ComponentExportSummary,
   ConditionalHookModeSummary,
   ExternalCallbackFunctionSummary,
   ProjectModel,
@@ -72,6 +73,7 @@ export interface ProjectModelModuleAnalysis {
   staticIterationTables?: Set<string>;
   loadTimeExportFields?: Set<string>;
   conditionalHookMode?: ConditionalHookModeSummary;
+  componentExport?: ComponentExportSummary;
   declaredMethods: Map<string, Set<string>>;
 }
 
@@ -1058,6 +1060,46 @@ function findMemoCall(source: string): string | null {
   return null;
 }
 
+// Only plain or forwardRef-wrapped local functions count, since class components accept refs
+function localComponentExport(
+  source: string,
+  name: string,
+): ComponentExportSummary | null {
+  if (new RegExp(`\\blocal\\s+${name}\\s*=\\s*(?:React\\.)?forwardRef\\s*\\(`).test(source))
+    return { forwardsRef: true };
+
+  if (
+    new RegExp(
+      `\\blocal\\s+function\\s+${name}\\s*\\(|\\blocal\\s+${name}\\s*=\\s*function\\s*\\(`,
+    ).test(source)
+  )
+    return { forwardsRef: false };
+
+  return null;
+}
+
+function findComponentExport(source: string): ComponentExportSummary | null {
+  const memoArguments = findMemoCall(source);
+
+  if (memoArguments === null) {
+    const name = exportedFunctionName(source);
+
+    return name ? localComponentExport(source, name) : null;
+  }
+
+  const wrapped = memoArguments.trim();
+
+  if (/^(?:React\.)?forwardRef\s*\(/.test(wrapped))
+    return { forwardsRef: true };
+
+  if (/^function\b/.test(wrapped))
+    return { forwardsRef: false };
+
+  const name = wrapped.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(?:,|$)/)?.[1];
+
+  return name ? localComponentExport(source, name) : null;
+}
+
 function hasTopLevelComma(argumentsText: string): boolean {
   let round = 0;
   let square = 0;
@@ -1840,6 +1882,7 @@ export function buildProjectModel(
       staticIterationTables: findStaticIterationTables(source) ?? undefined,
       loadTimeExportFields: findLoadTimeExportFields(record.code) ?? undefined,
       conditionalHookMode: findConditionalHookMode(source) ?? undefined,
+      componentExport: findComponentExport(source) ?? undefined,
       declaredMethods: findDeclaredMethods(source),
     };
 
@@ -1862,6 +1905,7 @@ export function buildProjectModel(
   >();
   const staticIterationTablesByModule = new Map<string, Set<string>>();
   const loadTimeFieldsByModule = new Map<string, Set<string>>();
+  const componentExportsByModule = new Map<string, ComponentExportSummary>();
   const conditionalHookModesByModule = new Map<
     string,
     ConditionalHookModeSummary
@@ -1897,6 +1941,9 @@ export function buildProjectModel(
 
     if (analysis.loadTimeExportFields)
       loadTimeFieldsByModule.set(id, new Set(analysis.loadTimeExportFields));
+
+    if (analysis.componentExport)
+      componentExportsByModule.set(id, { ...analysis.componentExport });
 
     if (analysis.conditionalHookMode)
       conditionalHookModesByModule.set(id, {
@@ -1979,6 +2026,7 @@ export function buildProjectModel(
     loadTimeModuleFields,
     conditionalHookModes,
     reactHookModules,
+    componentExports: buildUniqueFeatureAliases(records, componentExportsByModule),
     sourceEffects: new Map(),
   };
 }

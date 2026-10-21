@@ -25,6 +25,7 @@ import { noPropMutation } from "./no-prop-mutation";
 import { noStaticNameProp } from "./no-static-name-prop";
 import { noFunctionHostProp } from "./no-function-host-prop";
 import { noInstanceAsEventValue } from "./no-instance-as-event-value";
+import { noRefOnFunctionComponent } from "./no-ref-on-function-component";
 import { noRandomKey } from "./no-random-key";
 import { noSetStateInRender } from "./no-set-state-in-render";
 import { noSetterAsEventHandler } from "./no-setter-as-event-handler";
@@ -95,6 +96,7 @@ const definitions: RuleDefinition[] = [
   noMutatingStateUpdater,
   noSetterAsEventHandler,
   noInstanceAsEventValue,
+  noRefOnFunctionComponent,
   noCallComponentAsFunction,
   noCreateBindingInRender,
   noBindingGetValueInRender,
