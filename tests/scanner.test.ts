@@ -1102,6 +1102,29 @@ return List`,
   assert.deepEqual(rules("List.luau"), []);
 });
 
+test("code quoted in findings keeps its comments", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-quoted-comments-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(
+    path.join(root, "Counter.luau"),
+    `local React = require(script.Parent.React)
+local function Counter(props)
+  local doubled, setDoubled = React.useState(0)
+  React.useEffect(function()
+    setDoubled(props.count --[[ raw ]] * 2)
+  end, { props.count })
+  return React.createElement("TextLabel", { Text = doubled })
+end
+return Counter`,
+  );
+
+  const report = await scanPath(root, { cache: false, parallel: false });
+  const diagnostic = report.diagnostics.find((entry) => entry.rule === "react-luau/no-derived-state-effect");
+
+  assert.equal(diagnostic?.fixPreview?.after, "local doubled = props.count --[[ raw ]] * 2");
+});
+
 test("effect cleanup recognizes named cleanup functions and Maid-style ownership", async () => {
   const ids = await ruleIds("cleanup-patterns.luau");
   assert.equal(ids.has("react-luau/effect-needs-cleanup"), false);

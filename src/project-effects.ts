@@ -316,7 +316,7 @@ function createsFreshEngineValue(node: SyntaxNode): boolean {
 const createsFreshInstance = (node: SyntaxNode) => /^Instance\.new$|:Clone$/.test(callPath(node) ?? "");
 
 function effectSite(node: SyntaxNode): EffectSite {
-  return { line: node.startPosition.row + 1, code: node.text.split(/\r?\n/)[0].trim().slice(0, 120) };
+  return { line: node.startPosition.row + 1, code: node.sourceText.split(/\r?\n/)[0].trim().slice(0, 120) };
 }
 
 function markDirectEffect(fn: { directEffect: boolean; effectSite?: EffectSite | null }, site: EffectSite | undefined): boolean {

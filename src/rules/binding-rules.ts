@@ -215,7 +215,7 @@ export const noBindingGetValueInRender: RuleDefinition = {
       return [
         {
           node: name,
-          message: `${receiver.text}:getValue() reads a binding snapshot during render`,
+          message: `${receiver.sourceText}:getValue() reads a binding snapshot during render`,
           help: "Pass the binding itself or map it so the prop subscribes to binding updates",
         },
       ];

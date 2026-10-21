@@ -325,7 +325,7 @@ function cleanupFixPreview(resources: Resource[], context: RuleContext): FixPrev
   if (!first) return undefined;
 
   if (labels.size === 1 && labels.has("RenderStep binding")) {
-    const bindingName = context.callArguments(first.call)[0]?.text.trim() ?? '"RenderStepName"';
+    const bindingName = context.callArguments(first.call)[0]?.sourceText.trim() ?? '"RenderStepName"';
     return {
       kind: "pattern",
       before: `RunService:BindToRenderStep(${bindingName}, priority, onStep)`,

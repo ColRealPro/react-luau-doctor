@@ -42,7 +42,10 @@ class TreeState {
   private lineStarts: number[] | null = null;
   private nextId = 1;
 
-  constructor(readonly source: string) {}
+  constructor(
+    readonly source: string,
+    readonly originalSource: string,
+  ) {}
 
   id(): number {
     return this.nextId++;
@@ -117,6 +120,10 @@ export class LuauNode implements SyntaxNode {
 
   get text(): string {
     return this.state.source.slice(this.startIndex, this.endIndex);
+  }
+
+  get sourceText(): string {
+    return this.state.originalSource.slice(this.startIndex, this.endIndex);
   }
 
   get startPosition(): SyntaxPoint {
@@ -214,7 +221,7 @@ class Builder {
     this.comments = comments.map(([start, end]) => [this.index(start), this.index(end)]);
     // Comments are blanked so node text and token lookups never see them
     this.source = blankRanges(source, this.comments);
-    this.state = new TreeState(this.source);
+    this.state = new TreeState(this.source, source);
   }
 
   index(offset: number): number {
