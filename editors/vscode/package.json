@@ -114,8 +114,7 @@
   },
   "dependencies": {
     "vscode-languageclient": "10.1.2",
-    "vscode-languageserver": "10.1.2",
-    "web-tree-sitter": "0.26.11"
+    "vscode-languageserver": "10.1.2"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

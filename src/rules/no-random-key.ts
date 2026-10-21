@@ -26,7 +26,7 @@ function freshDescription(node: SyntaxNode, context: RuleContext): string | null
   return null;
 }
 
-function isCreateElementCall(node: SyntaxNode | undefined, context: RuleContext): boolean {
+function isCreateElementCall(node: SyntaxNode | null, context: RuleContext): boolean {
   if (!node || node.type !== "function_call") return false;
   return context.resolveCallPath(context.getCallPath(node) ?? "") === "React.createElement";
 }
@@ -47,7 +47,7 @@ export const noRandomKey: RuleDefinition = {
       if (fieldName(field) === "key") {
         keyExpression = fieldValue(field);
       } else if (field.text.trim().startsWith("[") && name) {
-        const value = field.namedChildren.find((child) => child.startIndex > name.endIndex);
+        const value = field.childForFieldName("value");
         if (isCreateElementCall(value, context)) keyExpression = name;
       }
 

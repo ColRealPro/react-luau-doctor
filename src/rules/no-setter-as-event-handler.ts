@@ -69,7 +69,7 @@ export const noSetterAsEventHandler: RuleDefinition = {
       const key = handlerKey(context, field);
       if (!key || !isStateOrBindingSetter(context, value)) continue;
 
-      const setter = value.text;
+      const setter = value.sourceText;
       const handler =
         key.kind === "Change"
           ? `function(rbx)\n\t${setter}(rbx.${key.member})\nend`
@@ -86,8 +86,8 @@ export const noSetterAsEventHandler: RuleDefinition = {
             ? `Read the property from the Instance: function(rbx) ${setter}(rbx.${key.member}) end`
             : "Wrap the setter in a function and pass the value you want to store",
         fixPreview: {
-          before: `[${key.node.text}] = ${setter},`,
-          after: `[${key.node.text}] = ${handler},`,
+          before: `[${key.node.sourceText}] = ${setter},`,
+          after: `[${key.node.sourceText}] = ${handler},`,
           note: "React-Luau passes the Instance as the first handler argument",
           kind: key.kind === "Change" ? "exact" : "pattern",
         },

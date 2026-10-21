@@ -6,6 +6,7 @@ import type {
   EffectWorkerIndexInput,
   IndexedEffectWorkerModule,
 } from "./project-effects";
+import { mergeTimings, type Timings } from "./timings";
 import type { SourceEffectModuleSummary } from "./types";
 
 export const MIN_PARALLEL_FILES = 16;
@@ -20,6 +21,7 @@ export interface ReactScanWorkerRequest {
 export interface ReactScanWorkerResponse {
   type: "react-scan";
   results: ReactFileAnalysisResult[];
+  timings: Timings;
 }
 
 export interface EffectIndexWorkerRequest {
@@ -32,6 +34,7 @@ export interface EffectIndexWorkerRequest {
 export interface EffectIndexWorkerResponse {
   type: "effect-index";
   modules: IndexedEffectWorkerModule[];
+  timings: Timings;
 }
 
 export interface EffectAnalyzeWorkerRequest {
@@ -43,6 +46,7 @@ export interface EffectAnalyzeWorkerRequest {
 export interface EffectAnalyzeWorkerResponse {
   type: "effect-analyze";
   modules: AnalyzedEffectWorkerModule[];
+  timings: Timings;
 }
 
 export interface ReactScanWorkerProgress {
@@ -239,6 +243,7 @@ export class AnalysisWorkerPool {
           reject(error);
           return;
         }
+        mergeTimings(response.timings);
         resolve(response);
       };
       const onError = (error: Error): void => {

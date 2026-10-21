@@ -1063,6 +1063,68 @@ test("reports Luau parse errors before downstream analysis", async () => {
 });
 
 
+test("comments and Luau's parse error limit don't change analysis of surrounding code", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-parser-trivia-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Broken.luau"), `local React = require(script.Parent.React)\n${"!".repeat(101)}\n`);
+
+  fs.writeFileSync(
+    path.join(root, "Parent.luau"),
+    `local React = require(script.Parent.React)
+local Child = React.memo(function() return React.createElement("Frame") end)
+local function Parent(props)
+  return React.createElement(Child, { value = props.enabled --[[a]] and { key --[[b]] = 1 } })
+end
+return Parent`,
+  );
+
+  fs.writeFileSync(
+    path.join(root, "List.luau"),
+    `local React = require(script.Parent.React)
+type Items = --[[ by id ]] { -- keyed by id
+  [string]: number
+}
+local function List(props: { items: Items })
+  local children = {}
+  for id, value in pairs(props.items) do
+    children[id] = React.createElement("Frame")
+  end
+  return React.createElement("Frame", nil, children)
+end
+return List`,
+  );
+
+  const report = await scanPath(root, { cache: false, parallel: false });
+  const rules = (file: string) => report.diagnostics.filter((entry) => entry.file === file).map((entry) => entry.rule);
+
+  assert.deepEqual(rules("Parent.luau"), ["react-luau/rerender-unstable-memo-props"]);
+  assert.deepEqual(rules("List.luau"), []);
+});
+
+test("code quoted in findings keeps its comments", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-quoted-comments-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(
+    path.join(root, "Counter.luau"),
+    `local React = require(script.Parent.React)
+local function Counter(props)
+  local doubled, setDoubled = React.useState(0)
+  React.useEffect(function()
+    setDoubled(props.count --[[ raw ]] * 2)
+  end, { props.count })
+  return React.createElement("TextLabel", { Text = doubled })
+end
+return Counter`,
+  );
+
+  const report = await scanPath(root, { cache: false, parallel: false });
+  const diagnostic = report.diagnostics.find((entry) => entry.rule === "react-luau/no-derived-state-effect");
+
+  assert.equal(diagnostic?.fixPreview?.after, "local doubled = props.count --[[ raw ]] * 2");
+});
+
 test("effect cleanup recognizes named cleanup functions and Maid-style ownership", async () => {
   const ids = await ruleIds("cleanup-patterns.luau");
   assert.equal(ids.has("react-luau/effect-needs-cleanup"), false);
@@ -1505,14 +1567,38 @@ test("accepts modern Luau const, export-by-value, attributes, type functions, ex
   assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/parse-error"), false);
   assert.equal(report.scannedFiles, 1);
   const propMutation = report.diagnostics.find((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation");
-  assert.equal(propMutation?.location.line, 31);
+  assert.equal(propMutation?.location.line, 30);
   assert.equal(propMutation?.location.column, 2);
+});
+
+test("typed hook syntax parses and diagnostics after non-ASCII text keep source columns", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-luau-syntax-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const mutation = '\tlocal greeting: typeof(props.label) = "h\u00e9llo \u{1f600}"; props.label = greeting';
+
+  fs.writeFileSync(path.join(root, "Component.luau"), [
+    "local React = require(script.Parent.React)",
+    "local function Component<T...>(props: { label: string }, ...: T...): React.Element",
+    mutation,
+    "\tlocal value = React.useMemo(function() return nil :: { hasValue: true } | nil end, {})",
+    '\treturn React.createElement("TextLabel", { Text = tostring(value) })',
+    "end",
+    "return Component",
+  ].join("\n"));
+
+  const report = await scanPath(root, { parallel: false });
+  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/parse-error"), false);
+  const propMutation = report.diagnostics.find((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation");
+  assert.equal(propMutation?.location.line, 3);
+  assert.equal(propMutation?.location.column, mutation.indexOf("props.label =") + 1);
 });
 
 test("scan progress advances across every candidate file", async () => {
   const progress: Array<{ current: number; total: number; partial?: boolean }> = [];
+
   const report = await scanPath(fixtures, {
     cache: false,
+
     onProgress(value) {
       progress.push(value);
     },
@@ -3772,6 +3858,56 @@ return Component
   const diagnostic = report.diagnostics.find((entry) => entry.rule === "react-luau/no-side-effects-in-render");
   assert.ok(diagnostic);
   assert.match(diagnostic.message, /performWork runs during render, and code it calls eventually changes state outside the current render/);
+});
+
+test("scans of part of a project keep transitive effects without caching a partial effect set", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-scoped-effects-"));
+  const cacheDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-scoped-effects-cache-"));
+  const previousCache = process.env.REACT_LUAU_DOCTOR_CACHE_DIR;
+  process.env.REACT_LUAU_DOCTOR_CACHE_DIR = cacheDirectory;
+
+  t.after(() => {
+    if (previousCache === undefined) delete process.env.REACT_LUAU_DOCTOR_CACHE_DIR;
+    else process.env.REACT_LUAU_DOCTOR_CACHE_DIR = previousCache;
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(cacheDirectory, { recursive: true, force: true });
+  });
+
+  for (const area of ["First", "Second"]) {
+    fs.mkdirSync(path.join(root, area));
+
+    fs.writeFileSync(path.join(root, area, `${area}Mutator.luau`), `local stored = {}
+local function mutateStored()
+  stored.changed = true
+end
+return mutateStored
+`);
+
+    fs.writeFileSync(path.join(root, area, `${area}Wrapper.luau`), `local mutateStored = require(script.Parent.${area}Mutator)
+local function performWork()
+  mutateStored()
+end
+return performWork
+`);
+
+    fs.writeFileSync(path.join(root, area, `${area}Component.luau`), `local React = require(script.Parent.React)
+local performWork = require(script.Parent.${area}Wrapper)
+local function Component()
+  performWork()
+  return React.createElement("Frame")
+end
+return Component
+`);
+  }
+
+  for (const area of ["First", "Second"]) {
+    const report = await scanPath(path.join(root, area), { projectRoot: root, parallel: false });
+
+    assert.ok(
+      report.diagnostics.some((entry) => entry.rule === "react-luau/no-side-effects-in-render"),
+      `${area} keeps its transitive effect`,
+    );
+  }
 });
 
 

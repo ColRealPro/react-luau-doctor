@@ -66,6 +66,16 @@ test("default output is compact while --verbose shows per-file help text", () =>
   assert.equal(verbose.stdout.includes("Call the hook unconditionally at the top level"), true);
 });
 
+test("--timings reports stages on stderr without changing machine-readable output", () => {
+  const result = run([path.join(fixtures, "bad-component.luau"), "--score", "--timings", "--no-cache", "--blocking", "none"]);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /^\d+\s*$/);
+  assert.match(result.stderr, /Timings:/);
+  assert.match(result.stderr, /Analyze React files/);
+  assert.match(result.stderr, /Luau WASM/);
+  assert.match(result.stderr, /react-luau\/rules-of-hooks/);
+});
+
 test("JSON compact, score-only, category, and no-warnings modes are machine-readable", () => {
   const compactJson = run([path.join(fixtures, "bad-component.luau"), "--json", "--json-compact", "--blocking", "none"]);
   assert.equal(compactJson.status, 0);

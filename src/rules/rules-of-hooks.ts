@@ -1393,7 +1393,7 @@ export const rulesOfHooks: RuleDefinition = {
             : baseParameterName;
 
           const argumentText =
-            first.value?.text.trim() || argument?.text.trim() || "<omitted>";
+            first.value?.sourceText.trim() || argument?.sourceText.trim() || "<omitted>";
 
           diagnostics.push({
             node: first.value ?? argument ?? callNameNode(call),

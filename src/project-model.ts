@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { sourceWithoutComments } from "./parser-compat";
+import { sourceWithoutComments } from "./source-comments";
 
 import {
   buildUniqueFeatureAliases,
@@ -58,6 +58,8 @@ const CALLBACK_PARAMETER_NAME =
 
 interface SourceRecord extends ModuleIdentity {
   source: string;
+  // `source` with strings and comments blanked, keeping every offset
+  code: string;
 }
 
 export interface ProjectModelModuleAnalysis {
@@ -83,8 +85,40 @@ export interface ProjectModelBuildOptions {
   moduleCache?: Map<string, ProjectModelModuleCacheEntry>;
 }
 
+// Same as matching /\breturn\s+([A-Za-z_][A-Za-z0-9_]*)\s*$/, but reads backwards
+// from the end instead of trying every `return` in the source
 function exportedFunctionName(source: string): string | null {
-  return source.match(/\breturn\s+([A-Za-z_][A-Za-z0-9_]*)\s*$/)?.[1] ?? null;
+  let end = source.length;
+
+  while (end > 0 && /\s/.test(source[end - 1])) end -= 1;
+
+  let start = end;
+
+  while (start > 0 && /\w/.test(source[start - 1])) start -= 1;
+
+  let keywordEnd = start;
+
+  while (keywordEnd > 0 && /\s/.test(source[keywordEnd - 1])) keywordEnd -= 1;
+
+  const keywordStart = keywordEnd - "return".length;
+
+  if (
+    start === end ||
+    keywordEnd === start ||
+    /\d/.test(source[start]) ||
+    keywordStart < 0 ||
+    !source.startsWith("return", keywordStart) ||
+    (keywordStart > 0 && /\w/.test(source[keywordStart - 1]))
+  )
+    return null;
+
+  return source.slice(start, end);
+}
+
+function exportedHookName(source: string): string | null {
+  const name = exportedFunctionName(source);
+
+  return name && /^use[A-Z0-9_]/.test(name) ? name : null;
 }
 
 function findFunctionParameters(
@@ -419,11 +453,11 @@ function conditionAliasesForParameter(
 function findConditionalHookMode(
   source: string,
 ): ConditionalHookModeSummary | null {
+  if (exportedFunctionName(source) && !exportedHookName(source)) return null;
+
   const exported = exportedFunctionParameters(source);
 
   if (!exported) return null;
-
-  if (exported.name && !/^use[A-Z0-9_]/.test(exported.name)) return null;
 
   const parameterNames = exported.parameters.map(parameterName);
   const controlledIndexes: number[] = [];
@@ -495,67 +529,59 @@ function findConditionalHookMode(
   };
 }
 
+const NON_CODE_START = /--|["'[]/g;
+
 function maskLuauNonCode(source: string): string {
-  let result = "";
-  let index = 0;
+  const parts: string[] = [];
+  let start = 0;
 
-  while (index < source.length) {
-    const char = source[index];
-    const next = source[index + 1] ?? "";
+  NON_CODE_START.lastIndex = 0;
 
-    if (char === "-" && next === "-") {
+  for (let match = NON_CODE_START.exec(source); match; match = NON_CODE_START.exec(source)) {
+    const index = match.index;
+    const char = match[0];
+    let stop: number;
+
+    if (char === "--") {
       if (source[index + 2] === "[" && source[index + 3] === "[") {
         const end = source.indexOf("]]", index + 4);
-        const stop = end >= 0 ? end + 2 : source.length;
-        const chunk = source.slice(index, stop);
-        result += chunk.replace(/[^\n]/g, " ");
-        index = stop;
-        continue;
+        stop = end >= 0 ? end + 2 : source.length;
+      } else {
+        const end = source.indexOf("\n", index + 2);
+        stop = end >= 0 ? end : source.length;
       }
+    } else if (char === "[") {
+      if (source[index + 1] !== "[") continue;
 
-      const end = source.indexOf("\n", index + 2);
-      const stop = end >= 0 ? end : source.length;
-      result += " ".repeat(stop - index);
-      index = stop;
-      continue;
-    }
+      const end = source.indexOf("]]", index + 2);
+      stop = end >= 0 ? end + 2 : source.length;
+    } else {
+      stop = index + 1;
 
-    if (char === '"' || char === "'") {
-      const quote = char;
-      let end = index + 1;
+      while (stop < source.length) {
+        const current = source[stop];
 
-      while (end < source.length) {
-        if (source[end] === "\\") {
-          end += 2;
+        if (current === "\\") {
+          stop += 2;
           continue;
         }
 
-        if (source[end] === quote) {
-          end += 1;
-          break;
-        }
+        stop += 1;
 
-        end += 1;
+        if (current === char) break;
       }
-
-      result += source.slice(index, end).replace(/[^\n]/g, " ");
-      index = end;
-      continue;
     }
 
-    if (char === "[" && next === "[") {
-      const end = source.indexOf("]]", index + 2);
-      const stop = end >= 0 ? end + 2 : source.length;
-      result += source.slice(index, stop).replace(/[^\n]/g, " ");
-      index = stop;
-      continue;
-    }
-
-    result += char;
-    index += 1;
+    parts.push(source.slice(start, index), source.slice(index, stop).replace(/[^\n]/g, " "));
+    start = Math.min(stop, source.length);
+    NON_CODE_START.lastIndex = start;
   }
 
-  return result;
+  if (parts.length === 0) return source;
+
+  parts.push(source.slice(start));
+
+  return parts.join("");
 }
 
 function stableLiteralConstants(source: string): Map<string, string> {
@@ -617,7 +643,7 @@ function collectConditionalHookModeCallSites(
 
     if (imports.size === 0) continue;
 
-    const masked = maskLuauNonCode(record.source);
+    const masked = record.code;
     const constants = stableLiteralConstants(masked);
 
     for (const [localName, summary] of imports) {
@@ -785,9 +811,7 @@ function subscriptionMirrorConfidence(
 function findBindingCandidateHook(
   source: string,
 ): BindingCandidateHookSummary | null {
-  const exported = source.match(
-    /\breturn\s+(use[A-Z0-9_][A-Za-z0-9_]*)\s*$/,
-  )?.[1];
+  const exported = exportedHookName(source);
 
   if (!exported) return null;
 
@@ -908,9 +932,7 @@ function findDerivedBindingCandidateHook(
   source: string,
   bindingCandidateHooks: Map<string, BindingCandidateHookSummary>,
 ): BindingCandidateHookSummary | null {
-  const exported = source.match(
-    /\breturn\s+(use[A-Z0-9_][A-Za-z0-9_]*)\s*$/,
-  )?.[1];
+  const exported = exportedHookName(source);
 
   if (!exported) return null;
 
@@ -1084,16 +1106,40 @@ function bindingNameAlternative(name: string): string | null {
   });
 }
 
+const ASSIGNED_FUNCTION = /=\s*function\b/g;
+const ASSIGNED_METHOD = /\b([A-Za-z_][A-Za-z0-9_.]*)\s*[:.]\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*function\b/g;
+const ASSIGNED_METHOD_CHAR = /[\w.:=\s]/;
+
+// Matches of ASSIGNED_METHOD only contain ASSIGNED_METHOD_CHAR characters, so
+// matching within each run of them around an `= function` finds the same
+// matches as the whole source, without trying every identifier in it
+function* assignedMethodMatches(source: string): Generator<RegExpMatchArray> {
+  ASSIGNED_FUNCTION.lastIndex = 0;
+
+  for (let match = ASSIGNED_FUNCTION.exec(source); match; match = ASSIGNED_FUNCTION.exec(source)) {
+    let start = match.index;
+    let end = match.index + match[0].length;
+
+    while (start > 0 && ASSIGNED_METHOD_CHAR.test(source[start - 1])) start -= 1;
+    while (end < source.length && ASSIGNED_METHOD_CHAR.test(source[end])) end += 1;
+
+    yield* source.slice(start, end).matchAll(ASSIGNED_METHOD);
+    ASSIGNED_FUNCTION.lastIndex = end;
+  }
+}
+
 function findDeclaredMethods(source: string): Map<string, Set<string>> {
   const methods = new Map<string, Set<string>>();
 
-  const patterns = [
-    /\bfunction\s+([A-Za-z_][A-Za-z0-9_.]*)\s*[:.]\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]*>)?\s*\(/g,
-    /\b([A-Za-z_][A-Za-z0-9_.]*)\s*[:.]\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*function\b/g,
+  const matches = [
+    source.matchAll(
+      /\bfunction\s+([A-Za-z_][A-Za-z0-9_.]*)\s*[:.]\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]*>)?\s*\(/g,
+    ),
+    assignedMethodMatches(source),
   ];
 
-  for (const pattern of patterns) {
-    for (const match of source.matchAll(pattern)) {
+  for (const patternMatches of matches) {
+    for (const match of patternMatches) {
       const owner = match[1].toLowerCase();
       const names = methods.get(owner) ?? new Set<string>();
       names.add(match[2]);
@@ -1641,8 +1687,7 @@ function atLineStart(code: string, index: number): boolean {
  * functions, bracket writes, method calls, and escaping references disqualify
  * the fields they could affect.
  */
-function findLoadTimeExportFields(source: string): Set<string> | null {
-  const code = maskLuauNonCode(source);
+function findLoadTimeExportFields(code: string): Set<string> | null {
   const direct = /^return\s*\{/m.exec(code);
 
   if (direct) {
@@ -1707,7 +1752,7 @@ function invalidateExternalFieldWrites(
   loadTimeFields: Map<string, Set<string>>,
 ): void {
   for (const record of records) {
-    const code = maskLuauNonCode(record.source);
+    const code = record.code;
 
     for (const match of code.matchAll(/\brequire\s*\(/g)) {
       const open = match.index + match[0].length - 1;
@@ -1774,7 +1819,7 @@ export function buildProjectModel(
       candidate.source ?? fs.readFileSync(candidate.absolutePath, "utf8");
     const source = sourceWithoutComments(originalSource);
     const id = relativePath.toLowerCase();
-    const record: SourceRecord = { id, source, keys: moduleKeys(relativePath) };
+    const record: SourceRecord = { id, source, code: maskLuauNonCode(source), keys: moduleKeys(relativePath) };
     const memoArguments = findMemoCall(source);
 
     const analysis: ProjectModelModuleAnalysis = {
@@ -1793,7 +1838,7 @@ export function buildProjectModel(
       bindingCompatibleProps:
         findBindingCompatibleComponentProps(source) ?? undefined,
       staticIterationTables: findStaticIterationTables(source) ?? undefined,
-      loadTimeExportFields: findLoadTimeExportFields(source) ?? undefined,
+      loadTimeExportFields: findLoadTimeExportFields(record.code) ?? undefined,
       conditionalHookMode: findConditionalHookMode(source) ?? undefined,
       declaredMethods: findDeclaredMethods(source),
     };

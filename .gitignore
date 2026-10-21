@@ -8,3 +8,4 @@ editors/vscode/extension.js
 editors/vscode/server/
 editors/vscode/vendor/
 editors/vscode/*.vsix
+.cache/

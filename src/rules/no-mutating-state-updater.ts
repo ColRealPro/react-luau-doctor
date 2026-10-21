@@ -96,7 +96,7 @@ export const noMutatingStateUpdater: RuleDefinition = {
 
         diagnostics.push({
           node: node.type === "function_call" ? callNameNode(node) : mutated,
-          message: `This updater mutates previous state through ${mutated.text}`,
+          message: `This updater mutates previous state through ${mutated.sourceText}`,
           help: "Copy the table being changed and return new state — copying only the outer table does not copy nested tables",
         });
       }

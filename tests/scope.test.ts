@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { gitExecutable } from "../src/git";
+import { createGitScopePlan, gitExecutable } from "../src/git";
 import { scanProjectWithScope } from "../src/scope";
 
 function git(cwd: string, ...args: string[]): string {
@@ -84,6 +84,23 @@ test("lines scope only reports diagnostics whose source span touches changed lin
   const propMutations = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation");
   assert.equal(propMutations.length, 1);
   assert.equal(propMutations[0].location.line, 6);
+});
+
+test("lines scope keeps each file's changed lines when several files change", (t) => {
+  const { root, file } = createRepo("local a = 1\nlocal b = 2\nlocal c = 3\nlocal d = 4\nreturn a\n");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const other = path.join(root, "Other.luau");
+  fs.writeFileSync(other, "local e = 1\nlocal f = 2\nreturn e\n");
+  git(root, "add", ".");
+  git(root, "commit", "-m", "second file");
+
+  // The added line reads like the next file's diff header
+  fs.writeFileSync(file, "local a = 1\n++ b/Other.luau\nlocal b = 2\nlocal c = 3\nlocal d = 5\nreturn a\n");
+  fs.writeFileSync(other, "local e = 1\nlocal f = 2\nreturn f\n");
+
+  const plan = createGitScopePlan(root, { scope: "lines" });
+  assert.deepEqual(plan.changedLines.get("Component.luau"), [{ start: 2, end: 2 }, { start: 5, end: 5 }]);
+  assert.deepEqual(plan.changedLines.get("Other.luau"), [{ start: 3, end: 3 }]);
 });
 
 test("lines scope considers secondary evidence highlights for aggregated diagnostics", async (t) => {

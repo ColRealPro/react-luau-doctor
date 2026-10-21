@@ -1,4 +1,5 @@
 import packageJson from "../package.json";
+import type { TimingEntry, Timings } from "./timings";
 import type { Diagnostic, RuleDefinition, ScanReport, Severity } from "./types";
 
 const VERSION = packageJson.version;
@@ -305,6 +306,87 @@ export function renderTextReport(
       for (const line of wrapped) lines.push(colorized ? paint(line, ANSI.dim) : line);
     }
   }
+  return lines.join("\n");
+}
+
+interface TimingRow {
+  name: string;
+  ms: number;
+  count?: number;
+  children: TimingRow[];
+}
+
+// Names group on their first `/`, so `Parse/Build tree` is listed under `Parse`
+function timingRows(entries: Record<string, TimingEntry>, sorted: boolean): TimingRow[] {
+  const rows: TimingRow[] = [];
+  const groups = new Map<string, TimingRow>();
+
+  for (const [name, entry] of Object.entries(entries)) {
+    const split = name.indexOf("/");
+
+    const groupName = split === -1 ? name : name.slice(0, split);
+    let group = groups.get(groupName);
+
+    if (!group) {
+      group = { name: groupName, ms: 0, children: [] };
+      groups.set(groupName, group);
+      rows.push(group);
+    }
+
+    if (split === -1) {
+      group.ms += entry.ms;
+      group.count = entry.count;
+      continue;
+    }
+
+    group.children.push({ name: name.slice(split + 1), ms: entry.ms, count: entry.count, children: [] });
+
+    // Stages time their parent directly, so only work groups total their children
+    if (sorted) group.ms += entry.ms;
+  }
+
+  if (sorted) {
+    const byTime = (left: TimingRow, right: TimingRow): number => right.ms - left.ms;
+
+    rows.sort(byTime);
+    for (const row of rows) row.children.sort(byTime);
+  }
+
+  return rows;
+}
+
+export function renderTimings(timings: Timings, colorized = false): string {
+  const sections: Array<[string, TimingRow[], boolean]> = [
+    ["Stages", timingRows(timings.stages, false), false],
+    ["Work, summed across threads", timingRows(timings.work, true), true],
+  ];
+
+  const flat = sections.flatMap(([, rows]) => rows.flatMap((row) => [row, ...row.children]));
+  const nameWidth = Math.max(...flat.map((row) => row.name.length), 0) + 4;
+  const timeWidth = Math.max(...flat.map((row) => row.ms.toFixed(1).length), 0) + 2;
+
+  const lines = [colorized ? paint("Timings:", ANSI.bold) : "Timings:"];
+
+  for (const [title, rows, showCounts] of sections) {
+    if (rows.length === 0) continue;
+
+    lines.push(`  ${colorized ? paint(title, ANSI.bold) : title}`);
+
+    const push = (row: TimingRow, depth: number): void => {
+      const indent = "  ".repeat(depth + 2);
+      const label = row.name.padEnd(nameWidth - depth * 2);
+      const time = `${row.ms.toFixed(1)}ms`.padStart(timeWidth + 2);
+      const count = showCounts && row.count !== undefined && row.children.length === 0 ? `  ${row.count}x` : "";
+
+      lines.push(`${indent}${label}${time}${colorized && count ? paint(count, ANSI.dim) : count}`);
+    };
+
+    for (const row of rows) {
+      push(row, 0);
+      for (const item of row.children) push(item, 1);
+    }
+  }
+
   return lines.join("\n");
 }
 

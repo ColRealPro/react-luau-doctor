@@ -32,3 +32,13 @@ The CLI and editor share rule explanations through `src/presentation.ts`. A find
 The editor runs rules from `src/lsp/live-rules.ts` against the current buffer. Rules that need fresh project information run in the worker. Both use `liveDebounceMs`, and the worker handles one project refresh at a time
 
 Run `bun run benchmark:lsp` to measure parsing and analysis
+
+## Parser
+
+Doctor parses with the official Luau parser, compiled to `vendor/luau-parser.wasm`. `native/luau-parser/encode.cpp` serializes Luau's AST, and `src/luau-syntax.ts` adapts it into the syntax tree the rules read
+
+To rebuild the WASM after changing the encoder or the pinned Luau version in `scripts/build-luau-parser.ts`, activate an [Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html) and run:
+
+```bash
+bun run build:parser
+```
