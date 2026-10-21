@@ -466,6 +466,20 @@ root:render(element)`,
     note: "Use React.Change instead when the handler should run when a property changes",
   },
 
+  "react-luau/no-instance-as-event-value": {
+    before: `React.createElement("TextBox", {
+\t[React.Change.Text] = function(text)
+\t\tsetText(text)
+\tend,
+})`,
+    after: `React.createElement("TextBox", {
+\t[React.Change.Text] = function(rbx)
+\t\tsetText(rbx.Text)
+\tend,
+})`,
+    note: "Event arguments start at the second parameter, such as function(rbx, input)",
+  },
+
   "react-luau/no-static-name-prop": {
     before: `return React.createElement("Frame", {}, {
 \tChild = React.createElement("TextLabel", {

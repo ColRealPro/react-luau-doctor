@@ -5,6 +5,7 @@
 ### New rules
 
 - `react-luau/no-function-host-prop` catches functions set as plain props on host elements, such as `Activated = function() end` instead of `[React.Event.Activated]`
+- `react-luau/no-instance-as-event-value` catches `React.Change` and `React.Event` handlers that use their first argument, the Instance, as the changed value or event argument
 
 ### Added
 

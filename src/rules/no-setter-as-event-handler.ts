@@ -10,13 +10,13 @@ import { fieldValue } from "./helpers";
 
 const SETTER_HOOKS = new Set(["React.useState", "React.useBinding"]);
 
-interface HandlerKey {
+export interface HandlerKey {
   node: SyntaxNode;
   kind: "Change" | "Event";
   member: string;
 }
 
-function handlerKey(context: RuleContext, field: SyntaxNode): HandlerKey | null {
+export function handlerKey(context: RuleContext, field: SyntaxNode): HandlerKey | null {
   const name = field.childForFieldName("name");
   const key = name && unwrapExpression(name);
   if (key?.type !== "dot_index_expression") return null;
@@ -36,7 +36,7 @@ function handlerKey(context: RuleContext, field: SyntaxNode): HandlerKey | null 
   return null;
 }
 
-function isStateOrBindingSetter(context: RuleContext, value: SyntaxNode): boolean {
+export function isStateOrBindingSetter(context: RuleContext, value: SyntaxNode): boolean {
   const resolved = resolveLocalValue(context, value);
   if (!resolved || resolved.returnIndex !== 1) return false;
   if (resolved.value.type !== "function_call") return false;

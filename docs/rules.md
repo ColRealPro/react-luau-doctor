@@ -80,7 +80,8 @@ Add `react-luau/` before the names below when using them in your [config](cli.md
 
 ## Roblox
 
-| Rule                       | Default | What it catches                                      |
-| -------------------------- | ------- | ---------------------------------------------------- |
-| `no-create-root-in-render` | error   | A component creates a ReactRoblox root during render |
-| `no-function-host-prop`    | error   | A host element sets a plain prop to a function       |
+| Rule                         | Default | What it catches                                      |
+| ---------------------------- | ------- | ---------------------------------------------------- |
+| `no-create-root-in-render`   | error   | A component creates a ReactRoblox root during render |
+| `no-function-host-prop`      | error   | A host element sets a plain prop to a function       |
+| `no-instance-as-event-value` | error   | A handler uses the Instance as the event value       |

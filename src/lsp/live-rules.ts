@@ -20,6 +20,7 @@ const LIVE_IDS = [
   "react-luau/rerender-state-only-in-handlers",
   "react-luau/no-set-state-in-render",
   "react-luau/no-setter-as-event-handler",
+  "react-luau/no-instance-as-event-value",
   "react-luau/no-function-host-prop",
   "react-luau/no-call-component-as-function",
   "react-luau/no-create-binding-in-render",

@@ -5623,3 +5623,39 @@ return Component
   const report = await scanPath(root);
   assert.deepEqual(ruleLines(report, "no-function-host-prop"), ["Component.luau:7", "Component.luau:8"]);
 });
+
+test("handlers that use the Instance argument as a value are reported", async (t) => {
+  const root = tempProject(t, "instance-as-event-value", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component()
+  local text, setText = React.useState("")
+  return React.createElement("TextBox", {
+    [React.Change.Text] = function(newText)
+      setText(newText)
+    end,
+    [React.Change.TextBounds] = function(rbx)
+      setText(rbx.Text)
+    end,
+    [React.Event.InputBegan] = function(input)
+      if input.KeyCode == Enum.KeyCode.Return then end
+    end,
+    [React.Event.InputEnded] = function(rbx, input)
+      if input.KeyCode == Enum.KeyCode.Return then end
+    end,
+    [React.Event.FocusLost] = function(rbx)
+      local label = "Focus " .. rbx.Name
+    end,
+    [React.Change.AbsoluteSize] = function(value)
+      local width = value + 1
+    end,
+  })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(ruleLines(report, "no-instance-as-event-value"), ["Component.luau:13", "Component.luau:22", "Component.luau:7"]);
+});
