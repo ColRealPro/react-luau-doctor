@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.22.0
+
+### Highlights
+
+- Files are now parsed with the official Luau parser, so modern Luau syntax is supported and parsing is faster
+- Workspace scans are about 25% faster on a single thread and 35% faster in parallel
+- Scans with a warm cache take about half as long
+
+### New rules
+
+- `react-luau/no-function-host-prop` catches functions set as plain props on host elements, such as `Activated = function() end` instead of `[React.Event.Activated]`
+- `react-luau/no-instance-as-event-value` catches `React.Change` and `React.Event` handlers that use their first argument, the Instance, as the changed value or event argument
+- `react-luau/no-ref-on-function-component` catches refs passed to function components that do not use `React.forwardRef`, which leaves the ref unset
+- `react-luau/no-binding-in-deps` catches hooks that list a binding they read, which never makes the hook run again
+
+### Changed
+
+- `no-prop-mutation` suggests `React.forwardRef` or a callback prop when a component writes to a ref passed through props
+- `effect-needs-cleanup` reports effects that return a connection or other resource instead of a cleanup function as errors
+
+### Fixed
+
+- `no-array-index-as-key` no longer flags counted loops that build fixed slots, and tells arrays and dictionaries apart from how a table is filled
+- `rerender-state-only-in-handlers` no longer suggests a ref for state read inside a `Binding:map`, which would leave the mapped value stale
+
 ## 0.21.2
 
 ### Changed
