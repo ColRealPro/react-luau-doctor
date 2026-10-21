@@ -5563,3 +5563,30 @@ return { Direct = Direct, Named = Named }
   assert.deepEqual(diagnostics.map((diagnostic) => [diagnostic.location.line, diagnostic.severity]), [[6, "error"], [13, "error"]]);
   for (const diagnostic of diagnostics) assert.match(diagnostic.message, /instead of a cleanup function/);
 });
+
+test("state only read inside a render Binding:map suggests a binding instead of a ref", async (t) => {
+  const root = tempProject(t, "state-in-binding-map", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component(props)
+  local offset, setOffset = React.useState(0)
+  React.useEffect(function()
+    setOffset(props.target)
+  end, { props.target })
+  return React.createElement("Frame", {
+    Position = props.progress:map(function(value)
+      return UDim2.fromOffset(offset, value)
+    end),
+  })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  const diagnostic = report.diagnostics.find((entry) => entry.rule === "react-luau/rerender-state-only-in-handlers");
+  assert.ok(diagnostic);
+  assert.match(diagnostic.message, /only read inside a Binding:map callback/);
+  assert.match(diagnostic.help ?? "", /React\.joinBindings/);
+});

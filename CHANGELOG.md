@@ -18,6 +18,7 @@
 ### Fixed
 
 - `no-array-index-as-key` no longer flags counted loops that build fixed slots, and tells arrays and dictionaries apart from how a table is filled
+- `rerender-state-only-in-handlers` no longer suggests a ref for state read inside a `Binding:map`, which would leave the mapped value stale
 
 ## 0.21.2
 
