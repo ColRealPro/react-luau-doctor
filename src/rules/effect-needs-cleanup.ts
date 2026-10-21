@@ -512,6 +512,21 @@ function classifyResource(call: SyntaxNode, context: RuleContext, callback: Func
   return null;
 }
 
+// Starts from the returned call so the example matches what the effect actually does
+function returnedResourcePreview(resources: Resource[], context: RuleContext): FixPreview | undefined {
+  const cleanup = cleanupFixPreview(resources, context);
+  if (!cleanup) return undefined;
+
+  const acquired = cleanup.before.split("\n");
+  acquired[0] = `return ${acquired[0].replace(/^local\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*/, "")}`;
+
+  return {
+    ...cleanup,
+    before: acquired.join("\n"),
+    note: "React calls the returned value when the effect cleans up, so it has to be a function",
+  };
+}
+
 function returnedResources(callback: FunctionInfo, resources: Resource[], context: RuleContext): Resource[] {
   if (!callback.body) return [];
 
@@ -573,7 +588,7 @@ export const effectNeedsCleanup: RuleDefinition = {
           severity: "error" as const,
           message: `Effect returns a ${returnedLabels.join(", ")} instead of a cleanup function`,
           help: "React calls whatever an effect returns when it cleans up, so return a function that releases the resource instead",
-          fixPreview: cleanupFixPreview(returned, context),
+          fixPreview: returnedResourcePreview(returned, context),
         });
 
         if (returned.length === missing.length) continue;

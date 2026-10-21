@@ -1,9 +1,45 @@
-import type { RuleDefinition } from "../types";
+import type { FixPreview, RuleDefinition } from "../types";
 import { assignmentLeft, assignmentTargetNode, callNameNode, isBindingShadowedBetween } from "./helpers";
 import { mightMutateParameters, mutatedParameterIndexesForCall, mutationOriginForExpression } from "./parameter-mutations";
 
 function isRefCurrent(target: string): boolean {
   return /\.\s*current$/.test(target.trim());
+}
+
+function refPropName(target: string): string {
+  return target.trim().match(/([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*current$/)?.[1] ?? "ref";
+}
+
+function forwardRefPreview(propsName: string, refName: string): FixPreview {
+  return {
+    kind: "pattern",
+    before: `local function Child(${propsName})
+\treturn React.createElement("Frame", {
+\t\tref = function(instance)
+\t\t\t${propsName}.${refName}.current = instance
+\t\tend,
+\t})
+end`,
+    after: `local Child = React.forwardRef(function(${propsName}, ref)
+\treturn React.createElement("Frame", {
+\t\tref = ref,
+\t})
+end)`,
+    note: `The parent then passes its ref as ref instead of through the ${refName} prop. Pass the Instance through a callback prop instead if the parent only needs it at certain moments`,
+  };
+}
+
+function registerPreview(argument: string): FixPreview {
+  return {
+    kind: "pattern",
+    before: `React.useEffect(function()
+\ttable.insert(${argument}, instance)
+end, { instance })`,
+    after: `React.useEffect(function()
+\treturn props.register(instance)
+end, { instance })`,
+    note: "register adds the value in the parent and returns a function that removes it, so unmounted children leave the list",
+  };
 }
 
 export const noPropMutation: RuleDefinition = {
@@ -31,6 +67,7 @@ export const noPropMutation: RuleDefinition = {
             node: assignmentTargetNode(node),
             message: `Component writes to a ref passed through ${propsName}`,
             help: "Wrap the component in React.forwardRef so the parent can pass a normal ref, or pass the Instance to the parent through a callback prop",
+            fixPreview: forwardRefPreview(propsName, refPropName(left)),
           });
           continue;
         }
@@ -63,13 +100,16 @@ export const noPropMutation: RuleDefinition = {
       if (!mutatedArgument) continue;
 
       const path = context.resolveCallPath(context.getCallPath(node) ?? "") || "This call";
+      const refValue = isRefCurrent(mutatedArgument.text);
+
       diagnostics.push({
         node: callNameNode(node),
         highlights: [mutatedArgument],
         message: `${path} mutates an argument derived from ${propsName}.`,
-        help: isRefCurrent(mutatedArgument.text)
+        help: refValue
           ? "Give the parent a callback prop that registers the value and returns a function to unregister it, then call that function from the effect cleanup"
           : "Treat props as immutable. Clone the table before passing it to a mutating helper, or move the mutation into the owner that controls the value.",
+        ...(refValue ? { fixPreview: registerPreview(mutatedArgument.sourceText.trim()) } : {}),
       });
     }
 

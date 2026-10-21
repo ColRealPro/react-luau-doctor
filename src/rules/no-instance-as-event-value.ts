@@ -108,11 +108,31 @@ export const noInstanceAsEventValue: RuleDefinition = {
             node: misuse,
             message: `${instance} is the changed Instance, not its ${key.member} value`,
             help: `Read the property from the Instance, such as ${instance}.${key.member}`,
+            fixPreview: {
+              kind: "pattern" as const,
+              before: `[React.Change.${key.member}] = function(${instance})
+\tuse(${instance})
+end,`,
+              after: `[React.Change.${key.member}] = function(rbx)
+\tuse(rbx.${key.member})
+end,`,
+              note: "React-Luau passes the Instance whose property changed",
+            },
           }
           : {
             node: misuse,
             message: `${instance} is the Instance that fired ${key.member}, not an event argument`,
             help: `Event arguments start at the second parameter, such as function(rbx, ${instance})`,
+            fixPreview: {
+              kind: "pattern" as const,
+              before: `[React.Event.${key.member}] = function(${instance})
+\tuse(${instance})
+end,`,
+              after: `[React.Event.${key.member}] = function(rbx, ${instance})
+\tuse(${instance})
+end,`,
+              note: "React-Luau passes the Instance first, then the signal's own arguments",
+            },
           },
       );
     }

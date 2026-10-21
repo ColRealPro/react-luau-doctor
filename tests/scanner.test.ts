@@ -5532,6 +5532,8 @@ return { Component = Component, Registered = Registered }
   assert.equal(diagnostics[0].message, "Component writes to a ref passed through props");
   assert.match(diagnostics[0].help ?? "", /React\.forwardRef/);
   assert.match(diagnostics[1].help ?? "", /unregister/);
+  assert.match(diagnostics[0].fixPreview?.after ?? "", /React\.forwardRef/);
+  assert.match(diagnostics[1].fixPreview?.after ?? "", /props\.register/);
 });
 
 test("effects that return a resource instead of a cleanup function are errors", async (t) => {
@@ -5561,7 +5563,10 @@ return { Direct = Direct, Named = Named }
   const report = await scanPath(root);
   const diagnostics = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/effect-needs-cleanup");
   assert.deepEqual(diagnostics.map((diagnostic) => [diagnostic.location.line, diagnostic.severity]), [[6, "error"], [13, "error"]]);
-  for (const diagnostic of diagnostics) assert.match(diagnostic.message, /instead of a cleanup function/);
+  for (const diagnostic of diagnostics) {
+    assert.match(diagnostic.message, /instead of a cleanup function/);
+    assert.match(diagnostic.fixPreview?.before ?? "", /^return /);
+  }
 });
 
 test("state only read inside a render Binding:map suggests a binding instead of a ref", async (t) => {
@@ -5589,6 +5594,7 @@ return Component
   assert.ok(diagnostic);
   assert.match(diagnostic.message, /only read inside a Binding:map callback/);
   assert.match(diagnostic.help ?? "", /React\.joinBindings/);
+  assert.match(diagnostic.fixPreview?.after ?? "", /React\.useBinding/);
 });
 
 function ruleLines(report: Awaited<ReturnType<typeof scanPath>>, rule: string): string[] {
@@ -5658,6 +5664,8 @@ return Component
 
   const report = await scanPath(root);
   assert.deepEqual(ruleLines(report, "no-instance-as-event-value"), ["Component.luau:13", "Component.luau:22", "Component.luau:7"]);
+  const inputFinding = report.diagnostics.find((diagnostic) => diagnostic.rule === "react-luau/no-instance-as-event-value" && diagnostic.location.line === 13);
+  assert.match(inputFinding?.fixPreview?.after ?? "", /function\(rbx, input\)/);
 });
 
 test("refs passed to function components without forwardRef are reported across modules", async (t) => {

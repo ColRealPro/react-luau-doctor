@@ -545,6 +545,18 @@ export const rerenderStateOnlyInHandlers: RuleDefinition = {
             message: `${binding.valueName} is React state that is only read inside a Binding:map callback`,
             summary: `${binding.valueName} only feeds a Binding:map. Make it a binding instead`,
             help: "Make this value a binding with React.useBinding and combine it with React.joinBindings so updates skip rerendering. A ref would leave the mapped value stale",
+            fixPreview: {
+              kind: "pattern" as const,
+              before: `local ${binding.valueName}, ${binding.setterName} = React.useState(initial)
+local position = progress:map(function(value)
+\treturn UDim2.fromOffset(${binding.valueName}, value)
+end)`,
+              after: `local ${binding.valueName}, ${binding.setterName} = React.useBinding(initial)
+local position = React.joinBindings({ progress, ${binding.valueName} }):map(function(values)
+\treturn UDim2.fromOffset(values[2], values[1])
+end)`,
+              note: `${binding.setterName} keeps working the same way, but updates the binding without rerendering`,
+            },
           });
           continue;
         }
