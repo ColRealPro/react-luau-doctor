@@ -13,6 +13,7 @@
 - Full scans are about 25% faster on a single thread and 35% faster in parallel
 - Scans with a warm cache take about half as long
 - `no-prop-mutation` suggests `React.forwardRef` or a callback prop when a component writes to a ref passed through props
+- `effect-needs-cleanup` reports effects that return a connection or other resource instead of a cleanup function as errors
 
 ### Fixed
 

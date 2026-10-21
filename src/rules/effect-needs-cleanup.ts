@@ -512,6 +512,25 @@ function classifyResource(call: SyntaxNode, context: RuleContext, callback: Func
   return null;
 }
 
+function returnedResources(callback: FunctionInfo, resources: Resource[], context: RuleContext): Resource[] {
+  if (!callback.body) return [];
+
+  const returned = new Set<Resource>();
+
+  for (const node of context.walk(callback.body)) {
+    if (node.type !== "return_statement" || context.nearestFunction(node) !== callback) continue;
+
+    const value = node.namedChildren.find((child) => child.type === "expression_list")?.namedChildren[0];
+    if (!value) continue;
+
+    for (const resource of resources) {
+      if (value.id === resource.call.id || (value.type === "identifier" && value.text === resource.variable)) returned.add(resource);
+    }
+  }
+
+  return [...returned];
+}
+
 export const effectNeedsCleanup: RuleDefinition = {
   id: "react-luau/effect-needs-cleanup",
   category: "Effects",
@@ -543,6 +562,24 @@ export const effectNeedsCleanup: RuleDefinition = {
       }
 
       if (missing.length === 0) continue;
+
+      const returned = returnedResources(callback, missing, context);
+      if (returned.length > 0) {
+        const returnedLabels = [...new Set(returned.map((resource) => resource.label))];
+
+        diagnostics.push({
+          node: callNameNode(returned[0].call),
+          highlights: returned.map((resource) => callNameNode(resource.call)),
+          severity: "error" as const,
+          message: `Effect returns a ${returnedLabels.join(", ")} instead of a cleanup function`,
+          help: "React calls whatever an effect returns when it cleans up, so return a function that releases the resource instead",
+          fixPreview: cleanupFixPreview(returned, context),
+        });
+
+        if (returned.length === missing.length) continue;
+        missing.splice(0, missing.length, ...missing.filter((resource) => !returned.includes(resource)));
+      }
+
       const labels = [...new Set(missing.map((resource) => resource.label))];
       const details = [...new Set(missing.map((resource) => resource.detail).filter((detail): detail is string => Boolean(detail)))];
       const severityRank: Record<Severity, number> = { suggestion: 0, warning: 1, error: 2 };

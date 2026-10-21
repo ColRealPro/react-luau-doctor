@@ -5533,3 +5533,33 @@ return { Component = Component, Registered = Registered }
   assert.match(diagnostics[0].help ?? "", /React\.forwardRef/);
   assert.match(diagnostics[1].help ?? "", /unregister/);
 });
+
+test("effects that return a resource instead of a cleanup function are errors", async (t) => {
+  const root = tempProject(t, "effect-returns-resource", {
+    "Component.luau": `local React = require(script.Parent.React)
+local RunService = game:GetService("RunService")
+
+local function Direct()
+  React.useEffect(function()
+    return RunService.Heartbeat:Connect(function() end)
+  end, {})
+  return nil
+end
+
+local function Named()
+  React.useEffect(function()
+    local connection = RunService.Heartbeat:Connect(function() end)
+    return connection
+  end, {})
+  return nil
+end
+
+return { Direct = Direct, Named = Named }
+`,
+  });
+
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/effect-needs-cleanup");
+  assert.deepEqual(diagnostics.map((diagnostic) => [diagnostic.location.line, diagnostic.severity]), [[6, "error"], [13, "error"]]);
+  for (const diagnostic of diagnostics) assert.match(diagnostic.message, /instead of a cleanup function/);
+});
