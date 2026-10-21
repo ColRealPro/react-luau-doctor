@@ -679,8 +679,8 @@ export const noSideEffectsInRender: RuleDefinition = {
           inferredFromSource && !knownPattern
             ? {
                 kind: "pattern" as const,
-                before: call.text,
-                after: `local function handleChange()\n\t${call.text}\nend`,
+                before: call.sourceText,
+                after: `local function handleChange()\n\t${call.sourceText}\nend`,
                 note: "Connect this handler to the event that causes the change. Use an effect instead when a prop or state change should trigger it.",
               }
             : undefined,

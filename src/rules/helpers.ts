@@ -142,9 +142,7 @@ export function fieldName(node: SyntaxNode): string | null {
 
 export function fieldValue(node: SyntaxNode): SyntaxNode | null {
   if (node.type !== "field") return null;
-  const name = node.childForFieldName("name");
-  if (!name) return node.namedChildren[0] ?? null;
-  return node.namedChildren.find((child) => child.startIndex > name.endIndex) ?? null;
+  return node.childForFieldName("value");
 }
 
 export function containsIdentifier(node: SyntaxNode | null | undefined, name: string, context: RuleContext): boolean {

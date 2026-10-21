@@ -1063,6 +1063,68 @@ test("reports Luau parse errors before downstream analysis", async () => {
 });
 
 
+test("comments and Luau's parse error limit don't change analysis of surrounding code", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-parser-trivia-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(path.join(root, "Broken.luau"), `local React = require(script.Parent.React)\n${"!".repeat(101)}\n`);
+
+  fs.writeFileSync(
+    path.join(root, "Parent.luau"),
+    `local React = require(script.Parent.React)
+local Child = React.memo(function() return React.createElement("Frame") end)
+local function Parent(props)
+  return React.createElement(Child, { value = props.enabled --[[a]] and { key --[[b]] = 1 } })
+end
+return Parent`,
+  );
+
+  fs.writeFileSync(
+    path.join(root, "List.luau"),
+    `local React = require(script.Parent.React)
+type Items = --[[ by id ]] { -- keyed by id
+  [string]: number
+}
+local function List(props: { items: Items })
+  local children = {}
+  for id, value in pairs(props.items) do
+    children[id] = React.createElement("Frame")
+  end
+  return React.createElement("Frame", nil, children)
+end
+return List`,
+  );
+
+  const report = await scanPath(root, { cache: false, parallel: false });
+  const rules = (file: string) => report.diagnostics.filter((entry) => entry.file === file).map((entry) => entry.rule);
+
+  assert.deepEqual(rules("Parent.luau"), ["react-luau/rerender-unstable-memo-props"]);
+  assert.deepEqual(rules("List.luau"), []);
+});
+
+test("code quoted in findings keeps its comments", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-quoted-comments-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  fs.writeFileSync(
+    path.join(root, "Counter.luau"),
+    `local React = require(script.Parent.React)
+local function Counter(props)
+  local doubled, setDoubled = React.useState(0)
+  React.useEffect(function()
+    setDoubled(props.count --[[ raw ]] * 2)
+  end, { props.count })
+  return React.createElement("TextLabel", { Text = doubled })
+end
+return Counter`,
+  );
+
+  const report = await scanPath(root, { cache: false, parallel: false });
+  const diagnostic = report.diagnostics.find((entry) => entry.rule === "react-luau/no-derived-state-effect");
+
+  assert.equal(diagnostic?.fixPreview?.after, "local doubled = props.count --[[ raw ]] * 2");
+});
+
 test("effect cleanup recognizes named cleanup functions and Maid-style ownership", async () => {
   const ids = await ruleIds("cleanup-patterns.luau");
   assert.equal(ids.has("react-luau/effect-needs-cleanup"), false);
@@ -1505,14 +1567,38 @@ test("accepts modern Luau const, export-by-value, attributes, type functions, ex
   assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/parse-error"), false);
   assert.equal(report.scannedFiles, 1);
   const propMutation = report.diagnostics.find((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation");
-  assert.equal(propMutation?.location.line, 31);
+  assert.equal(propMutation?.location.line, 30);
   assert.equal(propMutation?.location.column, 2);
+});
+
+test("typed hook syntax parses and diagnostics after non-ASCII text keep source columns", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-luau-syntax-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const mutation = '\tlocal greeting: typeof(props.label) = "h\u00e9llo \u{1f600}"; props.label = greeting';
+
+  fs.writeFileSync(path.join(root, "Component.luau"), [
+    "local React = require(script.Parent.React)",
+    "local function Component<T...>(props: { label: string }, ...: T...): React.Element",
+    mutation,
+    "\tlocal value = React.useMemo(function() return nil :: { hasValue: true } | nil end, {})",
+    '\treturn React.createElement("TextLabel", { Text = tostring(value) })',
+    "end",
+    "return Component",
+  ].join("\n"));
+
+  const report = await scanPath(root, { parallel: false });
+  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/parse-error"), false);
+  const propMutation = report.diagnostics.find((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation");
+  assert.equal(propMutation?.location.line, 3);
+  assert.equal(propMutation?.location.column, mutation.indexOf("props.label =") + 1);
 });
 
 test("scan progress advances across every candidate file", async () => {
   const progress: Array<{ current: number; total: number; partial?: boolean }> = [];
+
   const report = await scanPath(fixtures, {
     cache: false,
+
     onProgress(value) {
       progress.push(value);
     },
@@ -3774,6 +3860,56 @@ return Component
   assert.match(diagnostic.message, /performWork runs during render, and code it calls eventually changes state outside the current render/);
 });
 
+test("scans of part of a project keep transitive effects without caching a partial effect set", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-scoped-effects-"));
+  const cacheDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-scoped-effects-cache-"));
+  const previousCache = process.env.REACT_LUAU_DOCTOR_CACHE_DIR;
+  process.env.REACT_LUAU_DOCTOR_CACHE_DIR = cacheDirectory;
+
+  t.after(() => {
+    if (previousCache === undefined) delete process.env.REACT_LUAU_DOCTOR_CACHE_DIR;
+    else process.env.REACT_LUAU_DOCTOR_CACHE_DIR = previousCache;
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(cacheDirectory, { recursive: true, force: true });
+  });
+
+  for (const area of ["First", "Second"]) {
+    fs.mkdirSync(path.join(root, area));
+
+    fs.writeFileSync(path.join(root, area, `${area}Mutator.luau`), `local stored = {}
+local function mutateStored()
+  stored.changed = true
+end
+return mutateStored
+`);
+
+    fs.writeFileSync(path.join(root, area, `${area}Wrapper.luau`), `local mutateStored = require(script.Parent.${area}Mutator)
+local function performWork()
+  mutateStored()
+end
+return performWork
+`);
+
+    fs.writeFileSync(path.join(root, area, `${area}Component.luau`), `local React = require(script.Parent.React)
+local performWork = require(script.Parent.${area}Wrapper)
+local function Component()
+  performWork()
+  return React.createElement("Frame")
+end
+return Component
+`);
+  }
+
+  for (const area of ["First", "Second"]) {
+    const report = await scanPath(path.join(root, area), { projectRoot: root, parallel: false });
+
+    assert.ok(
+      report.diagnostics.some((entry) => entry.rule === "react-luau/no-side-effects-in-render"),
+      `${area} keeps its transitive effect`,
+    );
+  }
+});
+
 
 test("source effect inference does not confuse function-local imports or shadowed aliases", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-source-effects-import-shadow-"));
@@ -4349,7 +4485,7 @@ return BadReactComponent
   );
 });
 
-test("suggests reviewing unknown collection keys returned from useMemo and passed to a fragment", async (t) => {
+test("reports sorted collection positions returned from useMemo and passed to a fragment", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-memo-child-index-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const source = `local React = require(script.Parent.React)
@@ -4376,8 +4512,7 @@ return Inventory
   const diagnostics = report.diagnostics.filter((item) => item.rule === "react-luau/no-array-index-as-key");
   assert.equal(diagnostics.length, 1);
   assert.equal(diagnostics[0].severity, "suggestion");
-  assert.equal(diagnostics[0].message, "Loop key i may be an array position used as React child identity.");
-  assert.match(diagnostics[0].caveat ?? "", /stable dictionary key is valid/);
+  assert.equal(diagnostics[0].message, "Loop index i is used as React child identity.");
   const location = diagnostics[0].location;
   assert.equal(location.line, 11);
   assert.equal(source.split("\n")[location.line - 1].slice(location.column - 1, location.endColumn - 1), "i");
@@ -4409,6 +4544,12 @@ test("recognizes positional and unknown keys without relying on variable names",
     Stable: `for i, item in props.items do
       children[item.id] = React.createElement(Row, { LayoutOrder = i })
     end`,
+    FixedSlots: `for i = 1, props.count do
+      children[i] = React.createElement(Row, {})
+    end`,
+    SlotData: `for i = 1, props.count do
+      children[i] = React.createElement(Row, { item = props.items[i] })
+    end`,
   };
   for (const [name, loop] of Object.entries(loops)) {
     fs.writeFileSync(path.join(root, `${name}.luau`), `local React = require(script.Parent.React)
@@ -4423,9 +4564,9 @@ return Component
 
   const report = await scanPath(root);
   const diagnostics = report.diagnostics.filter((item) => item.rule === "react-luau/no-array-index-as-key");
-  assert.deepEqual(diagnostics.map((item) => item.file).sort(), ["ExplicitKey.luau", "Generic.luau", "Ipairs.luau", "Numeric.luau", "ShadowedIpairs.luau", "UnknownK.luau"]);
+  assert.deepEqual(diagnostics.map((item) => item.file).sort(), ["ExplicitKey.luau", "Generic.luau", "Ipairs.luau", "Numeric.luau", "ShadowedIpairs.luau", "SlotData.luau", "UnknownK.luau"]);
   for (const diagnostic of diagnostics) {
-    assert.equal(diagnostic.message.includes("may be"), !["Ipairs.luau", "Numeric.luau"].includes(diagnostic.file));
+    assert.equal(diagnostic.message.includes("may be"), !["Ipairs.luau", "Numeric.luau", "SlotData.luau"].includes(diagnostic.file));
   }
 });
 
@@ -4469,9 +4610,9 @@ test("uses visible collection shapes and types to distinguish positional and dic
   const cases = [
     { name: "StringDictionary", type: "{ [string]: Item }", expected: "none" },
     { name: "Array", type: "{ Item }", expected: "array" },
-    // Numeric keys can represent stable IDs, so the indexer alone proves no position.
-    { name: "NumericMap", type: "{ [number]: Item }", expected: "unknown" },
-    { name: "ImportedType", type: "Types.Items", expected: "unknown" },
+    // Numeric indexers can be stable IDs, but table.sort only orders positions
+    { name: "NumericMap", type: "{ [number]: Item }", expected: "array" },
+    { name: "ImportedType", type: "Types.Items", expected: "array" },
   ];
   for (const entry of cases) {
     fs.writeFileSync(path.join(root, `${entry.name}.luau`), `local React = require(script.Parent.React)
@@ -4523,6 +4664,23 @@ test("respects local type hints, aliases, dictionary literals and shadowed colle
   if props.replace then items = props.items end`,
     NumericLiteralMap: `local items = { [100] = props.first, [200] = props.second }`,
     MixedLiteral: `local items = { props.first, Named = props.second }`,
+    NamedWrites: `local items = {}
+  for _, child in props.folder:GetChildren() do
+    items[child.Name] = child
+  end`,
+    InsertedItems: `local items = {}
+  table.insert(items, props.first)`,
+    MemoFactory: `local function build()
+    local result = {}
+    if not props.first then
+      return result
+    end
+    result[props.prefix .. "First"] = props.first
+    return result
+  end
+  local items = React.useMemo(build, {})`,
+    UnknownWrites: `local items = {}
+  items[props.key] = props.first`,
   };
   for (const [name, setup] of Object.entries(cases)) {
     fs.writeFileSync(path.join(root, `${name}.luau`), `local React = require(script.Parent.React)
@@ -4539,9 +4697,9 @@ return Component
   }
   const report = await scanPath(root);
   const diagnostics = report.diagnostics.filter((item) => item.rule === "react-luau/no-array-index-as-key");
-  assert.deepEqual(diagnostics.map((item) => item.file).sort(), ["Alias.luau", "ArrayAnnotation.luau", "ArrayLiteral.luau", "ConditionalReassignment.luau", "MixedLiteral.luau", "NumericLiteralMap.luau", "Reassigned.luau"]);
+  assert.deepEqual(diagnostics.map((item) => item.file).sort(), ["Alias.luau", "ArrayAnnotation.luau", "ArrayLiteral.luau", "ConditionalReassignment.luau", "InsertedItems.luau", "MixedLiteral.luau", "NumericLiteralMap.luau", "Reassigned.luau", "UnknownWrites.luau"]);
   for (const diagnostic of diagnostics) {
-    assert.equal(diagnostic.message.includes("may be"), ["ConditionalReassignment.luau", "MixedLiteral.luau", "NumericLiteralMap.luau", "Reassigned.luau"].includes(diagnostic.file));
+    assert.equal(diagnostic.message.includes("may be"), ["ConditionalReassignment.luau", "MixedLiteral.luau", "NumericLiteralMap.luau", "Reassigned.luau", "UnknownWrites.luau"].includes(diagnostic.file));
   }
 });
 
@@ -5343,4 +5501,249 @@ return Component
       .map((diagnostic) => `${diagnostic.rule}:${diagnostic.location.line}`),
     ["react-luau/no-side-effects-in-render:9"],
   );
+});
+
+test("ref props get forwarding advice instead of generic prop mutation advice", async (t) => {
+  const root = tempProject(t, "ref-prop-writes", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component(props)
+  return React.createElement("Frame", {
+    ref = function(instance)
+      props.frameRef.current = instance
+    end,
+  })
+end
+
+local function Registered(props)
+  React.useEffect(function()
+    table.insert(props.registry.current, props.value)
+  end, {})
+  return nil
+end
+
+return { Component = Component, Registered = Registered }
+`,
+  });
+
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation");
+  assert.deepEqual(diagnostics.map((diagnostic) => diagnostic.location.line), [6, 13]);
+  assert.equal(diagnostics[0].message, "Component writes to a ref passed through props");
+  assert.match(diagnostics[0].help ?? "", /React\.forwardRef/);
+  assert.match(diagnostics[1].help ?? "", /unregister/);
+  assert.match(diagnostics[0].fixPreview?.after ?? "", /React\.forwardRef/);
+  assert.match(diagnostics[1].fixPreview?.after ?? "", /props\.register/);
+});
+
+test("effects that return a resource instead of a cleanup function are errors", async (t) => {
+  const root = tempProject(t, "effect-returns-resource", {
+    "Component.luau": `local React = require(script.Parent.React)
+local RunService = game:GetService("RunService")
+
+local function Direct()
+  React.useEffect(function()
+    return RunService.Heartbeat:Connect(function() end)
+  end, {})
+  return nil
+end
+
+local function Named()
+  React.useEffect(function()
+    local connection = RunService.Heartbeat:Connect(function() end)
+    return connection
+  end, {})
+  return nil
+end
+
+return { Direct = Direct, Named = Named }
+`,
+  });
+
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/effect-needs-cleanup");
+  assert.deepEqual(diagnostics.map((diagnostic) => [diagnostic.location.line, diagnostic.severity]), [[6, "error"], [13, "error"]]);
+  for (const diagnostic of diagnostics) {
+    assert.match(diagnostic.message, /instead of a cleanup function/);
+    assert.match(diagnostic.fixPreview?.before ?? "", /^return /);
+  }
+});
+
+test("state only read inside a render Binding:map suggests a binding instead of a ref", async (t) => {
+  const root = tempProject(t, "state-in-binding-map", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component(props)
+  local offset, setOffset = React.useState(0)
+  React.useEffect(function()
+    setOffset(props.target)
+  end, { props.target })
+  return React.createElement("Frame", {
+    Position = props.progress:map(function(value)
+      return UDim2.fromOffset(offset, value)
+    end),
+  })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  const diagnostic = report.diagnostics.find((entry) => entry.rule === "react-luau/rerender-state-only-in-handlers");
+  assert.ok(diagnostic);
+  assert.match(diagnostic.message, /only read inside a Binding:map callback/);
+  assert.match(diagnostic.help ?? "", /React\.joinBindings/);
+  assert.match(diagnostic.fixPreview?.after ?? "", /React\.useBinding/);
+});
+
+function ruleLines(report: Awaited<ReturnType<typeof scanPath>>, rule: string): string[] {
+  return report.diagnostics
+    .filter((diagnostic) => diagnostic.rule === `react-luau/${rule}`)
+    .map((diagnostic) => `${diagnostic.file}:${diagnostic.location.line}`)
+    .sort();
+}
+
+test("functions set as plain host props are reported but callback refs and handler keys are not", async (t) => {
+  const root = tempProject(t, "function-host-prop", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function onActivated() end
+
+local function Component(props)
+  return React.createElement("TextButton", {
+    Activated = function() end,
+    MouseEnter = onActivated,
+    ref = function(rbx) end,
+    [React.Event.Activated] = onActivated,
+    Text = props.text,
+  }, {
+    Child = React.createElement(props.component, { onActivated = onActivated }),
+  })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(ruleLines(report, "no-function-host-prop"), ["Component.luau:7", "Component.luau:8"]);
+});
+
+test("handlers that use the Instance argument as a value are reported", async (t) => {
+  const root = tempProject(t, "instance-as-event-value", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component()
+  local text, setText = React.useState("")
+  return React.createElement("TextBox", {
+    [React.Change.Text] = function(newText)
+      setText(newText)
+    end,
+    [React.Change.TextBounds] = function(rbx)
+      setText(rbx.Text)
+    end,
+    [React.Event.InputBegan] = function(input)
+      if input.KeyCode == Enum.KeyCode.Return then end
+    end,
+    [React.Event.InputEnded] = function(rbx, input)
+      if input.KeyCode == Enum.KeyCode.Return then end
+    end,
+    [React.Event.FocusLost] = function(rbx)
+      local label = "Focus " .. rbx.Name
+    end,
+    [React.Change.AbsoluteSize] = function(value)
+      local width = value + 1
+    end,
+  })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(ruleLines(report, "no-instance-as-event-value"), ["Component.luau:13", "Component.luau:22", "Component.luau:7"]);
+  const inputFinding = report.diagnostics.find((diagnostic) => diagnostic.rule === "react-luau/no-instance-as-event-value" && diagnostic.location.line === 13);
+  assert.match(inputFinding?.fixPreview?.after ?? "", /function\(rbx, input\)/);
+});
+
+test("refs passed to function components without forwardRef are reported across modules", async (t) => {
+  const root = tempProject(t, "ref-on-function-component", {
+    "Plain.luau": `local React = require(script.Parent.React)
+local function Plain(props)
+  return React.createElement("Frame", {})
+end
+return Plain
+`,
+    "Forwarded.luau": `local React = require(script.Parent.React)
+local Forwarded = React.forwardRef(function(props, ref)
+  return React.createElement("Frame", { ref = ref })
+end)
+return Forwarded
+`,
+    "Memoized.luau": `local React = require(script.Parent.React)
+return React.memo(function(props)
+  return React.createElement("Frame", {})
+end)
+`,
+    "Component.luau": `local React = require(script.Parent.React)
+local Plain = require(script.Parent.Plain)
+local Forwarded = require(script.Parent.Forwarded)
+local Memoized = require(script.Parent.Memoized)
+
+local function Local(props)
+  return React.createElement("Frame", {})
+end
+
+local LocalForwarded = React.forwardRef(function(props, ref)
+  return React.createElement("Frame", { ref = ref })
+end)
+
+local function Component(props)
+  local ref = React.useRef(nil)
+  return React.createElement("Frame", {}, {
+    A = React.createElement(Plain, { ref = ref }),
+    B = React.createElement(Forwarded, { ref = ref }),
+    C = React.createElement(Memoized, { ref = ref }),
+    D = React.createElement(Local, { ref = ref }),
+    E = React.createElement(LocalForwarded, { ref = ref }),
+    F = React.createElement(props.component, { ref = ref }),
+    G = React.createElement("Frame", { ref = ref }),
+  })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(ruleLines(report, "no-ref-on-function-component"), ["Component.luau:17", "Component.luau:19", "Component.luau:20"]);
+});
+
+test("bindings read inside a hook are reported when listed as dependencies", async (t) => {
+  const root = tempProject(t, "binding-in-deps", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component(props)
+  local size, setSize = React.useBinding(0)
+  local count, setCount = React.useState(0)
+  React.useEffect(function()
+    print(size:getValue())
+  end, { size })
+  React.useEffect(function()
+    props.onBinding(size)
+  end, { size })
+  React.useMemo(function()
+    return count + 1
+  end, { count })
+  return nil
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(ruleLines(report, "no-binding-in-deps"), ["Component.luau:8"]);
 });

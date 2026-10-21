@@ -8,6 +8,7 @@ const extension = path.join(root, "editors", "vscode");
 const server = path.join(extension, "server");
 
 fs.mkdirSync(server, { recursive: true });
+fs.rmSync(path.join(extension, "vendor"), { recursive: true, force: true });
 fs.mkdirSync(path.join(extension, "vendor"), { recursive: true });
 
 fs.writeFileSync(
@@ -27,7 +28,7 @@ await build({
   format: "esm",
   target: "node20",
   mainFields: ["module", "main"],
-  external: ["web-tree-sitter", "vscode-languageserver/node"],
+  external: ["vscode-languageserver/node"],
 });
 
 await build({
@@ -41,13 +42,13 @@ await build({
 });
 
 fs.copyFileSync(
-  path.join(root, "vendor", "tree-sitter-luau.wasm"),
-  path.join(extension, "vendor", "tree-sitter-luau.wasm"),
+  path.join(root, "vendor", "luau-parser.wasm"),
+  path.join(extension, "vendor", "luau-parser.wasm"),
 );
 
 fs.copyFileSync(
-  path.join(root, "vendor", "tree-sitter-luau.LICENSE"),
-  path.join(extension, "vendor", "tree-sitter-luau.LICENSE"),
+  path.join(root, "vendor", "luau.LICENSE"),
+  path.join(extension, "vendor", "luau.LICENSE"),
 );
 
 fs.copyFileSync(

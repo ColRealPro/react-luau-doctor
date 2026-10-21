@@ -452,6 +452,54 @@ root:render(element)`,
     note: "Create and own roots outside component render. A component should not imperatively create another React root while rendering.",
   },
 
+  "react-luau/no-function-host-prop": {
+    before: `React.createElement("TextButton", {
+\tActivated = function(rbx)
+\t\tonActivated()
+\tend,
+})`,
+    after: `React.createElement("TextButton", {
+\t[React.Event.Activated] = function(rbx)
+\t\tonActivated()
+\tend,
+})`,
+    note: "Use React.Change instead when the handler should run when a property changes",
+  },
+
+  "react-luau/no-instance-as-event-value": {
+    before: `React.createElement("TextBox", {
+\t[React.Change.Text] = function(text)
+\t\tsetText(text)
+\tend,
+})`,
+    after: `React.createElement("TextBox", {
+\t[React.Change.Text] = function(rbx)
+\t\tsetText(rbx.Text)
+\tend,
+})`,
+    note: "Event arguments start at the second parameter, such as function(rbx, input)",
+  },
+
+  "react-luau/no-ref-on-function-component": {
+    before: `local function Child(props)
+\treturn React.createElement("Frame", {})
+end`,
+    after: `local Child = React.forwardRef(function(props, ref)
+\treturn React.createElement("Frame", { ref = ref })
+end)`,
+    note: "Pass the Instance to the parent through a callback prop instead when it only needs it at certain moments",
+  },
+
+  "react-luau/no-binding-in-deps": {
+    before: `React.useEffect(function()
+\tprint(size:getValue())
+end, { size })`,
+    after: `local sizeText = size:map(function(value)
+\treturn tostring(value)
+end)`,
+    note: "Keep the value in state instead if the hook must run again when it changes",
+  },
+
   "react-luau/no-static-name-prop": {
     before: `return React.createElement("Frame", {}, {
 \tChild = React.createElement("TextLabel", {

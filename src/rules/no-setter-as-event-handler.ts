@@ -10,13 +10,13 @@ import { fieldValue } from "./helpers";
 
 const SETTER_HOOKS = new Set(["React.useState", "React.useBinding"]);
 
-interface HandlerKey {
+export interface HandlerKey {
   node: SyntaxNode;
   kind: "Change" | "Event";
   member: string;
 }
 
-function handlerKey(context: RuleContext, field: SyntaxNode): HandlerKey | null {
+export function handlerKey(context: RuleContext, field: SyntaxNode): HandlerKey | null {
   const name = field.childForFieldName("name");
   const key = name && unwrapExpression(name);
   if (key?.type !== "dot_index_expression") return null;
@@ -36,7 +36,7 @@ function handlerKey(context: RuleContext, field: SyntaxNode): HandlerKey | null 
   return null;
 }
 
-function isStateOrBindingSetter(context: RuleContext, value: SyntaxNode): boolean {
+export function isStateOrBindingSetter(context: RuleContext, value: SyntaxNode): boolean {
   const resolved = resolveLocalValue(context, value);
   if (!resolved || resolved.returnIndex !== 1) return false;
   if (resolved.value.type !== "function_call") return false;
@@ -69,7 +69,7 @@ export const noSetterAsEventHandler: RuleDefinition = {
       const key = handlerKey(context, field);
       if (!key || !isStateOrBindingSetter(context, value)) continue;
 
-      const setter = value.text;
+      const setter = value.sourceText;
       const handler =
         key.kind === "Change"
           ? `function(rbx)\n\t${setter}(rbx.${key.member})\nend`
@@ -86,8 +86,8 @@ export const noSetterAsEventHandler: RuleDefinition = {
             ? `Read the property from the Instance: function(rbx) ${setter}(rbx.${key.member}) end`
             : "Wrap the setter in a function and pass the value you want to store",
         fixPreview: {
-          before: `[${key.node.text}] = ${setter},`,
-          after: `[${key.node.text}] = ${handler},`,
+          before: `[${key.node.sourceText}] = ${setter},`,
+          after: `[${key.node.sourceText}] = ${handler},`,
           note: "React-Luau passes the Instance as the first handler argument",
           kind: key.kind === "Change" ? "exact" : "pattern",
         },

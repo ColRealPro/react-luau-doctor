@@ -9,13 +9,12 @@ declare extern type NativeHandle with
 	read Id: number
 end
 
-@[deprecated("legacy helper")]
+@[deprecated { reason = "legacy helper" }]
 local function legacyHelper(value)
 	return value
 end
 
-@native
-export const Component = function(props)
+export const Component = @native function(props)
 	const doubled: number = props.value * 2
 	const memoized = React.useMemo(function()
 		return legacyHelper(doubled)

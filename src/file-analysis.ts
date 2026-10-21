@@ -7,6 +7,7 @@ import { createInlineSuppressionChecker } from "./inline-disables";
 import { parseLuau } from "./parser";
 import { rules } from "./rules";
 import { parseErrors } from "./rules/parse-errors";
+import { timeWork } from "./timings";
 
 import type {
   Category,
@@ -134,7 +135,7 @@ export async function analyzeReactFile(
   const parsedTree = tree ?? (await parseLuau(input.source));
 
   try {
-    const model = buildReactModel(parsedTree.rootNode, input.project);
+    const model = timeWork("React model", () => buildReactModel(parsedTree.rootNode, input.project));
 
     if (!input.forceScan && !model.isReactFile) {
       return {
@@ -177,7 +178,7 @@ export async function analyzeReactFile(
 
       if (!severity) continue;
 
-      const findings = rule.id === parseErrors.id ? syntaxFindings : rule.run(context);
+      const findings = rule.id === parseErrors.id ? syntaxFindings : timeWork(`Rules/${rule.id}`, () => rule.run(context));
 
       for (const finding of findings) {
         const configuredSeverity = input.config.rules?.[rule.id];

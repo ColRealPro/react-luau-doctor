@@ -7,6 +7,7 @@ import {
 } from "./project-effects";
 import type { AnalysisWorkerRequest, AnalysisWorkerResponse } from "./parallel";
 import type { SyntaxTree } from "./syntax";
+import { takeTimings } from "./timings";
 
 if (!parentPort) throw new Error("Analysis worker requires a parent port");
 
@@ -40,7 +41,7 @@ parentPort.on("message", async (request: AnalysisWorkerRequest) => {
           }
         }
       }
-      parentPort!.postMessage({ type: "effect-index", modules } satisfies AnalysisWorkerResponse);
+      parentPort!.postMessage({ type: "effect-index", modules, timings: takeTimings() } satisfies AnalysisWorkerResponse);
       return;
     }
 
@@ -48,7 +49,7 @@ parentPort.on("message", async (request: AnalysisWorkerRequest) => {
       const modules = [...effectStates.values()].map((state) =>
         analyzeEffectModuleForWorker(state, request.moduleSummaries, request.exportedFunctions)
       );
-      parentPort!.postMessage({ type: "effect-analyze", modules } satisfies AnalysisWorkerResponse);
+      parentPort!.postMessage({ type: "effect-analyze", modules, timings: takeTimings() } satisfies AnalysisWorkerResponse);
       return;
     }
 
@@ -61,7 +62,7 @@ parentPort.on("message", async (request: AnalysisWorkerRequest) => {
           parentPort!.postMessage({ type: "react-scan-progress", file: file.relativePath } satisfies AnalysisWorkerResponse);
         }
       }
-      parentPort!.postMessage({ type: "react-scan", results } satisfies AnalysisWorkerResponse);
+      parentPort!.postMessage({ type: "react-scan", results, timings: takeTimings() } satisfies AnalysisWorkerResponse);
       return;
     }
 

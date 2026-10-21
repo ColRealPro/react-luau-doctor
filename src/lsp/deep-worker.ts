@@ -81,7 +81,7 @@ export async function analyzeDeepRequest(
       });
   }
 
-  const session = prepareProjectCache(root, candidates, true, undefined, "lsp");
+  const session = await prepareProjectCache(root, candidates, true, undefined, "lsp");
 
   const fileHashes = Object.fromEntries(
     Object.entries(session.files).map(([name, state]) => [name, state.hash]),

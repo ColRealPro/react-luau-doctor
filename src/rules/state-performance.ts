@@ -239,6 +239,39 @@ function directlyReadsValue(
   return false;
 }
 
+// A Binding:map built during render captures the value, so the state is what rebuilds the mapping
+function readsInRenderBindingMap(
+  context: RuleContext,
+  owner: FunctionInfo,
+  binding: StateBinding,
+): boolean {
+  if (!owner.body) return false;
+
+  for (const node of context.walk(owner.body)) {
+    if (!isIdentifierRead(node, binding.valueName)) continue;
+
+    if (isBindingShadowedBetween(node, owner, binding.valueName, binding.declaration))
+      continue;
+
+    let mapper: SyntaxNode | null = node.parent;
+
+    while (mapper && mapper.type !== "function_definition") mapper = mapper.parent;
+
+    const call = mapper?.parent?.type === "arguments" ? mapper.parent.parent : null;
+    const name = call?.type === "function_call" ? call.childForFieldName("name") : null;
+
+    if (
+      call &&
+      name?.type === "method_index_expression" &&
+      name.namedChildren.at(-1)?.text === "map" &&
+      context.nearestFunction(call) === owner
+    )
+      return true;
+  }
+
+  return false;
+}
+
 function isPlainTableState(
   binding: StateBinding,
   context: RuleContext,
@@ -502,6 +535,31 @@ export const rerenderStateOnlyInHandlers: RuleDefinition = {
         if (!callsSetter(context, owner, binding.setterName)) continue;
 
         if (directlyReadsValue(context, owner, binding)) continue;
+
+        if (readsInRenderBindingMap(context, owner, binding)) {
+          diagnostics.push({
+            node:
+              identifierNode(binding.declaration, binding.valueName) ??
+              binding.declaration,
+
+            message: `${binding.valueName} is React state that is only read inside a Binding:map callback`,
+            summary: `${binding.valueName} only feeds a Binding:map. Make it a binding instead`,
+            help: "Make this value a binding with React.useBinding and combine it with React.joinBindings so updates skip rerendering. A ref would leave the mapped value stale",
+            fixPreview: {
+              kind: "pattern" as const,
+              before: `local ${binding.valueName}, ${binding.setterName} = React.useState(initial)
+local position = progress:map(function(value)
+\treturn UDim2.fromOffset(${binding.valueName}, value)
+end)`,
+              after: `local ${binding.valueName}, ${binding.setterName} = React.useBinding(initial)
+local position = React.joinBindings({ progress, ${binding.valueName} }):map(function(values)
+\treturn UDim2.fromOffset(values[2], values[1])
+end)`,
+              note: `${binding.setterName} keeps working the same way, but updates the binding without rerendering`,
+            },
+          });
+          continue;
+        }
 
         diagnostics.push({
           node:

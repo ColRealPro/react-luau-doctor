@@ -82,7 +82,7 @@ export async function diagnosticCodeActions(
         return node.namedChildren.some(crossesLine);
       };
 
-      if (crossesLine(tree.rootNode)) continue;
+      if (crossesLine(tree.rootNode) || tree.comments.some(crossesLine)) continue;
 
       const previous = lines[line - 1];
       const directive = previous?.match(

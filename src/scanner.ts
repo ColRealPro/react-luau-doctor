@@ -6,6 +6,7 @@ import {
   cachedEffectModules,
   cachedProjectModel,
   cachedReport,
+  type DiskFile,
   changedProjectFiles,
   knownReactFile,
   previousCachedReport,
@@ -29,6 +30,7 @@ import {
 } from "./file-analysis";
 
 import { AnalysisWorkerPool, analysisWorkerCount } from "./parallel";
+import { addStageTiming, phaseTimer, timeStage } from "./timings";
 
 import {
   buildProjectModel,
@@ -55,10 +57,13 @@ const REACT_SOURCE_MARKER = /\b(?:React(?:Roblox)?|Roact(?:Compat)?)\b/i;
 export interface ScanAnalysisSession {
   projectModelModules: Map<string, ProjectModelModuleCacheEntry>;
   effectModules?: Record<string, CachedSourceEffectModule>;
+  effectModuleIds?: string[];
+  projectFiles?: Map<string, string[]>;
+  diskFiles?: Map<string, DiskFile | null>;
 }
 
 export function createScanAnalysisSession(): ScanAnalysisSession {
-  return { projectModelModules: new Map() };
+  return { projectModelModules: new Map(), projectFiles: new Map(), diskFiles: new Map() };
 }
 
 type ScanRuntimeOptions = ScanOptions & {
@@ -145,8 +150,16 @@ function projectInputs(
   root: string,
   config: DoctorConfig,
   scopedCandidates: ScanFileInput[],
+  discovered?: Map<string, string[]>,
 ): ScanFileInput[] {
-  const all = discoverLuauFiles(root, config).map(
+  let files = discovered?.get(root);
+
+  if (!files) {
+    files = discoverLuauFiles(root, config);
+    discovered?.set(root, files);
+  }
+
+  const all = files.map(
     (absolutePath) => ({ absolutePath }) satisfies ScanFileInput,
   );
 
@@ -201,12 +214,12 @@ export async function scanPath(
 
   validateKnownRules(config);
 
-  const candidates = candidateInputs(targetPath, root, config, options);
+  const candidates = timeStage("Find files", () => candidateInputs(targetPath, root, config, options));
   const targetIsProjectRoot = path.resolve(targetPath) === path.resolve(root);
 
   const modelCandidates =
     options.files || !targetIsProjectRoot
-      ? projectInputs(root, config, candidates)
+      ? timeStage("Find files", () => projectInputs(root, config, candidates, options.analysisSession?.projectFiles))
       : candidates;
 
   const hasSourceOverlays = modelCandidates.some(
@@ -240,12 +253,16 @@ export async function scanPath(
     });
   };
 
-  const cacheSession = prepareProjectCache(
-    root,
-    modelCandidates,
-    options.cache ?? true,
-    (current, total, file) =>
-      progress("index", "Indexing project", current, total, file),
+  const cacheSession = await timeStage("Index project", () =>
+    prepareProjectCache(
+      root,
+      modelCandidates,
+      options.cache ?? true,
+      (current, total, file) =>
+        progress("index", "Indexing project", current, total, file),
+      undefined,
+      options.analysisSession?.diskFiles,
+    ),
   );
 
   const deadlineAt =
@@ -281,6 +298,10 @@ export async function scanPath(
   const previousEffectModules =
     options.analysisSession?.effectModules ?? cachedEffectModules(cacheSession);
 
+  let effectModuleIds = options.analysisSession?.effectModules
+    ? options.analysisSession.effectModuleIds
+    : undefined;
+
   const changedFiles = changedProjectFiles(cacheSession);
 
   if (canCacheWholeReport) {
@@ -314,9 +335,8 @@ export async function scanPath(
     ]),
   );
 
-  const materializedCandidates = materializeProjectCandidates(
-    cacheSession,
-    modelCandidates,
+  const materializedCandidates = timeStage("Read sources", () =>
+    materializeProjectCandidates(cacheSession, modelCandidates),
   );
 
   const parallelEnabled =
@@ -332,7 +352,98 @@ export async function scanPath(
     workerCount > 1 ? new AnalysisWorkerPool(workerCount) : null;
 
   try {
-    let project = cachedProjectModel(cacheSession);
+    const cachedProject = cachedProjectModel(cacheSession);
+    let effectsComplete = true;
+
+    const effectPhases = phaseTimer("Build project effects");
+
+    const reportEffectPhase: typeof progress = (phase, label, ...rest) => {
+      effectPhases.mark(label);
+      progress(phase, label, ...rest);
+    };
+
+    // Effects don't need the project model, so workers parse while the main
+    // thread builds it
+    const effectBuild = cachedProject?.sourceEffects.size
+      ? null
+      : timeStage("Build project effects", () =>
+          buildProjectSourceEffects(
+            root,
+            materializedCandidates,
+            projectParseCache,
+            (effectProgress) => {
+              if (effectProgress.phase === "parse") {
+                reportEffectPhase(
+                  "effects-parse",
+                  "Parsing effect sources",
+                  effectProgress.current,
+                  effectProgress.total,
+                  effectProgress.file,
+                );
+              } else if (effectProgress.phase === "index-functions") {
+                reportEffectPhase(
+                  "effects-index-functions",
+                  "Indexing effect functions",
+                  effectProgress.current,
+                  effectProgress.total,
+                );
+              } else if (effectProgress.phase === "analyze-calls") {
+                reportEffectPhase(
+                  "effects-analyze-calls",
+                  "Resolving effect calls",
+                  effectProgress.current,
+                  effectProgress.total,
+                );
+              } else if (effectProgress.phase === "assemble-graph") {
+                reportEffectPhase(
+                  "effects-assemble-graph",
+                  "Building effect graph",
+                  effectProgress.current,
+                  effectProgress.total,
+                );
+              } else if (effectProgress.phase === "resolve") {
+                reportEffectPhase(
+                  "effects-resolve",
+                  "Linking effect dependencies",
+                  effectProgress.current,
+                  effectProgress.total,
+                );
+              } else if (effectProgress.phase === "propagate") {
+                reportEffectPhase(
+                  "effects-propagate",
+                  "Propagating project effects",
+                  effectProgress.current,
+                  effectProgress.total,
+                );
+              } else {
+                reportEffectPhase(
+                  "effects-summarize",
+                  "Finalizing project effects",
+                  effectProgress.current,
+                  effectProgress.total,
+                );
+              }
+            },
+            fileHashes,
+            previousEffectModules,
+            workerPool ?? undefined,
+            modelCandidates === candidates
+              ? undefined
+              : new Set(
+                  candidates.map((candidate) =>
+                    normalizeRelative(
+                      candidate.relativePath ??
+                        path.relative(root, candidate.absolutePath),
+                    ),
+                  ),
+                ),
+            effectModuleIds && new Set(effectModuleIds),
+          ),
+        );
+
+    void effectBuild?.catch(() => undefined);
+
+    let project = cachedProject;
 
     if (project && !options.analysisSession) {
       progress("project-cache", "Loading cached project analysis", 1, 1);
@@ -343,10 +454,12 @@ export async function scanPath(
       // re-analyze files whose Git contents differ.
       progress("model", "Building project model", 0, 1);
 
-      const rebuilt = buildProjectModel(root, materializedCandidates, {
-        fileHashes,
-        moduleCache: options.analysisSession?.projectModelModules,
-      });
+      const rebuilt = timeStage("Build project model", () =>
+        buildProjectModel(root, materializedCandidates, {
+          fileHashes,
+          moduleCache: options.analysisSession?.projectModelModules,
+        }),
+      );
 
       if (project?.sourceEffects) rebuilt.sourceEffects = project.sourceEffects;
 
@@ -354,78 +467,24 @@ export async function scanPath(
       progress("model", "Building project model", 1, 1);
     }
 
-    if (project.sourceEffects.size === 0) {
-      const effectBuild = await buildProjectSourceEffects(
-        root,
-        materializedCandidates,
-        projectParseCache,
-        (effectProgress) => {
-          if (effectProgress.phase === "parse") {
-            progress(
-              "effects-parse",
-              "Parsing effect sources",
-              effectProgress.current,
-              effectProgress.total,
-              effectProgress.file,
-            );
-          } else if (effectProgress.phase === "index-functions") {
-            progress(
-              "effects-index-functions",
-              "Indexing effect functions",
-              effectProgress.current,
-              effectProgress.total,
-            );
-          } else if (effectProgress.phase === "analyze-calls") {
-            progress(
-              "effects-analyze-calls",
-              "Resolving effect calls",
-              effectProgress.current,
-              effectProgress.total,
-            );
-          } else if (effectProgress.phase === "assemble-graph") {
-            progress(
-              "effects-assemble-graph",
-              "Building effect graph",
-              effectProgress.current,
-              effectProgress.total,
-            );
-          } else if (effectProgress.phase === "resolve") {
-            progress(
-              "effects-resolve",
-              "Linking effect dependencies",
-              effectProgress.current,
-              effectProgress.total,
-            );
-          } else if (effectProgress.phase === "propagate") {
-            progress(
-              "effects-propagate",
-              "Propagating project effects",
-              effectProgress.current,
-              effectProgress.total,
-            );
-          } else {
-            progress(
-              "effects-summarize",
-              "Finalizing project effects",
-              effectProgress.current,
-              effectProgress.total,
-            );
-          }
-        },
-        fileHashes,
-        previousEffectModules,
-        workerPool ?? undefined,
-      );
+    if (effectBuild) {
+      const { effects, cacheModules, complete, moduleIds } = await effectBuild;
+      effectPhases.end();
 
-      project.sourceEffects = effectBuild.effects;
-      cacheSession.effectModules = effectBuild.cacheModules;
+      project.sourceEffects = effects;
+      cacheSession.effectModules = cacheModules;
+      effectsComplete = complete;
+      effectModuleIds = moduleIds;
     } else if (!cacheSession.effectModules) {
       cacheSession.effectModules = previousEffectModules;
     }
 
-    if (options.analysisSession)
+    if (options.analysisSession) {
       options.analysisSession.effectModules =
         cacheSession.effectModules ?? previousEffectModules;
+
+      options.analysisSession.effectModuleIds = effectModuleIds;
+    }
 
     const diagnostics: Diagnostic[] = [];
     const skippedFiles: string[] = [];
@@ -480,6 +539,7 @@ export async function scanPath(
       ? "Scanning affected React files"
       : "Scanning React files";
 
+    const scanStartedAt = performance.now();
     progress("scan", scanLabel, 0, scanCandidates.length);
 
     const applyResult = (result: ReactFileAnalysisResult): void => {
@@ -501,8 +561,10 @@ export async function scanPath(
         candidate.relativePath ?? path.relative(root, candidate.absolutePath),
       );
 
+      // Indexing already found every project file that exists
       if (
         candidate.source === undefined &&
+        !cacheSession.files[relativePath] &&
         !fs.existsSync(candidate.absolutePath)
       )
         return null;
@@ -645,6 +707,8 @@ export async function scanPath(
       }
     }
 
+    addStageTiming("Analyze React files", performance.now() - scanStartedAt);
+
     if (incrementalReuse) {
       scannedFiles = Object.values(cacheSession.files).filter(
         (state) => state.isReactFile === true,
@@ -673,19 +737,22 @@ export async function scanPath(
     };
 
     if (canPersistCache)
-      saveProjectCache(
-        cacheSession,
-        project,
-        cacheSession.effectModules ?? cachedEffectModules(cacheSession),
-        canCacheWholeReport && !report.partial ? reportCacheKey : undefined,
-        canCacheWholeReport && !report.partial
-          ? {
-              scannedFiles: report.scannedFiles,
-              candidateFiles: report.candidateFiles ?? candidates.length,
-              diagnostics: report.diagnostics,
-              unverifiedFiles: report.unverifiedFiles,
-            }
-          : undefined,
+      timeStage("Save cache", () =>
+        saveProjectCache(
+          cacheSession,
+          // A later full scan must rebuild effects rather than trust a partial set
+          effectsComplete ? project : { ...project, sourceEffects: new Map() },
+          cacheSession.effectModules ?? cachedEffectModules(cacheSession),
+          canCacheWholeReport && !report.partial ? reportCacheKey : undefined,
+          canCacheWholeReport && !report.partial
+            ? {
+                scannedFiles: report.scannedFiles,
+                candidateFiles: report.candidateFiles ?? candidates.length,
+                diagnostics: report.diagnostics,
+                unverifiedFiles: report.unverifiedFiles,
+              }
+            : undefined,
+        ),
       );
 
     return report;

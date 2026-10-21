@@ -19,7 +19,12 @@ function normalize(value: string): string {
   return value.split(path.sep).join("/");
 }
 
+const wildcardRegexes = new Map<string, RegExp>();
+
 function wildcardToRegex(pattern: string): RegExp {
+  const cached = wildcardRegexes.get(pattern);
+  if (cached) return cached;
+
   const normalized = normalize(pattern);
   let source = "";
 
@@ -50,7 +55,9 @@ function wildcardToRegex(pattern: string): RegExp {
     source += /[.+^${}()|[\]\\]/.test(char) ? `\\${char}` : char;
   }
 
-  return new RegExp(`^${source}$`);
+  const regex = new RegExp(`^${source}$`);
+  wildcardRegexes.set(pattern, regex);
+  return regex;
 }
 
 function matchesAny(relative: string, patterns: string[] | undefined): boolean {

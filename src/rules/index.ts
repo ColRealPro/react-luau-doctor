@@ -23,6 +23,10 @@ import { noMemoWithoutDeps } from "./no-memo-without-deps";
 import { noNestedComponentDefinition } from "./no-nested-component-definition";
 import { noPropMutation } from "./no-prop-mutation";
 import { noStaticNameProp } from "./no-static-name-prop";
+import { noFunctionHostProp } from "./no-function-host-prop";
+import { noInstanceAsEventValue } from "./no-instance-as-event-value";
+import { noRefOnFunctionComponent } from "./no-ref-on-function-component";
+import { noBindingInDeps } from "./no-binding-in-deps";
 import { noRandomKey } from "./no-random-key";
 import { noSetStateInRender } from "./no-set-state-in-render";
 import { noSetterAsEventHandler } from "./no-setter-as-event-handler";
@@ -70,6 +74,7 @@ const definitions: RuleDefinition[] = [
   rulesOfHooks,
   exhaustiveDeps,
   noMemoWithoutDeps,
+  noBindingInDeps,
   effectNeedsCleanup,
   noDerivedStateEffect,
   noSelfUpdatingEffect,
@@ -92,6 +97,8 @@ const definitions: RuleDefinition[] = [
   noSetStateInRender,
   noMutatingStateUpdater,
   noSetterAsEventHandler,
+  noInstanceAsEventValue,
+  noRefOnFunctionComponent,
   noCallComponentAsFunction,
   noCreateBindingInRender,
   noBindingGetValueInRender,
@@ -105,6 +112,7 @@ const definitions: RuleDefinition[] = [
   noTaskSpawnInRender,
   noSideEffectsInRender,
   noCreateRootInRender,
+  noFunctionHostProp,
   noPropMutation,
   noStaticNameProp,
   noArrayIndexAsKey,

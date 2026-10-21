@@ -303,6 +303,68 @@ function parseChangedLineRanges(diff: string): LineRange[] {
   return ranges;
 }
 
+// Windows limits a command line to about 32K characters
+const MAX_PATHSPEC_LENGTH = 16_000;
+
+// One diff for many files avoids starting a Git process per file. Renames are
+// off so each path diffs on its own, as it does when diffed alone. Files left
+// out of the result fall back to a diff of their own
+function batchedLineRanges(repoRoot: string, base: string, repoRelativePaths: string[], staged: boolean): Map<string, LineRange[]> {
+  const ranges = new Map<string, LineRange[]>();
+  const requested = new Set(repoRelativePaths);
+  const batches: string[][] = [];
+  let length = 0;
+
+  for (const repoRelativePath of repoRelativePaths) {
+    if (batches.length === 0 || length + repoRelativePath.length > MAX_PATHSPEC_LENGTH) {
+      batches.push([]);
+      length = 0;
+    }
+
+    batches.at(-1)!.push(repoRelativePath);
+    length += repoRelativePath.length + 1;
+  }
+
+  for (const batch of batches) {
+    const args = staged
+      ? ["diff", "--cached", "--no-renames", "--unified=0", "--no-color", "--", ...batch]
+      : ["diff", "--no-renames", "--unified=0", "--no-color", base, "--", ...batch];
+
+    const result = runGit(repoRoot, args, true);
+    if (result.status !== 0) continue;
+
+    const sections = new Map<string, string[]>();
+    let current: string[] | null = null;
+    let inHeader = false;
+
+    for (const line of result.stdout.split("\n")) {
+      if (line.startsWith("diff --git ")) {
+        current = null;
+        inHeader = true;
+        continue;
+      }
+
+      if (inHeader && line.startsWith("+++ ")) {
+        const target = line.slice(4).replace(/\r$/, "");
+        const file = target.startsWith("b/") ? target.slice(2) : null;
+        current = file !== null && requested.has(file) && !sections.has(file) ? [] : null;
+        if (current && file !== null) sections.set(file, current);
+        continue;
+      }
+
+      if (line.startsWith("@@")) inHeader = false;
+      current?.push(line);
+    }
+
+    for (const [file, lines] of sections) {
+      const fileRanges = parseChangedLineRanges(lines.join("\n"));
+      if (fileRanges.length > 0) ranges.set(file, fileRanges);
+    }
+  }
+
+  return ranges;
+}
+
 function lineRangesForFile(repoRoot: string, base: string, repoRelativePath: string, staged: boolean, source: string): LineRange[] {
   const args = staged
     ? ["diff", "--cached", "--unified=0", "--no-color", "--", repoRelativePath]
@@ -342,6 +404,15 @@ export function createGitScopePlan(scanRootInput: string, options: GitScopeOptio
       )
     : new Map<string, string | null>();
 
+  const lineRanges = options.scope === "lines"
+    ? batchedLineRanges(
+        repoRoot,
+        base,
+        repoFiles.map((file) => file.currentPath).filter(isLuauFile),
+        Boolean(options.staged),
+      )
+    : new Map<string, LineRange[]>();
+
   for (const repoFile of repoFiles) {
     const repoRelativePath = repoFile.currentPath;
     if (!isLuauFile(repoRelativePath)) continue;
@@ -372,7 +443,11 @@ export function createGitScopePlan(scanRootInput: string, options: GitScopeOptio
     if (baseline !== null) baselineFiles.push({ absolutePath, relativePath, source: baseline, forceScan: false });
 
     if (options.scope === "lines" && source !== null) {
-      changedLines.set(relativePath, lineRangesForFile(repoRoot, base, repoRelativePath, Boolean(options.staged), source));
+      changedLines.set(
+        relativePath,
+        lineRanges.get(repoRelativePath) ??
+          lineRangesForFile(repoRoot, base, repoRelativePath, Boolean(options.staged), source),
+      );
     }
   }
 

@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.21.2",
+  "version": "0.22.0",
   "description": "Static analysis for React-Luau hooks, effects, rendering, and performance.",
   "license": "MIT",
   "type": "module",
@@ -20,6 +20,7 @@
   ],
   "scripts": {
     "build": "bun run scripts/build.ts",
+    "build:parser": "bun run scripts/build-luau-parser.ts",
     "build:lsp": "cd editors/vscode && bunx --bun vsce package",
     "install:lsp": "bun run build:lsp && bun run scripts/install-lsp.ts",
     "benchmark:lsp": "bun run scripts/benchmark-lsp.ts",
@@ -36,9 +37,6 @@
     "bun": ">=1.4.0"
   },
   "packageManager": "bun@1.4.0",
-  "dependencies": {
-    "web-tree-sitter": "0.26.11"
-  },
   "devDependencies": {
     "@actions/workflow-parser": "0.3.61",
     "@types/bun": "1.4.0",

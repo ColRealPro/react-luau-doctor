@@ -282,8 +282,8 @@ export const noDerivedStateEffect: RuleDefinition = {
 
           fixPreview: {
             kind: "pattern" as const,
-            before: setterCall.text,
-            after: `local ${targetState} = ${argument.text}`,
+            before: setterCall.sourceText,
+            after: `local ${targetState} = ${argument.sourceText}`,
             note: "Remove the state pair and the setter call if the effect has no other work. Keep state when the delay is intentional.",
           },
         });
@@ -449,7 +449,7 @@ export const noMutableInDeps: RuleDefinition = {
 
         diagnostics.push({
           node: dependency,
-          message: `${dependency.text.trim()} is mutable ref state and will not itself trigger a React render when it changes.`,
+          message: `${dependency.sourceText.trim()} is mutable ref state and will not itself trigger a React render when it changes.`,
           help: "Read ref.current inside the hook body. Depend on reactive inputs that actually cause renders instead of listing the mutable current value.",
         });
       }

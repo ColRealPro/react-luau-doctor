@@ -49,7 +49,7 @@ function replaceWithinNode(
 
   if (start < 0 || end < start || end > container.text.length) return null;
 
-  return `${container.text.slice(0, start)}${replacement}${container.text.slice(end)}`;
+  return `${container.sourceText.slice(0, start)}${replacement}${container.sourceText.slice(end)}`;
 }
 
 function bindingModeFixPreview(
@@ -73,11 +73,11 @@ function bindingModeFixPreview(
   if (parameterIndex < args.length) {
     const after = replaceWithinNode(call, args[parameterIndex], desired);
 
-    if (!after || after === call.text) return undefined;
+    if (!after || after === call.sourceText) return undefined;
 
     return {
       kind: directlySubstitutable ? "exact" : "pattern",
-      before: call.text,
+      before: call.sourceText,
       after,
 
       note:
@@ -104,8 +104,8 @@ function bindingModeFixPreview(
 
     return {
       kind: directlySubstitutable ? "exact" : "pattern",
-      before: call.text,
-      after: `${call.text.slice(0, close)}${insertion}${call.text.slice(close)}`,
+      before: call.sourceText,
+      after: `${call.sourceText.slice(0, close)}${insertion}${call.sourceText.slice(close)}`,
 
       note:
         (summary.bindingModeParameterName
@@ -136,7 +136,7 @@ function callMemberFixPreview(
 
   if (!after || member === replacement) return undefined;
 
-  return { kind: "exact", before: call.text, after };
+  return { kind: "exact", before: call.sourceText, after };
 }
 
 function useBindingFixPreview(call: SyntaxNode): FixPreview | undefined {
@@ -151,7 +151,7 @@ function useBindingFixPreview(call: SyntaxNode): FixPreview | undefined {
 
   const after = replaceWithinNode(call, name, afterName);
 
-  return after ? { kind: "exact", before: call.text, after } : undefined;
+  return after ? { kind: "exact", before: call.sourceText, after } : undefined;
 }
 
 interface ImportedBindingSummaries {
@@ -705,7 +705,7 @@ function importedHookFixPreview(
 
     if (edits.has(expression.startIndex)) continue;
 
-    let mapped = expression.text;
+    let mapped = expression.sourceText;
 
     const reads = [...context.walk(expression)].filter((node) =>
       isReadNode(node, valueName, owner, declaration),
@@ -730,7 +730,7 @@ function importedHookFixPreview(
 
   if (edits.size === 1) return preview;
 
-  let after = owner.node.text;
+  let after = owner.node.sourceText;
 
   for (const edit of [...edits.values()].sort(
     (a, b) => b.node.startIndex - a.node.startIndex,
@@ -738,14 +738,14 @@ function importedHookFixPreview(
     const start = edit.node.startIndex - owner.node.startIndex;
     const end = edit.node.endIndex - owner.node.startIndex;
 
-    if (start < 0 || after.slice(start, end) !== edit.node.text) return preview;
+    if (start < 0 || after.slice(start, end) !== edit.node.sourceText) return preview;
 
     after = `${after.slice(0, start)}${edit.after}${after.slice(end)}`;
   }
 
   return {
     kind: "exact",
-    before: owner.node.text,
+    before: owner.node.sourceText,
     after,
     note: "Enable the hook's Binding mode and map the derived visual properties from the returned Binding.",
   };

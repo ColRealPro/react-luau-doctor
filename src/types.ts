@@ -175,6 +175,10 @@ export interface SourceEffectModuleSummary {
   instanceFactories: Set<string>;
 }
 
+export interface ComponentExportSummary {
+  forwardsRef: boolean;
+}
+
 export interface ProjectModel {
   memoizedModules: Map<string, "shallow" | "custom">;
   bindingCandidateHooks: Map<string, BindingCandidateHookSummary>;
@@ -187,6 +191,8 @@ export interface ProjectModel {
   conditionalHookModes: Map<string, ConditionalHookModeSummary>;
   /** Project modules exporting use* functions, classified by whether they currently execute React hook topology. */
   reactHookModules: Map<string, boolean>;
+  /** Modules that export a function component, and whether it forwards refs */
+  componentExports: Map<string, ComponentExportSummary>;
   sourceEffects: Map<string, SourceEffectModuleSummary>;
 }
 

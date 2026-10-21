@@ -20,6 +20,7 @@ Add `react-luau/` before the names below when using them in your [config](cli.md
 | `no-effect-with-fresh-deps`       | error      | A dependency can be a new reference value during render    |
 | `no-mutable-in-deps`              | error      | A dependency reads a mutable `ref.current` value           |
 | `no-memo-without-deps`            | warning    | `useMemo` or `useCallback` has no dependency table         |
+| `no-binding-in-deps`              | warning    | A hook lists a binding it reads, so it never runs again    |
 | `prefer-use-ref-for-mutable-cell` | suggestion | `useMemo` creates a table used like a ref                  |
 
 ## Effects
@@ -38,6 +39,7 @@ Add `react-luau/` before the names below when using them in your [config](cli.md
 | `no-set-state-in-render`        | warning    | A component calls its state setter during render without a condition                     |
 | `no-mutating-state-updater`     | error      | A state updater changes the previous state table in place                                |
 | `no-setter-as-event-handler`    | error      | A setter is passed directly as a `React.Change` or `React.Event` handler                 |
+| `no-ref-on-function-component`  | error      | A ref is passed to a function component that does not use `React.forwardRef`             |
 | `no-call-component-as-function` | warning    | Code calls a component directly instead of creating an element                           |
 | `no-create-binding-in-render`   | warning    | `createBinding` creates a new binding on each render                                     |
 | `no-binding-getvalue-in-render` | warning    | Render reads a binding snapshot instead of subscribing, except for hook initialization   |
@@ -80,6 +82,8 @@ Add `react-luau/` before the names below when using them in your [config](cli.md
 
 ## Roblox
 
-| Rule                       | Default | What it catches                                      |
-| -------------------------- | ------- | ---------------------------------------------------- |
-| `no-create-root-in-render` | error   | A component creates a ReactRoblox root during render |
+| Rule                         | Default | What it catches                                      |
+| ---------------------------- | ------- | ---------------------------------------------------- |
+| `no-create-root-in-render`   | error   | A component creates a ReactRoblox root during render |
+| `no-function-host-prop`      | error   | A host element sets a plain prop to a function       |
+| `no-instance-as-event-value` | error   | A handler uses the Instance as the event value       |

@@ -4,5 +4,4 @@ package-lock.json
 tsconfig.json
 *.vsix
 node_modules/**/*.map
-node_modules/web-tree-sitter/debug/**
 node_modules/**/test/**

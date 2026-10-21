@@ -71,6 +71,10 @@ export interface CachedSourceEffectModule {
 export interface ProjectSourceEffectsBuildResult {
   effects: Map<string, SourceEffectModuleSummary>;
   cacheModules: Record<string, CachedSourceEffectModule>;
+  // False when targets left some modules unanalyzed
+  complete: boolean;
+  // Every module the build saw, analyzed or not
+  moduleIds: string[];
 }
 
 export interface EffectWorkerIndexInput extends ModuleIdentity {
@@ -312,7 +316,7 @@ function createsFreshEngineValue(node: SyntaxNode): boolean {
 const createsFreshInstance = (node: SyntaxNode) => /^Instance\.new$|:Clone$/.test(callPath(node) ?? "");
 
 function effectSite(node: SyntaxNode): EffectSite {
-  return { line: node.startPosition.row + 1, code: node.text.split(/\r?\n/)[0].trim().slice(0, 120) };
+  return { line: node.startPosition.row + 1, code: node.sourceText.split(/\r?\n/)[0].trim().slice(0, 120) };
 }
 
 function markDirectEffect(fn: { directEffect: boolean; effectSite?: EffectSite | null }, site: EffectSite | undefined): boolean {
@@ -1295,6 +1299,9 @@ export async function buildProjectSourceEffects(
   fileHashes: Readonly<Record<string, string>> = {},
   cachedModules: Readonly<Record<string, CachedSourceEffectModule>> = {},
   workerPool?: AnalysisWorkerPool,
+  targets?: ReadonlySet<string>,
+  // The module set `cachedModules` came from, when they cover only part of it
+  cachedModuleIds?: ReadonlySet<string>,
 ): Promise<ProjectSourceEffectsBuildResult> {
   interface CandidateIdentity extends ModuleIdentity {
     relativePath: string;
@@ -1318,7 +1325,7 @@ export async function buildProjectSourceEffects(
   const moduleIdFeatures = new Map(identities.map((record) => [record.id, record.id] as const));
   const moduleAliases = buildUniqueFeatureAliases(identities, moduleIdFeatures);
   const currentIds = new Set(identities.map((identity) => identity.id));
-  const cachedIds = new Set(Object.values(cachedModules).map((module) => module.id));
+  const cachedIds = cachedModuleIds ?? new Set(Object.values(cachedModules).map((module) => module.id));
   const sameFileSet = currentIds.size === cachedIds.size && [...currentIds].every((id) => cachedIds.has(id));
 
   const dirtyIds = new Set<string>();
@@ -1340,6 +1347,34 @@ export async function buildProjectSourceEffects(
     }
   }
 
+  // Effects only flow from callees to callers, so a target's results depend
+  // only on the modules it imports, directly or not
+  const identityById = new Map(identities.map((identity) => [identity.id, identity] as const));
+  const included = new Set<string>();
+
+  const include = (ids: Iterable<string>): CandidateIdentity[] => {
+    const added: CandidateIdentity[] = [];
+
+    for (const id of ids) {
+      const identity = identityById.get(id);
+      if (!identity || included.has(id)) continue;
+      included.add(id);
+      added.push(identity);
+    }
+
+    return added;
+  };
+
+  const cachedImports = (identity: CandidateIdentity): string[] =>
+    dirtyIds.has(identity.id) ? [] : cachedModules[identity.relativePath]?.importedModuleIds ?? [];
+
+  const initialFrontier = (): CandidateIdentity[] =>
+    include(
+      (targets ? identities.filter((identity) => targets.has(identity.relativePath)) : identities).map(
+        (identity) => identity.id,
+      ),
+    );
+
   const cachedFunctionStates = new Map<string, CachedSourceEffectFunction[]>();
   const analyzedFunctionStatesByModule = new Map<string, CachedSourceEffectFunction[]>();
   const importedModuleIdsByModule = new Map<string, string[]>();
@@ -1347,25 +1382,39 @@ export async function buildProjectSourceEffects(
   const exportedFunctions = new Map<string, string>();
 
   if (workerPool && dirtyIds.size >= 16) {
-    const workerInputs: EffectWorkerIndexInput[] = [];
-    for (const identity of identities) {
-      if (!dirtyIds.has(identity.id)) continue;
-      const { candidate } = identity;
-      if (candidate.source === undefined && !fs.existsSync(candidate.absolutePath)) continue;
-      workerInputs.push({
-        id: identity.id,
-        keys: identity.keys,
-        relativePath: identity.relativePath,
-        source: candidate.source ?? fs.readFileSync(candidate.absolutePath, "utf8"),
+    const indexedModules: IndexedEffectWorkerModule[] = [];
+    let parsedCount = 0;
+
+    for (let frontier = initialFrontier(); frontier.length > 0;) {
+      const workerInputs: EffectWorkerIndexInput[] = [];
+      const imported: string[] = [];
+      for (const identity of frontier) {
+        if (!dirtyIds.has(identity.id)) {
+          imported.push(...cachedImports(identity));
+          continue;
+        }
+        const { candidate } = identity;
+        if (candidate.source === undefined && !fs.existsSync(candidate.absolutePath)) continue;
+        workerInputs.push({
+          id: identity.id,
+          keys: identity.keys,
+          relativePath: identity.relativePath,
+          source: candidate.source ?? fs.readFileSync(candidate.absolutePath, "utf8"),
+        });
+      }
+
+      parsedCount += frontier.length - workerInputs.length;
+      onProgress?.({ phase: "parse", current: Math.min(parsedCount, candidates.length), total: candidates.length });
+      const batch = await workerPool.indexEffectModules(workerInputs, moduleAliases, (count, file) => {
+        parsedCount += count;
+        onProgress?.({ phase: "parse", current: Math.min(parsedCount, candidates.length), total: candidates.length, file });
       });
+
+      indexedModules.push(...batch);
+      for (const module of batch) imported.push(...module.importedModuleIds);
+      frontier = include(imported);
     }
 
-    let parsedCount = identities.length - workerInputs.length;
-    onProgress?.({ phase: "parse", current: parsedCount, total: candidates.length });
-    const indexedModules = await workerPool.indexEffectModules(workerInputs, moduleAliases, (count, file) => {
-      parsedCount += count;
-      onProgress?.({ phase: "parse", current: Math.min(parsedCount, candidates.length), total: candidates.length, file });
-    });
     onProgress?.({ phase: "parse", current: candidates.length, total: candidates.length });
 
     const indexedById = new Map(indexedModules.map((module) => [module.id, module] as const));
@@ -1388,7 +1437,7 @@ export async function buildProjectSourceEffects(
         });
         if (indexed.exportedFunctionId) exportedFunctions.set(identity.id, indexed.exportedFunctionId);
       } else {
-        const cached = cachedModules[identity.relativePath];
+        const cached = included.has(identity.id) || !dirtyIds.has(identity.id) ? cachedModules[identity.relativePath] : undefined;
         const functions = cached?.functions ?? [];
         cachedFunctionStates.set(identity.id, functions);
         importedModuleIdsByModule.set(identity.id, cached?.importedModuleIds ?? []);
@@ -1422,30 +1471,42 @@ export async function buildProjectSourceEffects(
   } else {
     const rawRecords = new Map<string, ParsedRecord>();
     onProgress?.({ phase: "parse", current: 0, total: candidates.length });
-    for (let candidateIndex = 0; candidateIndex < identities.length; candidateIndex += 1) {
-      const identity = identities[candidateIndex];
-      const { candidate, relativePath } = identity;
-      try {
-        if (!dirtyIds.has(identity.id)) continue;
-        if (candidate.source === undefined && !fs.existsSync(candidate.absolutePath)) continue;
-        const source = candidate.source ?? fs.readFileSync(candidate.absolutePath, "utf8");
-        const tree = await parseLuau(source);
-        parseCache?.set(relativePath, { source, tree });
-        const imports = topLevelImports(tree.rootNode, moduleAliases);
-        rawRecords.set(identity.id, {
-          id: identity.id,
-          keys: identity.keys,
-          source,
-          tree,
-          exportName: topLevelReturnName(tree.rootNode),
-          imports,
-        });
-      } catch {
-        // Parse diagnostics are handled by the normal scanner. An unparseable module
-        // simply cannot contribute source-derived effect information.
-      } finally {
-        onProgress?.({ phase: "parse", current: candidateIndex + 1, total: candidates.length, file: relativePath });
+    let parsedCount = 0;
+
+    for (let frontier = initialFrontier(); frontier.length > 0;) {
+      const imported: string[] = [];
+
+      for (const identity of frontier) {
+        const { candidate, relativePath } = identity;
+        try {
+          if (!dirtyIds.has(identity.id)) {
+            imported.push(...cachedImports(identity));
+            continue;
+          }
+          if (candidate.source === undefined && !fs.existsSync(candidate.absolutePath)) continue;
+          const source = candidate.source ?? fs.readFileSync(candidate.absolutePath, "utf8");
+          const tree = await parseLuau(source);
+          parseCache?.set(relativePath, { source, tree });
+          const imports = topLevelImports(tree.rootNode, moduleAliases);
+          rawRecords.set(identity.id, {
+            id: identity.id,
+            keys: identity.keys,
+            source,
+            tree,
+            exportName: topLevelReturnName(tree.rootNode),
+            imports,
+          });
+          imported.push(...imports.values());
+        } catch {
+          // Parse diagnostics are handled by the normal scanner. An unparseable module
+          // simply cannot contribute source-derived effect information.
+        } finally {
+          parsedCount += 1;
+          onProgress?.({ phase: "parse", current: Math.min(parsedCount, candidates.length), total: candidates.length, file: relativePath });
+        }
       }
+
+      frontier = include(imported);
     }
 
     const functionIndexTotal = Math.max(1, identities.length * 2);
@@ -1472,7 +1533,7 @@ export async function buildProjectSourceEffects(
         }
         summariesByModuleId.set(identity.id, summary);
       } else {
-        const cached = cachedModules[identity.relativePath];
+        const cached = included.has(identity.id) || !dirtyIds.has(identity.id) ? cachedModules[identity.relativePath] : undefined;
         cachedFunctionStates.set(identity.id, cached?.functions ?? []);
         importedModuleIdsByModule.set(identity.id, cached?.importedModuleIds ?? []);
         summariesByModuleId.set(identity.id, {
@@ -1547,14 +1608,16 @@ export async function buildProjectSourceEffects(
       }));
     for (const fn of states) functionStates.set(fn.id, fn);
     const summary = summariesByModuleId.get(identity.id)!;
-    cacheModulesResult[identity.relativePath] = {
-      hash: identity.hash,
-      id: identity.id,
-      keys: identity.keys,
-      importedModuleIds: importedModuleIdsByModule.get(identity.id) ?? [],
-      functions: states,
-      instanceFactories: [...summary.instanceFactories].sort(),
-    };
+    if (included.has(identity.id) || !dirtyIds.has(identity.id)) {
+      cacheModulesResult[identity.relativePath] = {
+        hash: identity.hash,
+        id: identity.id,
+        keys: identity.keys,
+        importedModuleIds: importedModuleIdsByModule.get(identity.id) ?? [],
+        functions: states,
+        instanceFactories: [...summary.instanceFactories].sort(),
+      };
+    }
     assembledCount += 1;
     if ((assembledCount & 63) === 0 || assembledCount === identities.length) {
       onProgress?.({ phase: "assemble-graph", current: assembledCount, total: graphAssemblyTotal });
@@ -1685,6 +1748,8 @@ export async function buildProjectSourceEffects(
   return {
     effects,
     cacheModules: cacheModulesResult,
+    complete: [...dirtyIds].every((id) => included.has(id)),
+    moduleIds: [...currentIds],
   };
 }
 
