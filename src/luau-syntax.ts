@@ -24,6 +24,8 @@ export interface LuauParseOutput {
 export interface LuauSyntaxTree extends SyntaxTree {
   rootNode: LuauNode;
   errors: SyntaxError[];
+  // Kept out of the tree, which only holds code
+  comments: LuauNode[];
 }
 
 const BINARY_OPERATORS = ["+", "-", "*", "/", "//", "%", "^", "..", "~=", "==", "<", "<=", ">", ">=", "and", "or"];
@@ -60,6 +62,22 @@ class TreeState {
 
     return { row: low, column: index - starts[low] };
   }
+}
+
+function blankRanges(source: string, ranges: RawRange[]): string {
+  if (ranges.length === 0) return source;
+
+  const parts: string[] = [];
+  let start = 0;
+
+  for (const [rangeStart, rangeEnd] of ranges) {
+    parts.push(source.slice(start, rangeStart), source.slice(rangeStart, rangeEnd).replace(/[^\r\n]/g, " "));
+    start = rangeEnd;
+  }
+
+  parts.push(source.slice(start));
+
+  return parts.join("");
 }
 
 function lineStarts(source: string): number[] {
@@ -187,13 +205,16 @@ function byteToUtf16(source: string): ((offset: number) => number) | null {
 class Builder {
   private readonly state: TreeState;
   private readonly toUtf16: ((offset: number) => number) | null;
+  private readonly source: string;
   private readonly comments: RawRange[];
   private readonly errorNodes: LuauNode[] = [];
 
-  constructor(private readonly source: string, comments: RawRange[]) {
-    this.state = new TreeState(source);
+  constructor(source: string, comments: RawRange[]) {
     this.toUtf16 = byteToUtf16(source);
     this.comments = comments.map(([start, end]) => [this.index(start), this.index(end)]);
+    // Comments are blanked so node text and token lookups never see them
+    this.source = blankRanges(source, this.comments);
+    this.state = new TreeState(this.source);
   }
 
   index(offset: number): number {
@@ -217,23 +238,6 @@ class Builder {
     return node;
   }
 
-  // Tokens aren't always looked up in source order, so this can't keep a cursor
-  private commentAt(position: number): RawRange | null {
-    let low = 0;
-    let high = this.comments.length - 1;
-
-    while (low <= high) {
-      const middle = (low + high) >> 1;
-      const comment = this.comments[middle];
-
-      if (comment[1] <= position) low = middle + 1;
-      else if (comment[0] > position) high = middle - 1;
-      else return comment;
-    }
-
-    return null;
-  }
-
   private skipTrivia(position: number, limit = this.source.length): number {
     let current = position;
 
@@ -242,13 +246,6 @@ class Builder {
 
       if (code === 32 || code === 9 || code === 10 || code === 13 || code === 59) {
         current += 1;
-        continue;
-      }
-
-      const comment = this.source.startsWith("--", current) ? this.commentAt(current) : null;
-
-      if (comment) {
-        current = comment[1];
         continue;
       }
 
@@ -293,7 +290,6 @@ class Builder {
     for (const statement of this.statements(output.root?.body ?? [])) root.append(...statement);
 
     root.endIndex = this.source.length;
-    this.attachComments(root);
 
     const errors = output.errors.map((error) => {
       const [startIndex, endIndex] = this.range(error.range);
@@ -305,30 +301,7 @@ class Builder {
 
     markErrors(root, this.errorNodes, errors);
 
-    return { rootNode: root, errors };
-  }
-
-  private attachComments(root: LuauNode): void {
-    for (const [start, end] of this.comments) {
-      let container = root;
-
-      for (;;) {
-        const inner = container.children.find(
-          (child) => child.isNamed && child.startIndex <= start && end <= child.endIndex && child.children.length > 0,
-        );
-
-        if (!inner) break;
-
-        container = inner;
-      }
-
-      const comment = this.node("comment", start, end);
-      let position = container.children.findIndex((child) => child.startIndex >= end);
-
-      if (position < 0) position = container.children.length;
-
-      container.insert(position, comment);
-    }
+    return { rootNode: root, errors, comments: this.comments.map(([start, end]) => this.node("comment", start, end)) };
   }
 
   // Statements
