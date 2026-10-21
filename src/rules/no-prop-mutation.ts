@@ -2,6 +2,10 @@ import type { RuleDefinition } from "../types";
 import { assignmentLeft, assignmentTargetNode, callNameNode, isBindingShadowedBetween } from "./helpers";
 import { mightMutateParameters, mutatedParameterIndexesForCall, mutationOriginForExpression } from "./parameter-mutations";
 
+function isRefCurrent(target: string): boolean {
+  return /\.\s*current$/.test(target.trim());
+}
+
 export const noPropMutation: RuleDefinition = {
   id: "react-luau/no-prop-mutation",
   category: "Correctness",
@@ -21,6 +25,15 @@ export const noPropMutation: RuleDefinition = {
         const left = assignmentLeft(node.text);
         const escaped = propsName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         if (!new RegExp(`^${escaped}\\s*(?:\\.|\\[)`).test(left)) continue;
+
+        if (isRefCurrent(left)) {
+          diagnostics.push({
+            node: assignmentTargetNode(node),
+            message: `Component writes to a ref passed through ${propsName}`,
+            help: "Wrap the component in React.forwardRef so the parent can pass a normal ref, or pass the Instance to the parent through a callback prop",
+          });
+          continue;
+        }
 
         diagnostics.push({
           node: assignmentTargetNode(node),
@@ -54,7 +67,9 @@ export const noPropMutation: RuleDefinition = {
         node: callNameNode(node),
         highlights: [mutatedArgument],
         message: `${path} mutates an argument derived from ${propsName}.`,
-        help: "Treat props as immutable. Clone the table before passing it to a mutating helper, or move the mutation into the owner that controls the value.",
+        help: isRefCurrent(mutatedArgument.text)
+          ? "Give the parent a callback prop that registers the value and returns a function to unregister it, then call that function from the effect cleanup"
+          : "Treat props as immutable. Clone the table before passing it to a mutating helper, or move the mutation into the owner that controls the value.",
       });
     }
 

@@ -12,6 +12,7 @@
 - `--scope changed` and `--scope lines` scans, like the ones CI runs, are about 2-6x faster on large projects, since they now only analyze the code that changed files depend on
 - Full scans are about 25% faster on a single thread and 35% faster in parallel
 - Scans with a warm cache take about half as long
+- `no-prop-mutation` suggests `React.forwardRef` or a callback prop when a component writes to a ref passed through props
 
 ### Fixed
 

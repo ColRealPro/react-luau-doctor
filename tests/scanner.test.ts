@@ -5502,3 +5502,34 @@ return Component
     ["react-luau/no-side-effects-in-render:9"],
   );
 });
+
+test("ref props get forwarding advice instead of generic prop mutation advice", async (t) => {
+  const root = tempProject(t, "ref-prop-writes", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component(props)
+  return React.createElement("Frame", {
+    ref = function(instance)
+      props.frameRef.current = instance
+    end,
+  })
+end
+
+local function Registered(props)
+  React.useEffect(function()
+    table.insert(props.registry.current, props.value)
+  end, {})
+  return nil
+end
+
+return { Component = Component, Registered = Registered }
+`,
+  });
+
+  const report = await scanPath(root);
+  const diagnostics = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation");
+  assert.deepEqual(diagnostics.map((diagnostic) => diagnostic.location.line), [6, 13]);
+  assert.equal(diagnostics[0].message, "Component writes to a ref passed through props");
+  assert.match(diagnostics[0].help ?? "", /React\.forwardRef/);
+  assert.match(diagnostics[1].help ?? "", /unregister/);
+});
