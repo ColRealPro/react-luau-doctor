@@ -1082,7 +1082,7 @@ return Parent`,
   fs.writeFileSync(
     path.join(root, "List.luau"),
     `local React = require(script.Parent.React)
-type Items = { -- keyed by id
+type Items = --[[ by id ]] { -- keyed by id
   [string]: number
 }
 local function List(props: { items: Items })

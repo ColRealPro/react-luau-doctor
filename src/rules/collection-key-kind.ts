@@ -37,7 +37,7 @@ export function collectionKeyKindResolver(context: RuleContext): (expression: Sy
     // Generic aliases have no `=` directly after their name and stay unresolved
     const name = node.childForFieldName("name");
     const equals = node.children.find((child) => child.type === "=");
-    const type = equals ? node.namedChildren.find((child) => child.startIndex >= equals.endIndex) : null;
+    const type = equals ? node.childForFieldName("value") : null;
 
     if (!name || !type || !node.parent) return [];
 

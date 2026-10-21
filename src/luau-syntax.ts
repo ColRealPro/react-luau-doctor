@@ -759,7 +759,7 @@ class Builder {
     node.append(this.node("identifier", nameStart, nameEnd), "name");
     const type = this.type(raw.type);
     node.append(type ? this.token("=", nameEnd, type.startIndex) : null);
-    node.append(type);
+    node.append(type, "value");
 
     return node;
   }
