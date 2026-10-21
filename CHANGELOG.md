@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### New rules
+
+- `react-luau/no-function-host-prop` catches functions set as plain props on host elements, such as `Activated = function() end` instead of `[React.Event.Activated]`
+
 ### Added
 
 - `--timings` shows how long each analysis stage, parse step, and rule took

@@ -452,6 +452,20 @@ root:render(element)`,
     note: "Create and own roots outside component render. A component should not imperatively create another React root while rendering.",
   },
 
+  "react-luau/no-function-host-prop": {
+    before: `React.createElement("TextButton", {
+\tActivated = function(rbx)
+\t\tonActivated()
+\tend,
+})`,
+    after: `React.createElement("TextButton", {
+\t[React.Event.Activated] = function(rbx)
+\t\tonActivated()
+\tend,
+})`,
+    note: "Use React.Change instead when the handler should run when a property changes",
+  },
+
   "react-luau/no-static-name-prop": {
     before: `return React.createElement("Frame", {}, {
 \tChild = React.createElement("TextLabel", {

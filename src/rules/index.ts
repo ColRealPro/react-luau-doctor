@@ -23,6 +23,7 @@ import { noMemoWithoutDeps } from "./no-memo-without-deps";
 import { noNestedComponentDefinition } from "./no-nested-component-definition";
 import { noPropMutation } from "./no-prop-mutation";
 import { noStaticNameProp } from "./no-static-name-prop";
+import { noFunctionHostProp } from "./no-function-host-prop";
 import { noRandomKey } from "./no-random-key";
 import { noSetStateInRender } from "./no-set-state-in-render";
 import { noSetterAsEventHandler } from "./no-setter-as-event-handler";
@@ -105,6 +106,7 @@ const definitions: RuleDefinition[] = [
   noTaskSpawnInRender,
   noSideEffectsInRender,
   noCreateRootInRender,
+  noFunctionHostProp,
   noPropMutation,
   noStaticNameProp,
   noArrayIndexAsKey,

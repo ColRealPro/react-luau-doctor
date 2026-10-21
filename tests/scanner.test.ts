@@ -5590,3 +5590,36 @@ return Component
   assert.match(diagnostic.message, /only read inside a Binding:map callback/);
   assert.match(diagnostic.help ?? "", /React\.joinBindings/);
 });
+
+function ruleLines(report: Awaited<ReturnType<typeof scanPath>>, rule: string): string[] {
+  return report.diagnostics
+    .filter((diagnostic) => diagnostic.rule === `react-luau/${rule}`)
+    .map((diagnostic) => `${diagnostic.file}:${diagnostic.location.line}`)
+    .sort();
+}
+
+test("functions set as plain host props are reported but callback refs and handler keys are not", async (t) => {
+  const root = tempProject(t, "function-host-prop", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function onActivated() end
+
+local function Component(props)
+  return React.createElement("TextButton", {
+    Activated = function() end,
+    MouseEnter = onActivated,
+    ref = function(rbx) end,
+    [React.Event.Activated] = onActivated,
+    Text = props.text,
+  }, {
+    Child = React.createElement(props.component, { onActivated = onActivated }),
+  })
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(ruleLines(report, "no-function-host-prop"), ["Component.luau:7", "Component.luau:8"]);
+});
