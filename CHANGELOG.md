@@ -7,6 +7,7 @@
 - `react-luau/no-function-host-prop` catches functions set as plain props on host elements, such as `Activated = function() end` instead of `[React.Event.Activated]`
 - `react-luau/no-instance-as-event-value` catches `React.Change` and `React.Event` handlers that use their first argument, the Instance, as the changed value or event argument
 - `react-luau/no-ref-on-function-component` catches refs passed to function components that do not use `React.forwardRef`, which leaves the ref unset
+- `react-luau/no-binding-in-deps` catches hooks that list a binding they read, which never makes the hook run again
 
 ### Added
 

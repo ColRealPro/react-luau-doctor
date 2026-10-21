@@ -5712,3 +5712,30 @@ return Component
   const report = await scanPath(root);
   assert.deepEqual(ruleLines(report, "no-ref-on-function-component"), ["Component.luau:17", "Component.luau:19", "Component.luau:20"]);
 });
+
+test("bindings read inside a hook are reported when listed as dependencies", async (t) => {
+  const root = tempProject(t, "binding-in-deps", {
+    "Component.luau": `local React = require(script.Parent.React)
+
+local function Component(props)
+  local size, setSize = React.useBinding(0)
+  local count, setCount = React.useState(0)
+  React.useEffect(function()
+    print(size:getValue())
+  end, { size })
+  React.useEffect(function()
+    props.onBinding(size)
+  end, { size })
+  React.useMemo(function()
+    return count + 1
+  end, { count })
+  return nil
+end
+
+return Component
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(ruleLines(report, "no-binding-in-deps"), ["Component.luau:8"]);
+});

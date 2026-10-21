@@ -4,7 +4,7 @@ import type { SyntaxNode } from "../syntax";
 import type { RuleContext, RuleDefinition } from "../types";
 import { callNameNode } from "./helpers";
 
-function isBinding(
+export function isBinding(
   context: RuleContext,
   expression: SyntaxNode,
   seen = new Set<number>(),

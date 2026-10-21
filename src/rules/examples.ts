@@ -490,6 +490,16 @@ end)`,
     note: "Pass the Instance to the parent through a callback prop instead when it only needs it at certain moments",
   },
 
+  "react-luau/no-binding-in-deps": {
+    before: `React.useEffect(function()
+\tprint(size:getValue())
+end, { size })`,
+    after: `local sizeText = size:map(function(value)
+\treturn tostring(value)
+end)`,
+    note: "Keep the value in state instead if the hook must run again when it changes",
+  },
+
   "react-luau/no-static-name-prop": {
     before: `return React.createElement("Frame", {}, {
 \tChild = React.createElement("TextLabel", {
