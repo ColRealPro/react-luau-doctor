@@ -74,6 +74,7 @@ export interface ProjectModelModuleAnalysis {
   loadTimeExportFields?: Set<string>;
   conditionalHookMode?: ConditionalHookModeSummary;
   componentExport?: ComponentExportSummary;
+  snapshotHook?: string;
   declaredMethods: Map<string, Set<string>>;
 }
 
@@ -984,6 +985,75 @@ function findDerivedBindingCandidateHook(
   return null;
 }
 
+// Method calls are left out so Instance:Clone() is not mistaken for a table copy
+const SNAPSHOT_COPY_CALL =
+  /^(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)*(?:clone|copy|deepCopy|deepClone|shallowCopy)\s*\(/i;
+
+// A hook whose subscription stores a copied table hands out a new identity on every
+// change, even when the fields a consumer reads are unchanged
+export function hookReturnsStoreCopies(source: string, hookName: string): boolean {
+  if (!EXTERNAL_UPDATE_SOURCE.test(source)) return false;
+
+  const pairs: Array<{ valueName: string; setterName: string }> = [
+    ...source.matchAll(
+      /\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:React\.)?useState\s*\(/g,
+    ),
+  ].map((match) => ({ valueName: match[1], setterName: match[2] }));
+
+  const dualMode = findDualModeBindingStatePair(source, hookName);
+
+  if (dualMode) pairs.push(dualMode);
+
+  for (const { valueName, setterName } of pairs) {
+    if (!new RegExp(`\\breturn\\s+${valueName}\\b`).test(source)) continue;
+
+    for (const match of source.matchAll(new RegExp(`\\b${setterName}\\s*\\(`, "g"))) {
+      const argumentsText = extractCallArguments(source, match.index + match[0].length - 1);
+      const value = splitTopLevelParameters(argumentsText ?? "")[0]?.trim() ?? "";
+
+      if (SNAPSHOT_COPY_CALL.test(value)) return true;
+    }
+  }
+
+  return false;
+}
+
+function findSnapshotHook(source: string): string | null {
+  const exported = exportedHookName(source);
+
+  return exported && hookReturnsStoreCopies(source, exported) ? exported : null;
+}
+
+function findForwardedSnapshotHook(
+  source: string,
+  snapshotHooks: Map<string, string>,
+): string | null {
+  const exported = exportedHookName(source);
+
+  if (!exported) return null;
+
+  const requirePattern =
+    /\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*require\s*\((.*?)\)/gs;
+
+  for (const match of source.matchAll(requirePattern)) {
+    const localName = match[1];
+
+    if (!resolveModuleReference(normalizeRequireTarget(match[2]), snapshotHooks))
+      continue;
+
+    if (new RegExp(`\\breturn\\s+${localName}\\s*\\(`).test(source)) return exported;
+
+    for (const result of source.matchAll(
+      new RegExp(`\\blocal\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*${localName}\\s*\\(`, "g"),
+    )) {
+      if (new RegExp(`\\breturn\\s+${result[1]}\\s*(?:::[^\\n]*)?$`, "m").test(source))
+        return exported;
+    }
+  }
+
+  return null;
+}
+
 function extractCallArguments(source: string, open: number): string | null {
   if (open < 0 || source[open] !== "(") return null;
 
@@ -1883,6 +1953,7 @@ export function buildProjectModel(
       loadTimeExportFields: findLoadTimeExportFields(record.code) ?? undefined,
       conditionalHookMode: findConditionalHookMode(source) ?? undefined,
       componentExport: findComponentExport(source) ?? undefined,
+      snapshotHook: findSnapshotHook(source) ?? undefined,
       declaredMethods: findDeclaredMethods(source),
     };
 
@@ -1906,6 +1977,7 @@ export function buildProjectModel(
   const staticIterationTablesByModule = new Map<string, Set<string>>();
   const loadTimeFieldsByModule = new Map<string, Set<string>>();
   const componentExportsByModule = new Map<string, ComponentExportSummary>();
+  const snapshotHooksByModule = new Map<string, string>();
   const conditionalHookModesByModule = new Map<
     string,
     ConditionalHookModeSummary
@@ -1944,6 +2016,8 @@ export function buildProjectModel(
 
     if (analysis.componentExport)
       componentExportsByModule.set(id, { ...analysis.componentExport });
+
+    if (analysis.snapshotHook) snapshotHooksByModule.set(id, analysis.snapshotHook);
 
     if (analysis.conditionalHookMode)
       conditionalHookModesByModule.set(id, {
@@ -1998,6 +2072,24 @@ export function buildProjectModel(
     }
   }
 
+  changed = snapshotHooksByModule.size > 0;
+
+  while (changed) {
+    changed = false;
+    const aliases = buildUniqueFeatureAliases(records, snapshotHooksByModule);
+
+    for (const record of records) {
+      if (snapshotHooksByModule.has(record.id)) continue;
+
+      const forwarded = findForwardedSnapshotHook(record.source, aliases);
+
+      if (!forwarded) continue;
+
+      snapshotHooksByModule.set(record.id, forwarded);
+      changed = true;
+    }
+  }
+
   return {
     memoizedModules: buildUniqueFeatureAliases(records, memoizedByModule),
     bindingCandidateHooks: buildUniqueFeatureAliases(
@@ -2027,6 +2119,7 @@ export function buildProjectModel(
     conditionalHookModes,
     reactHookModules,
     componentExports: buildUniqueFeatureAliases(records, componentExportsByModule),
+    snapshotHooks: buildUniqueFeatureAliases(records, snapshotHooksByModule),
     sourceEffects: new Map(),
   };
 }

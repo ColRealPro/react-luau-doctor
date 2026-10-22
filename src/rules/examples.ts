@@ -125,6 +125,22 @@ end, { input, scale })`,
     note: "Compute render-known derived values during render instead of synchronizing another state cell.",
   },
 
+  "react-luau/no-snapshot-overwriting-edits": {
+    before: `local data = usePlayerData()
+local draft, setDraft = React.useState({})
+
+React.useEffect(function()
+	setDraft(data.Loadout or {})
+end, { data })`,
+    after: `local data = usePlayerData()
+local draft, setDraft = React.useState({})
+
+React.useEffect(function()
+	setDraft(data.Loadout or {})
+end, { data.Loadout })`,
+    note: "The draft now only resets when the saved loadout changes",
+  },
+
   "react-luau/no-self-updating-effect": {
     before: `React.useEffect(function()
 \tsetCount(count + 1)

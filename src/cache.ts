@@ -73,6 +73,7 @@ interface SerializedProjectModel {
 
   reactHookModules: Array<[string, boolean]>;
   componentExports?: Array<[string, ComponentExportSummary]>;
+  snapshotHooks?: Array<[string, string]>;
   sourceEffects: Array<[string, SerializedSourceEffectSummary]>;
 }
 
@@ -554,6 +555,7 @@ export function serializeProjectModel(
     conditionalHookModes: [...project.conditionalHookModes],
     reactHookModules: [...project.reactHookModules],
     componentExports: [...project.componentExports],
+    snapshotHooks: [...project.snapshotHooks],
 
     sourceEffects: [...project.sourceEffects].map(([key, value]) => [
       key,
@@ -595,6 +597,7 @@ export function deserializeProjectModel(
     conditionalHookModes: new Map(project.conditionalHookModes),
     reactHookModules: new Map(project.reactHookModules ?? []),
     componentExports: new Map(project.componentExports ?? []),
+    snapshotHooks: new Map(project.snapshotHooks ?? []),
 
     sourceEffects: new Map(
       project.sourceEffects.map(([key, value]) => [
@@ -637,6 +640,7 @@ export function projectModelFeatureKey(project: ProjectModel): string {
     conditionalHookModes: serialized.conditionalHookModes,
     reactHookModules: serialized.reactHookModules,
     componentExports: serialized.componentExports,
+    snapshotHooks: serialized.snapshotHooks,
   });
 }
 

@@ -5747,3 +5747,188 @@ return Component
   const report = await scanPath(root);
   assert.deepEqual(ruleLines(report, "no-binding-in-deps"), ["Component.luau:8"]);
 });
+
+test("only hooks that store copies of a subscribed store count as snapshots", async (t) => {
+  const store = (name: string, update: string) => `local React = require(script.Parent.React)
+local function ${name}(source)
+  local state, setState = React.useState(nil)
+  React.useEffect(function()
+    local connection = source.Changed:Connect(function()
+      setState(${update})
+    end)
+    return function() connection:Disconnect() end
+  end, { source })
+  return state
+end
+return ${name}
+`;
+
+  const root = tempProject(t, "snapshot-hooks", {
+    "useStore.luau": store("useStore", "table.clone(source.State)"),
+    "useSelector.luau": store("useSelector", "source.State.Saved"),
+    "useModel.luau": store("useModel", "source:Clone()"),
+    "useForwarded.luau": `local useStore = require(script.Parent.useStore)
+local function useForwarded(source)
+  return useStore(source)
+end
+return useForwarded
+`,
+    "Editor.luau": `local React = require(script.Parent.React)
+local useStore = require(script.Parent.useStore)
+local useSelector = require(script.Parent.useSelector)
+local useModel = require(script.Parent.useModel)
+local useForwarded = require(script.Parent.useForwarded)
+
+local function useLocalStore(source)
+  local state, setState = React.useState({})
+  React.useEffect(function()
+    local connection = source.Changed:Connect(function()
+      setState(table.clone(source.State))
+    end)
+    return function() connection:Disconnect() end
+  end, { source })
+  return state
+end
+
+local function Editor(props)
+  local store = useStore(props.source) or {}
+  local selected = useSelector(props.source)
+  local model = useModel(props.source)
+  local forwarded = useForwarded(props.source)
+  local localStore = useLocalStore(props.source)
+  local draft, setDraft = React.useState({})
+
+  React.useEffect(function() setDraft(store.Saved) end, { store })
+  React.useEffect(function() setDraft(selected.Saved) end, { selected })
+  React.useEffect(function() setDraft(model.Saved) end, { model })
+  React.useEffect(function() setDraft(forwarded.Saved) end, { forwarded })
+  React.useEffect(function() setDraft(localStore.Saved) end, { localStore })
+
+  return React.createElement("TextBox", { Text = draft.text, onChanged = setDraft })
+end
+
+return Editor
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(ruleLines(report, "no-snapshot-overwriting-edits"), ["Editor.luau:26", "Editor.luau:29", "Editor.luau:30"]);
+});
+
+test("effects that copy a store snapshot over state edited by handlers are reported", async (t) => {
+  const root = tempProject(t, "snapshot-overwriting-edits", {
+    "useStore.luau": `local React = require(script.Parent.React)
+local function useStore(source)
+  local state, setState = React.useState({})
+  React.useEffect(function()
+    local connection = source.Changed:Connect(function()
+      setState(table.clone(source.State))
+    end)
+    return function() connection:Disconnect() end
+  end, { source })
+  return state
+end
+return useStore
+`,
+    "Editor.luau": `local React = require(script.Parent.React)
+local useStore = require(script.Parent.useStore)
+
+local function Editor(props)
+  local store = useStore(props.source)
+  local seededRef = React.useRef(false)
+  local draft, setDraft = React.useState(nil)
+  local title, setTitle = React.useState("")
+  local mirror, setMirror = React.useState(nil)
+  local lastId, setLastId = React.useState(nil)
+  local isEditing, setIsEditing = React.useState(false)
+  local editId, setEditId = React.useState(nil)
+
+  React.useEffect(function()
+    local item = store.Items[props.id]
+    if not item then return end
+    if title == "" then print("untitled") end
+    setDraft(item.values)
+    setTitle(item.title)
+  end, { store, props.id })
+
+  React.useEffect(function()
+    if draft ~= store.Draft then setDraft(store.Draft) end
+  end, { store, draft })
+
+  React.useEffect(function()
+    task.defer(function() setDraft(store["Draft"]) end)
+  end, { store, store.Draft })
+
+  React.useEffect(function() setMirror(store.Draft) end, { store })
+  React.useEffect(function() setDraft(function(previous) return previous or store.Draft end) end, { store })
+  React.useEffect(function() setDraft(store.Draft) end, { store.Draft })
+
+  React.useEffect(function()
+    if draft == nil and store.Draft then setDraft(store.Draft) end
+  end, { store, draft })
+
+  React.useEffect(function()
+    if seededRef.current then return end
+    seededRef.current = true
+    setDraft(store.Draft)
+  end, { store })
+
+  React.useEffect(function()
+    if lastId ~= store.Id then
+      setLastId(store.Id)
+      setDraft(store.Draft)
+    end
+  end, { store, lastId })
+
+  React.useEffect(function()
+    if isEditing then return end
+    setDraft(store.Draft)
+  end, { store, isEditing })
+
+  React.useEffect(function()
+    if mirror then return end
+    setDraft(store.Draft)
+  end, { store, mirror })
+
+  React.useEffect(function()
+    if not editId then return end
+    setDraft(store.Items[editId])
+  end, { store, editId })
+
+  local add = React.useCallback(function(value)
+    setDraft(function(previous)
+      local nextDraft = table.clone(previous)
+      table.insert(nextDraft, value)
+      return nextDraft
+    end)
+  end, {})
+
+  return React.createElement("TextBox", {
+    Text = title,
+    onChanged = setTitle,
+    Count = mirror,
+    Add = add,
+    [React.Event.Focused] = function() setIsEditing(true) end,
+    [React.Event.Activated] = function() setEditId(1) end,
+  })
+end
+
+local function useDraft(source)
+  local store = useStore(source)
+  local draft, setDraft = React.useState(nil)
+  React.useEffect(function() setDraft(store.Draft) end, { store })
+  return draft, setDraft
+end
+
+return { Editor = Editor, useDraft = useDraft }
+`,
+  });
+
+  const report = await scanPath(root);
+  assert.deepEqual(ruleLines(report, "no-snapshot-overwriting-edits"), ["Editor.luau:20", "Editor.luau:24", "Editor.luau:28", "Editor.luau:59", "Editor.luau:64", "Editor.luau:87"]);
+
+  const previews = report.diagnostics
+    .filter((diagnostic) => diagnostic.rule.endsWith("snapshot-overwriting-edits"))
+    .map((diagnostic) => diagnostic.fixPreview?.after);
+  assert.deepEqual(previews, ["{ store.Items, props.id }", "{ store.Draft, draft }", "{ store.Draft }", "{ store.Draft, mirror }", "{ store.Items, editId }", "{ store.Draft }"]);
+});
