@@ -25,11 +25,12 @@ Add `react-luau/` before the names below when using them in your [config](cli.md
 
 ## Effects
 
-| Rule                      | Default | What it catches                                                        |
-| ------------------------- | ------- | ---------------------------------------------------------------------- |
-| `effect-needs-cleanup`    | warning | An effect creates a resource or task without cleanup                   |
-| `no-derived-state-effect` | warning | An effect copies a value into state that can be computed during render |
-| `no-self-updating-effect` | warning | An effect updates state in a way that makes the effect run again       |
+| Rule                            | Default | What it catches                                                                   |
+| ------------------------------- | ------- | --------------------------------------------------------------------------------- |
+| `effect-needs-cleanup`          | warning | An effect creates a resource or task without cleanup                              |
+| `no-derived-state-effect`       | warning | An effect copies a value into state that can be computed during render            |
+| `no-self-updating-effect`       | warning | An effect updates state in a way that makes the effect run again                  |
+| `no-snapshot-overwriting-edits` | warning | An effect resets state that handlers edit whenever a whole-store snapshot changes |
 
 ## Correctness
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### New rules
+
+- `react-luau/no-snapshot-overwriting-edits` catches effects that depend on a hook returning a fresh copy of its store and overwrite state that handlers also edit, so unrelated store changes discard the user's edits
+
 ## 0.22.0
 
 ### Highlights

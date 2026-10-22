@@ -193,6 +193,8 @@ export interface ProjectModel {
   reactHookModules: Map<string, boolean>;
   /** Modules that export a function component, and whether it forwards refs */
   componentExports: Map<string, ComponentExportSummary>;
+  /** Hooks that return a fresh copy of a subscribed store on every change, keyed to the hook name */
+  snapshotHooks: Map<string, string>;
   sourceEffects: Map<string, SourceEffectModuleSummary>;
 }
 
