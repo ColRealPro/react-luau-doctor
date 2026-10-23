@@ -25,7 +25,7 @@ Reload VS Code after installing. `bun run build:lsp` builds the VSIX without ins
 
 Rules are registered in `src/rules/index.ts`. Each rule has guidance and a repair example in `src/rules/examples.ts`
 
-Scanner regression tests go in `tests/scanner.test.ts`. Use a small example that reproduces the issue
+Rule regression tests go in `tests/rules/<rule>.test.ts` using `ruleTester`. Cross-rule and scanner behaviour goes in `tests/scanner.test.ts`. Use a small example that reproduces the issue
 
 The CLI and editor share rule explanations through `src/presentation.ts`. A finding can provide its own guidance when the generic example doesn't fit
 

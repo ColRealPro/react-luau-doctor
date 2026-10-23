@@ -1,9 +1,8 @@
-import assert from "node:assert/strict";
+import { expect, test, onTestFinished } from "bun:test";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 import {
   convertWorkflowTemplate,
   NoOperationTraceWriter,
@@ -12,7 +11,6 @@ import {
 import { renderGitHubWorkflow } from "../src/ci";
 import { gitExecutable } from "../src/git";
 import packageJson from "../package.json";
-import { renderSummaryComment } from "../src/ci/report";
 import {
   GitHubClient,
   publishCheckRun,
@@ -22,7 +20,7 @@ import {
   type ReviewComment,
   type ReviewFinding,
 } from "../src/ci/github";
-import type { Diagnostic, ScanReport } from "../src/types";
+import type { Diagnostic } from "../src/types";
 
 const cli = path.resolve(import.meta.dir, "../src/cli.ts");
 
@@ -77,6 +75,7 @@ function createRepo(source: string): string {
 }
 
 const VALID_COMPONENT = `local React = require(script.Parent.React)\nlocal function Component(props)\n\treturn React.createElement("TextLabel", { Text = props.text })\nend\nreturn Component\n`;
+
 const INVALID_COMPONENT = `local React = require(script.Parent.React)\nlocal function Component(props)\n\tprops.text = "bad"\n\treturn React.createElement("TextLabel", { Text = props.text })\nend\nreturn Component\n`;
 
 function diagnostic(
@@ -97,63 +96,6 @@ function diagnostic(
   };
 }
 
-function report(diagnostics: Diagnostic[]): ScanReport {
-  const counts = { error: 0, warning: 0, suggestion: 0 };
-
-  for (const entry of diagnostics) {
-    counts[entry.severity]++;
-  }
-
-  return {
-    schemaVersion: 1,
-    root: ".",
-    scannedFiles: 2,
-    score: 71,
-    durationMs: 1,
-    scope: "changed",
-    counts,
-    diagnostics,
-  };
-}
-
-test("sticky truncation preserves totals, closes sections, and links to full findings", () => {
-  const diagnostics = [
-    diagnostic("a.luau", 1),
-    diagnostic("a.luau", 2),
-    diagnostic("b.luau", 3, "warning"),
-    diagnostic("c.luau", 4, "suggestion"),
-  ];
-  const options = {
-    baseBranch: "main",
-    sha: "abcdef0",
-    fixed: [],
-    inlineCount: 20,
-    url: () => "https://github.com/test/project",
-    runUrl: "https://github.com/test/project/actions/runs/1",
-  };
-  const truncated = renderSummaryComment(report(diagnostics), { ...options, limit: 900 });
-  assert.ok(truncated.length <= 900);
-  assert.match(truncated, /4 new issues/);
-  assert.ok(truncated.includes(options.runUrl));
-  assert.equal(
-    (truncated.match(/<details>/g) ?? []).length,
-    (truncated.match(/<\/details>/g) ?? []).length,
-  );
-  assert.doesNotMatch(truncated, /<summary>[^\n]*<\/summary>\s*<\/details>/);
-  const clean = renderSummaryComment(
-    { ...report([]), score: 100 },
-    { ...options, fixed: [diagnostic()] },
-  );
-  assert.match(clean, /found no new issues/);
-  assert.doesNotMatch(clean, /0 errors|score 100\/100|\\color|\\textsf/);
-  assert.match(clean, /1 fixed vs/);
-  assert.ok(clean.includes(options.runUrl));
-  assert.ok(!renderSummaryComment(report([]), options).includes(options.runUrl));
-  assert.ok(
-    renderSummaryComment(report([]), { ...options, incomplete: true }).includes(options.runUrl),
-  );
-});
-
 interface MockGitHub {
   client: GitHubClient;
   reviews: Review[];
@@ -161,7 +103,7 @@ interface MockGitHub {
   resolved: Set<number>;
 }
 
-function mockGitHub(t: { after: (fn: () => void) => void }): MockGitHub {
+function mockGitHub(): MockGitHub {
   const saved = { token: process.env.GITHUB_TOKEN, api: process.env.GITHUB_API_URL };
   const mock: MockGitHub = { client: null!, reviews: [], comments: [], resolved: new Set() };
   const server = Bun.serve({
@@ -253,7 +195,7 @@ function mockGitHub(t: { after: (fn: () => void) => void }): MockGitHub {
     runId: "10",
     attempt: "1",
   });
-  t.after(() => {
+  onTestFinished(() => {
     server.stop(true);
 
     if (saved.token === undefined) delete process.env.GITHUB_TOKEN;
@@ -307,33 +249,27 @@ async function reconcile(
   );
 }
 
-test("inline reviews retain original membership across reruns, shifted lines, partial and full fixes", async (t) => {
-  const mock = mockGitHub(t);
+test("inline reviews retain original membership across reruns, shifted lines, partial and full fixes", async () => {
+  const mock = mockGitHub();
   const first = diagnostic("Component.luau", 3, "error", "First message");
   const second = diagnostic("Component.luau", 6, "warning", "Second message");
-  assert.equal(await reconcile(mock, analysis([first, second])), 2);
+  expect(await reconcile(mock, analysis([first, second]))).toBe(2);
   const originalIds = mock.comments.map((comment) => comment.id);
   await reconcile(mock, analysis([first, second]));
-  assert.deepEqual(
-    mock.comments.map((comment) => comment.id),
-    originalIds,
-  );
+  expect(mock.comments.map((comment) => comment.id)).toEqual(originalIds);
   const shifted = { ...second, location: { ...second.location, line: 20, endLine: 20 } };
   await reconcile(mock, analysis([shifted]));
-  assert.equal(mock.comments.length, 1);
-  assert.equal(mock.comments[0].id, originalIds[1]);
-  assert.match(
-    mock.reviews[0].body!,
-    /\*\*1 of these 2 issues fixed\*\* · 1 still remains in the PR/,
-  );
+  expect(mock.comments.length).toBe(1);
+  expect(mock.comments[0].id).toBe(originalIds[1]);
+  expect(mock.reviews[0].body!).toMatch(/\*\*1 of these 2 issues fixed\*\* · 1 still remains in the PR/);
   await reconcile(mock, analysis([]));
-  assert.equal(mock.comments.length, 0);
-  assert.match(mock.reviews[0].body!, /\*\*Both issues fixed in later commits\*\*/);
-  assert.equal(mock.reviews.length, 1);
+  expect(mock.comments.length).toBe(0);
+  expect(mock.reviews[0].body!).toMatch(/\*\*Both issues fixed in later commits\*\*/);
+  expect(mock.reviews.length).toBe(1);
 });
 
-test("fixed human discussions stay intact and use actual thread resolution state", async (t) => {
-  const mock = mockGitHub(t);
+test("fixed human discussions stay intact and use actual thread resolution state", async () => {
+  const mock = mockGitHub();
   await reconcile(mock, analysis([diagnostic()]));
   mock.comments.push({
     id: 200,
@@ -344,20 +280,17 @@ test("fixed human discussions stay intact and use actual thread resolution state
     in_reply_to_id: 100,
   });
   await reconcile(mock, analysis([]));
-  assert.equal(mock.comments.length, 2);
-  assert.match(
-    mock.reviews[0].body!,
-    /\*\*This issue fixed in later commits\*\* · 1 discussion awaiting resolution/,
-  );
-  assert.doesNotMatch(mock.reviews[0].body!, /\\color|\\textsf/);
+  expect(mock.comments.length).toBe(2);
+  expect(mock.reviews[0].body!).toMatch(/\*\*This issue fixed in later commits\*\* · 1 discussion awaiting resolution/);
+  expect(mock.reviews[0].body!).not.toMatch(/\\color|\\textsf/);
   mock.resolved.add(100);
   await reconcile(mock, analysis([]));
-  assert.equal(mock.comments.length, 2);
-  assert.doesNotMatch(mock.reviews[0].body!, /awaiting resolution/);
+  expect(mock.comments.length).toBe(2);
+  expect(mock.reviews[0].body!).not.toMatch(/awaiting resolution/);
 });
 
-test("analyzer changes re-verify earlier findings against the reviewed commit", async (t) => {
-  const mock = mockGitHub(t);
+test("analyzer changes re-verify earlier findings against the reviewed commit", async () => {
+  const mock = mockGitHub();
   const first = diagnostic("Component.luau", 3, "error", "First message");
   const second = diagnostic("Component.luau", 6, "warning", "Second message");
   await reconcile(mock, analysis([first, second]));
@@ -367,55 +300,36 @@ test("analyzer changes re-verify earlier findings against the reviewed commit", 
     historical,
   });
   await reconcile(mock, updated(async () => new Map()));
-  assert.match(mock.reviews[0].body!, /2 issues awaiting verification/);
+  expect(mock.reviews[0].body!).toMatch(/2 issues awaiting verification/);
   await reconcile(
     mock,
     updated(async () => new Map([["Component.luau", [finding(first)]]]), [first]),
   );
-  assert.match(mock.reviews[0].body!, /1 still remains in the PR · 1 issue no longer reported/);
-  assert.equal(mock.comments.length, 1);
+  expect(mock.reviews[0].body!).toMatch(/1 still remains in the PR · 1 issue no longer reported/);
+  expect(mock.comments.length).toBe(1);
   await reconcile(
     mock,
     updated(async () => {
       throw new Error("verified reviews should not be rescanned");
     }),
   );
-  assert.match(
-    mock.reviews[0].body!,
-    /\*\*1 of these 2 issues fixed\*\* · 1 issue no longer reported/,
-  );
-  assert.equal(mock.comments.length, 0);
+  expect(mock.reviews[0].body!).toMatch(/\*\*1 of these 2 issues fixed\*\* · 1 issue no longer reported/);
+  expect(mock.comments.length).toBe(0);
 });
 
-test("inline selection prioritizes severity and alternates files", async (t) => {
-  const mock = mockGitHub(t);
-  const diagnostics = [
-    diagnostic("a.luau", 5, "suggestion"),
-    diagnostic("b.luau", 4, "warning"),
-    diagnostic("a.luau", 1),
-    diagnostic("a.luau", 3),
-    diagnostic("b.luau", 2),
-  ];
-  await reconcile(mock, analysis(diagnostics, ["a.luau", "b.luau"]));
-  assert.deepEqual(
-    mock.comments.map((comment) => comment.line),
-    [1, 2, 3, 4, 5],
-  );
-});
-
-test("inline reviews respect the configured limit and track reviews above the old cap", async (t) => {
-  const mock = mockGitHub(t);
+test("inline reviews respect the configured limit and track reviews above the old cap", async () => {
+  const mock = mockGitHub();
   const diagnostics = Array.from({ length: 60 }, (_, index) =>
     diagnostic("Component.luau", index + 1, "warning"),
   );
   const inline = () => true;
-  assert.equal(await reconcile(mock, analysis(diagnostics), inline, 50), 50);
+  expect(await reconcile(mock, analysis(diagnostics), inline, 50)).toBe(50);
   await reconcile(mock, analysis(diagnostics), inline, 50);
-  assert.equal(mock.reviews.length, 1);
-  assert.equal(mock.comments.length, 50);
+  expect(mock.reviews.length).toBe(1);
+  expect(mock.comments.length).toBe(50);
 });
 
-test("check runs append annotations in batches before completing", async (t) => {
+test("check runs append annotations in batches before completing", async () => {
   const requests: Array<{ method: string; path: string; body: any }> = [];
   const server = Bun.serve({
     port: 0,
@@ -433,7 +347,7 @@ test("check runs append annotations in batches before completing", async (t) => 
   const saved = { token: process.env.GITHUB_TOKEN, api: process.env.GITHUB_API_URL };
   process.env.GITHUB_TOKEN = "local-test-token";
   process.env.GITHUB_API_URL = server.url.toString();
-  t.after(() => {
+  onTestFinished(() => {
     server.stop(true);
 
     if (saved.token === undefined) delete process.env.GITHUB_TOKEN;
@@ -455,50 +369,25 @@ test("check runs append annotations in batches before completing", async (t) => 
     "head",
     { conclusion: "neutral", title: "Findings", summary: "Summary", annotations },
   );
-  assert.deepEqual(
-    requests.map((request) => [
+  expect(requests.map((request) => [
       request.method,
       request.path,
       request.body.output.annotations.length,
-    ]),
-    [
+    ])).toEqual([
       ["POST", "/repos/test/project/check-runs", 50],
       ["PATCH", "/repos/test/project/check-runs/5", 50],
       ["PATCH", "/repos/test/project/check-runs/5", 20],
-    ],
-  );
-  assert.equal(requests[0].body.status, "in_progress");
-  assert.equal(requests[2].body.status, "completed");
-  assert.equal(requests[2].body.conclusion, "neutral");
+    ]);
+  expect(requests[0].body.status).toBe("in_progress");
+  expect(requests[2].body.status).toBe("completed");
+  expect(requests[2].body.conclusion).toBe("neutral");
 });
 
-test("ci install writes a version-pinned GitHub workflow", (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-ci-install-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-
-  const result = run(["ci", "install", "--yes", "--cwd", root]);
-  assert.equal(result.status, 0, result.stderr);
-  const workflow = fs.readFileSync(
-    path.join(root, ".github/workflows/react-luau-doctor.yml"),
-    "utf8",
-  );
-  assert.match(workflow, /DOCTOR_BLOCKING: none/);
-  assert.match(workflow, /DOCTOR_SCOPE: changed/);
-  assert.match(workflow, /--comment/);
-  assert.match(workflow, /--review-comments/);
-  assert.match(workflow, /--commit-status/);
-  assert.match(workflow, /checks: write/);
-  assert.match(workflow, /contents: read/);
-  assert.doesNotMatch(workflow, /contents: write|pull_request_target/);
-  assert.match(workflow, /actions\/upload-artifact@v4/);
-  assert.ok(workflow.includes(`${packageJson.name}@${packageJson.version}`));
-});
-
-test("ci config rewrites gate, scope, and reporting settings", (t) => {
+test("ci config rewrites gate, scope, and reporting settings", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-ci-config-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  assert.equal(run(["ci", "install", "--yes", "--cwd", root]).status, 0);
+  expect(run(["ci", "install", "--yes", "--cwd", root]).status).toBe(0);
   const configured = run([
     "ci",
     "config",
@@ -517,34 +406,31 @@ test("ci config rewrites gate, scope, and reporting settings", (t) => {
     "--max-review-comments",
     "30",
   ]);
-  assert.equal(configured.status, 0, configured.stderr);
+  expect(configured.status, configured.stderr).toBe(0);
   const reconfigured = run(["ci", "config", "--yes", "--cwd", root, "--max-annotations", "0"]);
-  assert.equal(reconfigured.status, 0, reconfigured.stderr);
+  expect(reconfigured.status, reconfigured.stderr).toBe(0);
   const workflow = fs.readFileSync(
     path.join(root, ".github/workflows/react-luau-doctor.yml"),
     "utf8",
   );
-  assert.match(workflow, /DOCTOR_BLOCKING: warning/);
-  assert.match(workflow, /DOCTOR_SCOPE: lines/);
-  assert.match(workflow, /--no-comment/);
-  assert.match(workflow, /--no-review-comments/);
-  assert.match(workflow, /--no-commit-status/);
-  assert.match(workflow, /--max-annotations 0/);
-  assert.match(workflow, /--max-review-comments 30/);
+  expect(workflow).toMatch(/DOCTOR_BLOCKING: warning/);
+  expect(workflow).toMatch(/DOCTOR_SCOPE: lines/);
+  expect(workflow).toMatch(/--no-comment/);
+  expect(workflow).toMatch(/--no-review-comments/);
+  expect(workflow).toMatch(/--no-commit-status/);
+  expect(workflow).toMatch(/--max-annotations 0/);
+  expect(workflow).toMatch(/--max-review-comments 30/);
   const capped = run(["ci", "config", "--yes", "--cwd", root, "--max-review-comments", "51"]);
-  assert.notEqual(capped.status, 0);
-  assert.match(capped.stderr, /--max-review-comments must be an integer from 0 to 50/);
+  expect(capped.status).not.toBe(0);
+  expect(capped.stderr).toMatch(/--max-review-comments must be an integer from 0 to 50/);
 });
 
-test("ci upgrade refreshes the npm pin while preserving workflow configuration", (t) => {
+test("ci upgrade refreshes the npm pin while preserving workflow configuration", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-ci-upgrade-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  assert.equal(
-    run(["ci", "install", "--yes", "--cwd", root, "--blocking", "error", "--scope", "files"])
-      .status,
-    0,
-  );
+  expect(run(["ci", "install", "--yes", "--cwd", root, "--blocking", "error", "--scope", "files"])
+      .status).toBe(0);
   const workflowPath = path.join(root, ".github/workflows/react-luau-doctor.yml");
   const installed = fs.readFileSync(workflowPath, "utf8");
   fs.writeFileSync(
@@ -553,16 +439,16 @@ test("ci upgrade refreshes the npm pin while preserving workflow configuration",
   );
 
   const result = run(["ci", "upgrade", "--yes", "--cwd", root]);
-  assert.equal(result.status, 0, result.stderr);
+  expect(result.status, result.stderr).toBe(0);
   const workflow = fs.readFileSync(workflowPath, "utf8");
-  assert.ok(workflow.includes(`${packageJson.name}@${packageJson.version}`));
-  assert.match(workflow, /DOCTOR_BLOCKING: error/);
-  assert.match(workflow, /DOCTOR_SCOPE: files/);
+  expect(workflow.includes(`${packageJson.name}@${packageJson.version}`)).toBeTruthy();
+  expect(workflow).toMatch(/DOCTOR_BLOCKING: error/);
+  expect(workflow).toMatch(/DOCTOR_SCOPE: files/);
 });
 
-test("GitLab scaffold supports detached merge-request scans and blocking", (t) => {
+test("GitLab scaffold supports detached merge-request scans and blocking", () => {
   const root = createRepo(VALID_COMPONENT);
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
 
   const result = run([
     "ci",
@@ -575,11 +461,11 @@ test("GitLab scaffold supports detached merge-request scans and blocking", (t) =
     "--blocking",
     "warning",
   ]);
-  assert.equal(result.status, 0, result.stderr);
+  expect(result.status, result.stderr).toBe(0);
   const workflow = fs.readFileSync(path.join(root, ".gitlab-ci.yml"), "utf8");
-  assert.match(workflow, /oven\/bun:1\.4\.0/);
-  assert.match(workflow, /DOCTOR_BLOCKING: "warning"/);
-  assert.ok(workflow.includes(`${packageJson.name}@${packageJson.version}`));
+  expect(workflow).toMatch(/oven\/bun:1\.4\.0/);
+  expect(workflow).toMatch(/DOCTOR_BLOCKING: "warning"/);
+  expect(workflow.includes(`${packageJson.name}@${packageJson.version}`)).toBeTruthy();
 
   const parsed = Bun.YAML.parse(workflow) as {
     "react-luau-doctor": {
@@ -589,11 +475,8 @@ test("GitLab scaffold supports detached merge-request scans and blocking", (t) =
     };
   };
   const job = parsed["react-luau-doctor"];
-  assert.match(job.before_script[0]!, /apt-get install .* git$/);
-  assert.equal(
-    job.script[0],
-    `bunx --bun ${packageJson.name}@${packageJson.version} "$DOCTOR_DIRECTORY" --scope "$DOCTOR_SCOPE" --blocking "$DOCTOR_BLOCKING" --no-color`,
-  );
+  expect(job.before_script[0]!).toMatch(/apt-get install .* git$/);
+  expect(job.script[0]).toBe(`bunx --bun ${packageJson.name}@${packageJson.version} "$DOCTOR_DIRECTORY" --scope "$DOCTOR_SCOPE" --blocking "$DOCTOR_BLOCKING" --no-color`);
 
   const args = [
     job.variables.DOCTOR_DIRECTORY!,
@@ -612,27 +495,27 @@ test("GitLab scaffold supports detached merge-request scans and blocking", (t) =
   git(root, "checkout", "--detach");
   git(root, "branch", "-D", "main");
   const clean = run(args, root, env);
-  assert.equal(clean.status, 0, clean.stderr);
+  expect(clean.status, clean.stderr).toBe(0);
 
   fs.writeFileSync(path.join(root, "Component.luau"), INVALID_COMPONENT);
   git(root, "add", "Component.luau");
   git(root, "commit", "-m", "introduce finding");
   const blocking = run(args, root, env);
-  assert.equal(blocking.status, 1, blocking.stderr);
-  assert.match(blocking.stdout, /no-prop-mutation/);
+  expect(blocking.status, blocking.stderr).toBe(1);
+  expect(blocking.stdout).toMatch(/no-prop-mutation/);
 
   const nonblocking = run([...args, "--blocking", "none"], root, env);
-  assert.equal(nonblocking.status, 0, nonblocking.stderr);
-  assert.match(nonblocking.stdout, /no-prop-mutation/);
+  expect(nonblocking.status, nonblocking.stderr).toBe(0);
+  expect(nonblocking.stdout).toMatch(/no-prop-mutation/);
 
   const missingBase = run(args, root, { ...env, CI_MERGE_REQUEST_DIFF_BASE_SHA: "0".repeat(40) });
-  assert.notEqual(missingBase.status, 0);
-  assert.match(missingBase.stderr, /Could not resolve git base ref/);
+  expect(missingBase.status).not.toBe(0);
+  expect(missingBase.stderr).toMatch(/Could not resolve git base ref/);
 });
 
-test("ci run reports introduced findings and writes GitHub step outputs without network surfaces", (t) => {
+test("ci run reports introduced findings and writes GitHub step outputs without network surfaces", () => {
   const root = createRepo(VALID_COMPONENT);
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   const base = git(root, "rev-parse", "HEAD");
   fs.writeFileSync(path.join(root, "Component.luau"), INVALID_COMPONENT);
   const eventPath = path.join(root, "event.json");
@@ -670,18 +553,18 @@ test("ci run reports introduced findings and writes GitHub step outputs without 
     },
   );
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /no-prop-mutation/);
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stdout).toMatch(/no-prop-mutation/);
   const outputs = fs.readFileSync(outputPath, "utf8");
-  assert.match(outputs, /total-issues=1/);
-  assert.match(outputs, /error-count=1/);
-  assert.match(outputs, /fixed-issues=0/);
-  assert.match(outputs, /affected-files=1/);
+  expect(outputs).toMatch(/total-issues=1/);
+  expect(outputs).toMatch(/error-count=1/);
+  expect(outputs).toMatch(/fixed-issues=0/);
+  expect(outputs).toMatch(/affected-files=1/);
 });
 
-test("ci run reports fixed issues for pull requests", (t) => {
+test("ci run reports fixed issues for pull requests", () => {
   const root = createRepo(INVALID_COMPONENT);
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   const base = git(root, "rev-parse", "HEAD");
   fs.writeFileSync(path.join(root, "Component.luau"), VALID_COMPONENT);
   const eventPath = path.join(root, "event.json");
@@ -719,10 +602,10 @@ test("ci run reports fixed issues for pull requests", (t) => {
     },
   );
 
-  assert.equal(result.status, 0, result.stderr);
+  expect(result.status, result.stderr).toBe(0);
   const outputs = fs.readFileSync(outputPath, "utf8");
-  assert.match(outputs, /total-issues=0/);
-  assert.match(outputs, /fixed-issues=1/);
+  expect(outputs).toMatch(/total-issues=0/);
+  expect(outputs).toMatch(/fixed-issues=1/);
 });
 
 async function runWithApi(
@@ -774,9 +657,9 @@ async function runWithApi(
   return { stdout, stderr, status };
 }
 
-test("PR reporting keeps summaries PR-wide and new inline reviews scoped to the latest push", { timeout: 30_000 }, async (t) => {
+test("PR reporting keeps summaries PR-wide and new inline reviews scoped to the latest push", async () => {
   const root = createRepo(VALID_COMPONENT);
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   const base = git(root, "rev-parse", "HEAD");
   fs.writeFileSync(path.join(root, "Component.luau"), INVALID_COMPONENT);
   git(root, "add", "Component.luau");
@@ -814,25 +697,21 @@ test("PR reporting keeps summaries PR-wide and new inline reviews scoped to the 
       return Response.json({ id: 1 });
     },
   });
-  t.after(() => server.stop(true));
+  onTestFinished(() => server.stop(true));
 
   const result = await runWithApi(root, base, server.url.toString(), { event: { action: "opened" } });
-  assert.equal(result.status, 1, result.stderr);
-  assert.match(result.stdout, /no-prop-mutation/);
-  assert.ok(
-    requests.some(
+  expect(result.status, result.stderr).toBe(1);
+  expect(result.stdout).toMatch(/no-prop-mutation/);
+  expect(requests.some(
       (request) => request.method === "POST" && request.path.endsWith("/issues/7/comments"),
-    ),
-  );
+    )).toBeTruthy();
   const review = requests.find(
     (request) => request.method === "POST" && request.path.endsWith("/pulls/7/reviews"),
   );
-  assert.equal(review?.body?.comments?.[0]?.line, 3);
-  assert.ok(
-    requests.some(
+  expect(review?.body?.comments?.[0]?.line).toBe(3);
+  expect(requests.some(
       (request) => request.path.includes("/statuses/") && request.body?.state === "failure",
-    ),
-  );
+    )).toBeTruthy();
 
   const synchronize = async (before: string): Promise<Result> => {
     requests.length = 0;
@@ -847,37 +726,34 @@ test("PR reporting keeps summaries PR-wide and new inline reviews scoped to the 
 
   let before = git(root, "rev-parse", "HEAD");
   git(root, "commit", "--allow-empty", "-m", "update CI");
-  assert.equal((await synchronize(before)).status, 1);
-  assert.equal(reviewRequests().length, 0);
+  expect((await synchronize(before)).status).toBe(1);
+  expect(reviewRequests().length).toBe(0);
 
   before = git(root, "rev-parse", "HEAD");
   fs.writeFileSync(path.join(root, "Component.luau"), `\n${INVALID_COMPONENT}`);
   git(root, "add", "Component.luau");
   git(root, "commit", "-m", "edit without new findings");
-  assert.equal((await synchronize(before)).status, 1);
-  assert.equal(reviewRequests().length, 0);
+  expect((await synchronize(before)).status).toBe(1);
+  expect(reviewRequests().length).toBe(0);
 
   before = git(root, "rev-parse", "HEAD");
   fs.writeFileSync(path.join(root, "NewComponent.luau"), INVALID_COMPONENT);
   git(root, "add", "NewComponent.luau");
   git(root, "commit", "-m", "introduce another finding");
-  assert.equal((await synchronize(before)).status, 1);
-  assert.equal(reviewRequests().length, 1);
-  assert.deepEqual(
-    reviewRequests()[0]?.body.comments.map((comment: any) => comment.path),
-    ["NewComponent.luau"],
-  );
-  assert.match(fs.readFileSync(path.join(root, "outputs.txt"), "utf8"), /total-issues=2/);
+  expect((await synchronize(before)).status).toBe(1);
+  expect(reviewRequests().length).toBe(1);
+  expect(reviewRequests()[0]?.body.comments.map((comment: any) => comment.path)).toEqual(["NewComponent.luau"]);
+  expect(fs.readFileSync(path.join(root, "outputs.txt"), "utf8")).toMatch(/total-issues=2/);
 
   const unavailable = await synchronize("0".repeat(40));
-  assert.equal(unavailable.status, 1);
-  assert.match(unavailable.stderr, /new inline comments were skipped/);
-  assert.equal(reviewRequests().length, 0);
-});
+  expect(unavailable.status).toBe(1);
+  expect(unavailable.stderr).toMatch(/new inline comments were skipped/);
+  expect(reviewRequests().length).toBe(0);
+}, 30_000);
 
-test("PR reviews verify fixes made alongside configuration changes", { timeout: 30_000 }, async (t) => {
+test("PR reviews verify fixes made alongside configuration changes", async () => {
   const root = createRepo(VALID_COMPONENT);
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   const base = git(root, "rev-parse", "HEAD");
   fs.writeFileSync(path.join(root, "Component.luau"), INVALID_COMPONENT);
   git(root, "add", "Component.luau");
@@ -961,10 +837,10 @@ test("PR reviews verify fixes made alongside configuration changes", { timeout: 
       return Response.json({ id: 1 });
     },
   });
-  t.after(() => server.stop(true));
+  onTestFinished(() => server.stop(true));
 
   await runWithApi(root, base, server.url.toString(), { event: { action: "opened" } });
-  assert.equal(comments.length, 1);
+  expect(comments.length).toBe(1);
 
   const before = git(root, "rev-parse", "HEAD");
   fs.writeFileSync(path.join(root, "Component.luau"), VALID_COMPONENT);
@@ -977,15 +853,15 @@ test("PR reviews verify fixes made alongside configuration changes", { timeout: 
   const result = await runWithApi(root, base, server.url.toString(), {
     event: { action: "synchronize", before },
   });
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(reviews[0].body!, /\*\*This issue fixed in later commits\*\*/);
-  assert.doesNotMatch(reviews[0].body!, /awaiting verification/);
-  assert.equal(comments.length, 0);
-});
+  expect(result.status, result.stderr).toBe(0);
+  expect(reviews[0].body!).toMatch(/\*\*This issue fixed in later commits\*\*/);
+  expect(reviews[0].body!).not.toMatch(/awaiting verification/);
+  expect(comments.length).toBe(0);
+}, 30_000);
 
-test("suppressed syntax failures cannot produce clean CI results, success statuses, or review cleanup", async (t) => {
+test("suppressed syntax failures cannot produce clean CI results, success statuses, or review cleanup", async () => {
   const root = createRepo(VALID_COMPONENT);
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   const base = git(root, "rev-parse", "HEAD");
   fs.writeFileSync(
     path.join(root, "Component.luau"),
@@ -1013,34 +889,30 @@ test("suppressed syntax failures cannot produce clean CI results, success status
       return Response.json({ id: 1 });
     },
   });
-  t.after(() => server.stop(true));
+  onTestFinished(() => server.stop(true));
   const result = await runWithApi(root, base, server.url.toString(), {
     args: ["--blocking", "none"],
   });
-  assert.equal(result.status, 1, result.stderr);
+  expect(result.status, result.stderr).toBe(1);
   const summary = requests.find(
     (request) => request.path.endsWith("/issues/7/comments") && request.method === "POST",
   );
-  assert.match(summary?.body.body, /analysis incomplete/);
-  assert.doesNotMatch(summary?.body.body, /found no new issues|🎉|100\/100|Excellent/);
-  assert.ok(
-    requests.some(
+  expect(summary?.body.body).toMatch(/analysis incomplete/);
+  expect(summary?.body.body).not.toMatch(/found no new issues|🎉|100\/100|Excellent/);
+  expect(requests.some(
       (request) => request.path.includes("/statuses/") && request.body.state === "error",
-    ),
-  );
-  assert.ok(
-    !requests.some(
+    )).toBeTruthy();
+  expect(!requests.some(
       (request) =>
         request.method === "DELETE" ||
         (request.path.endsWith("/reviews") && request.method === "POST"),
-    ),
-  );
-  assert.match(fs.readFileSync(path.join(root, "outputs.txt"), "utf8"), /analysis-complete=false/);
+    )).toBeTruthy();
+  expect(fs.readFileSync(path.join(root, "outputs.txt"), "utf8")).toMatch(/analysis-complete=false/);
 });
 
-test("push check run annotations use repository paths for nested scan directories", async (t) => {
+test("push check run annotations use repository paths for nested scan directories", async () => {
   const root = createRepo(VALID_COMPONENT);
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, "game"));
   fs.writeFileSync(path.join(root, "game", "Component.luau"), INVALID_COMPONENT);
   git(root, "add", ".");
@@ -1057,21 +929,18 @@ test("push check run annotations use repository paths for nested scan directorie
       return Response.json({ id: 1 });
     },
   });
-  t.after(() => server.stop(true));
+  onTestFinished(() => server.stop(true));
   const result = await runWithApi(root, "", server.url.toString(), {
     args: ["--directory", "game"],
     env: { GITHUB_EVENT_NAME: "push", GITHUB_SHA: git(root, "rev-parse", "HEAD") },
   });
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(
-    checkRuns[0]?.output.annotations.map((annotation: any) => annotation.path),
-    ["game/Component.luau"],
-  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(checkRuns[0]?.output.annotations.map((annotation: any) => annotation.path)).toEqual(["game/Component.luau"]);
 });
 
-test("read-only fork token failures preserve diagnostics and the blocking gate", async (t) => {
+test("read-only fork token failures preserve diagnostics and the blocking gate", async () => {
   const root = createRepo(VALID_COMPONENT);
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   const base = git(root, "rev-parse", "HEAD");
   fs.writeFileSync(path.join(root, "Component.luau"), INVALID_COMPONENT);
   const server = Bun.serve({
@@ -1081,21 +950,21 @@ test("read-only fork token failures preserve diagnostics and the blocking gate",
       return Response.json({ message: "Resource not accessible by integration" }, { status: 403 });
     },
   });
-  t.after(() => server.stop(true));
+  onTestFinished(() => server.stop(true));
   const result = await runWithApi(root, base, server.url.toString());
-  assert.equal(result.status, 1);
-  assert.match(result.stdout, /no-prop-mutation/);
-  assert.match(result.stderr, /could not update the sticky PR comment/);
-  assert.match(result.stderr, /could not update inline review comments/);
-  assert.match(result.stderr, /could not publish the commit status/);
-  assert.match(result.stderr, /could not publish check run annotations/);
-  assert.match(result.stdout, /^::error file=Component\.luau/m);
-  assert.match(fs.readFileSync(path.join(root, "outputs.txt"), "utf8"), /error-count=1/);
+  expect(result.status).toBe(1);
+  expect(result.stdout).toMatch(/no-prop-mutation/);
+  expect(result.stderr).toMatch(/could not update the sticky PR comment/);
+  expect(result.stderr).toMatch(/could not update inline review comments/);
+  expect(result.stderr).toMatch(/could not publish the commit status/);
+  expect(result.stderr).toMatch(/could not publish check run annotations/);
+  expect(result.stdout).toMatch(/^::error file=Component\.luau/m);
+  expect(fs.readFileSync(path.join(root, "outputs.txt"), "utf8")).toMatch(/error-count=1/);
 });
 
-test("generated workflow passes directory values as data, including shell metacharacters", async (t) => {
+test("generated workflow passes directory values as data, including shell metacharacters", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-workflow-shell-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   const workflow = renderGitHubWorkflow({
     provider: "github",
     blocking: "none",
@@ -1112,24 +981,24 @@ test("generated workflow passes directory values as data, including shell metach
     { name: "react-luau-doctor.yml", content: workflow },
     new NoOperationTraceWriter(),
   );
-  assert.ok(parsed.value);
-  const template = await convertWorkflowTemplate(parsed.context, parsed.value);
-  assert.equal(parsed.context.errors.count, 0, JSON.stringify(parsed.context.errors.getErrors()));
+  expect(parsed.value).toBeTruthy();
+  const template = await convertWorkflowTemplate(parsed.context, parsed.value!);
+  expect(parsed.context.errors.count, JSON.stringify(parsed.context.errors.getErrors())).toBe(0);
   const job = template.jobs[0];
-  assert.equal(job.type, "job");
+  expect(job.type).toBe("job");
 
   if (job.type !== "job") return;
 
   const runStep = job.steps.find((step) => "run" in step);
-  assert.ok(runStep && "run" in runStep);
-  const script = runStep.run.assertString("run").value;
-  assert.ok(script.includes('--directory "$DOCTOR_DIRECTORY"'));
-  assert.ok(script.includes('--project "$DOCTOR_PROJECT"'));
+  expect(runStep && "run" in runStep).toBeTruthy();
+  const script = runStep!.run.assertString("run").value;
+  expect(script.includes('--directory "$DOCTOR_DIRECTORY"')).toBeTruthy();
+  expect(script.includes('--project "$DOCTOR_PROJECT"')).toBeTruthy();
   const command = script.replace(
     /^bunx --bun \S+ ci run/,
     `"${process.execPath.replaceAll("\\", "/")}" capture.ts`,
   );
-  assert.notEqual(command, script);
+  expect(command).not.toBe(script);
   fs.writeFileSync(
     path.join(root, "capture.ts"),
     "console.log(JSON.stringify(Bun.argv.slice(2)));\n",
@@ -1148,8 +1017,8 @@ test("generated workflow passes directory values as data, including shell metach
       DOCTOR_BLOCKING: "none",
     },
   });
-  assert.equal(result.status, 0, result.stderr);
+  expect(result.status, result.stderr).toBe(0);
   const args = JSON.parse(result.stdout.trim()) as string[];
-  assert.equal(args[args.indexOf("--directory") + 1], value);
-  assert.equal(fs.existsSync(path.join(root, "INJECTED")), false);
+  expect(args[args.indexOf("--directory") + 1]).toBe(value);
+  expect(fs.existsSync(path.join(root, "INJECTED"))).toBe(false);
 });

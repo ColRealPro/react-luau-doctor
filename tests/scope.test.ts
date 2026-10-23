@@ -1,9 +1,9 @@
-import assert from "node:assert/strict";
+import { expect, test, onTestFinished } from "bun:test";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+
 import { createGitScopePlan, gitExecutable } from "../src/git";
 import { scanProjectWithScope } from "../src/scope";
 
@@ -48,32 +48,32 @@ end
 return Component
 `;
 
-test("changed scope reports diagnostics introduced relative to the git base", async (t) => {
+test("changed scope reports diagnostics introduced relative to the git base", async () => {
   const { root, file } = createRepo(cleanSource);
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   git(root, "checkout", "-b", "feature");
   fs.writeFileSync(file, brokenSource);
   git(root, "add", "Component.luau");
   git(root, "commit", "-m", "introduce issue");
 
   const report = await scanProjectWithScope(root, { scope: "changed" });
-  assert.equal(report.scope, "changed");
-  assert.equal(report.changedFiles?.includes("Component.luau"), true);
-  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation"), true);
+  expect(report.scope).toBe("changed");
+  expect(report.changedFiles?.includes("Component.luau")).toBe(true);
+  expect(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation")).toBe(true);
 });
 
-test("changed scope does not re-report a pre-existing diagnostic after an unrelated edit", async (t) => {
+test("changed scope does not re-report a pre-existing diagnostic after an unrelated edit", async () => {
   const { root, file } = createRepo(brokenSource);
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.writeFileSync(file, brokenSource.replace('return React.createElement("TextLabel", { Text = props.text })', 'return React.createElement("TextLabel", { Name = "Changed", Text = props.text })'));
 
   const report = await scanProjectWithScope(root, { scope: "changed" });
-  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation"), false);
+  expect(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation")).toBe(false);
 });
 
-test("lines scope only reports diagnostics whose source span touches changed lines", async (t) => {
+test("lines scope only reports diagnostics whose source span touches changed lines", async () => {
   const { root, file } = createRepo(brokenSource);
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   const next = brokenSource.replace(
     '\treturn React.createElement("TextLabel", { Text = props.text })',
     '\tprops.other = "new"\n\treturn React.createElement("TextLabel", { Text = props.text })',
@@ -82,13 +82,13 @@ test("lines scope only reports diagnostics whose source span touches changed lin
 
   const report = await scanProjectWithScope(root, { scope: "lines" });
   const propMutations = report.diagnostics.filter((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation");
-  assert.equal(propMutations.length, 1);
-  assert.equal(propMutations[0].location.line, 6);
+  expect(propMutations.length).toBe(1);
+  expect(propMutations[0].location.line).toBe(6);
 });
 
-test("lines scope keeps each file's changed lines when several files change", (t) => {
+test("lines scope keeps each file's changed lines when several files change", () => {
   const { root, file } = createRepo("local a = 1\nlocal b = 2\nlocal c = 3\nlocal d = 4\nreturn a\n");
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   const other = path.join(root, "Other.luau");
   fs.writeFileSync(other, "local e = 1\nlocal f = 2\nreturn e\n");
   git(root, "add", ".");
@@ -99,13 +99,13 @@ test("lines scope keeps each file's changed lines when several files change", (t
   fs.writeFileSync(other, "local e = 1\nlocal f = 2\nreturn f\n");
 
   const plan = createGitScopePlan(root, { scope: "lines" });
-  assert.deepEqual(plan.changedLines.get("Component.luau"), [{ start: 2, end: 2 }, { start: 5, end: 5 }]);
-  assert.deepEqual(plan.changedLines.get("Other.luau"), [{ start: 3, end: 3 }]);
+  expect(plan.changedLines.get("Component.luau")).toEqual([{ start: 2, end: 2 }, { start: 5, end: 5 }]);
+  expect(plan.changedLines.get("Other.luau")).toEqual([{ start: 3, end: 3 }]);
 });
 
-test("lines scope considers secondary evidence highlights for aggregated diagnostics", async (t) => {
+test("lines scope considers secondary evidence highlights for aggregated diagnostics", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-highlight-lines-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   git(root, "init", "-b", "main");
 
   fs.writeFileSync(path.join(root, "MemoChild.luau"), `local React = require(script.Parent.React)
@@ -131,24 +131,24 @@ return Component
 
   fs.writeFileSync(component, baseline.replace("    onHover =", "      onHover ="));
   const report = await scanProjectWithScope(root, { scope: "lines" });
-  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rerender-unstable-memo-props"), true);
+  expect(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/rerender-unstable-memo-props")).toBe(true);
 });
 
-test("staged scope analyzes index content instead of later worktree edits", async (t) => {
+test("staged scope analyzes index content instead of later worktree edits", async () => {
   const { root, file } = createRepo(cleanSource);
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.writeFileSync(file, brokenSource);
   git(root, "add", "Component.luau");
   fs.writeFileSync(file, cleanSource);
 
   const report = await scanProjectWithScope(root, { scope: "files", staged: true });
-  assert.equal(report.scope, "staged");
-  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation"), true);
+  expect(report.scope).toBe("staged");
+  expect(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation")).toBe(true);
 });
 
-test("changed scope preserves the baseline identity of renamed files", async (t) => {
+test("changed scope preserves the baseline identity of renamed files", async () => {
   const { root } = createRepo(brokenSource);
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   const renamed = path.join(root, "RenamedComponent.luau");
   git(root, "mv", "Component.luau", "RenamedComponent.luau");
   fs.writeFileSync(
@@ -160,13 +160,13 @@ test("changed scope preserves the baseline identity of renamed files", async (t)
   );
 
   const report = await scanProjectWithScope(root, { scope: "changed" });
-  assert.deepEqual(report.changedFiles, ["RenamedComponent.luau"]);
-  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation"), false);
+  expect(report.changedFiles).toEqual(["RenamedComponent.luau"]);
+  expect(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation")).toBe(false);
 });
 
-test("changed scope batch-loads baseline files whose paths contain spaces", async (t) => {
+test("changed scope batch-loads baseline files whose paths contain spaces", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "react-luau-doctor-space-path-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
   git(root, "init", "-b", "main");
   const file = path.join(root, "Component With Space.luau");
   fs.writeFileSync(file, cleanSource);
@@ -175,6 +175,6 @@ test("changed scope batch-loads baseline files whose paths contain spaces", asyn
   fs.writeFileSync(file, brokenSource);
 
   const report = await scanProjectWithScope(root, { scope: "changed", cache: false });
-  assert.deepEqual(report.changedFiles, ["Component With Space.luau"]);
-  assert.equal(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation"), true);
+  expect(report.changedFiles).toEqual(["Component With Space.luau"]);
+  expect(report.diagnostics.some((diagnostic) => diagnostic.rule === "react-luau/no-prop-mutation")).toBe(true);
 });
